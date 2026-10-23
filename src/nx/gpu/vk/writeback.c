@@ -15,6 +15,9 @@ void vk_result_end(void) { t_result_depth--; }
 int vk_result_landing(void) { return t_result_depth != 0; }
 
 void vk_write_changed(u64 addr, const u8* res, const u8* org, u32 size) {
+	/* No shader-written bytes means no guest read, allocation or flush. */
+	if (!size || !memcmp(res, org, size))
+		return;
     vk_result_begin();
     vk_rt_before_write(addr, size);
     u8* dst = gmem_ptr(addr, size);
@@ -27,23 +30,37 @@ void vk_write_changed(u64 addr, const u8* res, const u8* org, u32 size) {
         gmem_read(addr, tmp, size);
         cur = tmp;
     }
-    for (u32 i = 0; i < size;) {
-        if (i + 8 <= size && !memcmp(res + i, org + i, 8)) {
-            i += 8;
-            continue;
-        }
-        if (res[i] == org[i] || cur[i] != org[i]) {
-            i++;
-            continue;
-        }
-        u32 s = i;
-        while (i < size && res[i] != org[i] && cur[i] == org[i]) i++;
-        if (dst)
-            memcpy(dst + s, res + s, i - s);
-        else
-            gmem_write(addr + s, res + s, i - s);
-        changed = 1;
-    }
+	for (u32 i = 0; i < size;) {
+		u32 n = size - i < 1024 ? size - i : 1024;
+		u32 end = i + n;
+
+		/* Large storage bindings often change only a few bytes. Let the
+		 * host's vectorized comparison skip their unchanged ranges.
+		 */
+		if (!memcmp(res + i, org + i, n)) {
+			i = end;
+			continue;
+		}
+		do {
+			if (end - i >= 8 && !memcmp(res + i, org + i, 8)) {
+				i += 8;
+				continue;
+			}
+			if (res[i] == org[i] || cur[i] != org[i]) {
+				i++;
+				continue;
+			}
+			u32 start = i;
+
+			while (i < size && res[i] != org[i] && cur[i] == org[i])
+				i++;
+			if (dst)
+				memcpy(dst + start, res + start, i - start);
+			else
+				gmem_write(addr + start, res + start, i - start);
+			changed = 1;
+		} while (i < end);
+	}
     free(tmp);
     if (changed) gpu_mem_written_shader(addr, size); /* other GPU virtual addresses can alias these guest pages */
     vk_result_end();
