@@ -50,6 +50,7 @@ typedef struct {
 int g_shader_texture_arrays;
 int g_shader_stage_point_size;
 int g_shader_output_layer = 1;
+int g_shader_viewport_index = 3;
 int g_shader_geometry = 1;
 int g_shader_float16 = 1;
 int g_shader_tessellation = 1;
@@ -1650,7 +1651,7 @@ static int supported(u64 w, int op) {
             u32 addr = B(w, 20, 10), count = B(w, 47, 2) + 1;
             if (B(w, 8, 8) != 255 || !(B(w, 0, 8) + count <= 255 || (B(w, 0, 8) == 255 && count == 1))) return 0;
             if (B(w, 31, 1)) return addr + count * 4 <= 0x200;
-            return ((addr == 0x64 || addr == 0x6c) && count == 1) || (addr >= 0x70 && addr + count * 4 <= 0x80) ||
+            return ((addr == 0x64 || addr == 0x68 || addr == 0x6c) && count == 1) || (addr >= 0x70 && addr + count * 4 <= 0x80) ||
                    (addr >= 0x80 && addr + count * 4 <= 0x280) || (addr >= 0x2c0 && addr + count * 4 <= 0x2e0);
         }
         /* OUT emits and ends geometry primitives on the stream its third operand names */
@@ -2339,6 +2340,7 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
     u8 outputs_used[32] = {0};
     int indexed_store = 0;
     int position_used = 0, layer_output_used = 0, layer_input_used = 0, point_size_used = 0;
+    int viewport_used = 0;
     /* the stages between the vertex and fragment ones: their input arrays' length (32 for tessellation, the input
        primitive's vertices for geometry), the control program's output vertices, and what they read and write */
     int between = stage == ST_TCS || stage == ST_TES || stage == ST_GS;
@@ -2594,6 +2596,8 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
                     inputs_used[(location - 0x80) >> 4] = 1;
                 else if (location == 0x64)
                     layer_output_used = 1;
+                else if (location == 0x68)
+                    viewport_used = 1;
                 else if (location == 0x6c)
                     point_size_used = 1;
                 else if (location >= 0x2c0 && location < 0x2e0) {
@@ -3457,6 +3461,8 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
        program's input and output primitives */
     if (stage == ST_TCS && (!out_vertices || out_vertices > 32))
         return direct_reject_with_buffers(si, "patch output vertices", pop_targets, gb_at);
+    if (viewport_used && (stage == ST_TCS || !(g_shader_viewport_index & (stage == ST_GS ? 2 : 1))))
+        return direct_reject_with_buffers(si, "viewport index output unavailable", pop_targets, gb_at);
     if (stage == ST_TCS && (clip_used || layer_output_used || point_size_used))
         return direct_reject_with_buffers(si, "clip distance, layer or point size in tessellation control", pop_targets,
                                           gb_at);
@@ -3547,6 +3553,7 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
     /* Maximum VS interface: point size, position, 32 outputs, 32 inputs, 18 buffers, 32 samplers, push constants. */
     u32 outputs[8], inputs[32] = {0}, input_vec_type[32] = {0}, input_component_type[32] = {0};
     u32 output_attrs[32] = {0}, position = 0, point_size = 0, layer_output = 0, layer_input = 0;
+    u32 viewport_output = 0;
     /* transform feedback: each output word's buffer (0xFF none) and offset, the outputs written to a private vec4,
        and their component outputs (xfb_store) */
     u8 xfb_buf[160], attr_private[32] = {0};
@@ -3599,6 +3606,11 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
             if (stage == ST_GS) spv_emit_capability(&c->emit, 24);  /* GeometryPointSize */
             point_size = spv_emit_point_size_output(&c->emit, c->f32_type);
             interfaces[count++] = point_size;
+        }
+        if (viewport_used) {
+            spv_emit_capability(&c->emit, stage == ST_GS ? 57 : 70); /* MultiViewport, ShaderViewportIndex */
+            viewport_output = spv_emit_interface_variable(&c->emit, 3, i32_type, c->u32_type, 0, 10, 0, 0);
+            interfaces[count++] = viewport_output;
         }
         if (layer_output_used) {
             layer_output = spv_emit_layer_output(&c->emit, i32_type);
@@ -4338,6 +4350,10 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
                     if (point_size)
                         spv_emit_store(&c->emit, point_size,
                                        reg_read_as(c, d + k, c->f32_type));
+                    continue;
+                }
+                if (location == 0x68) {
+                    spv_emit_store(&c->emit, viewport_output, reg_read_as(c, d + k, i32_type));
                     continue;
                 }
                 if (location == 0x64) {
@@ -7046,6 +7062,7 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
     next.clip_enable = si->clip_enable;
     memcpy(next.gp_skip_mask, si->gp_skip_mask, sizeof next.gp_skip_mask);
     next.uses_clip_mask = clip_used;
+    next.writes_viewport = viewport_used;
     next.rt_int_mask = si->rt_int_mask;
     next.rt_sint_mask = si->rt_sint_mask;
     next.tex_int_mask = si->tex_int_mask;

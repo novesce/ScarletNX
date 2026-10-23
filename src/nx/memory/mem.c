@@ -971,14 +971,30 @@ int mem_unmap_physical(u64 addr, u64 size) {
     if (!size || addr >= AS_END || size > AS_END - addr) return MEM_BADSTATE;
     mapping_begin();
     mem_lock();
-    for (i = blk_index_nl(addr); i < g_nblk && g_blk[i].addr < end; i++)
-        if (g_blk[i].state != MS_FREE && (g_blk[i].state != MS_NORMAL || g_blk[i].attr || g_blk[i].pool))
-            r = MEM_BADSTATE; /* the pool's pages are a view's (old firmware's MapMemory into the alias region) */
+    for (i = blk_index_nl(addr); i < g_nblk && g_blk[i].addr < end; i++) {
+        const MemBlock* b = &g_blk[i];
+        if (b->state == MS_FREE) continue;
+        if (b->state != MS_NORMAL || b->attr) {
+            r = MEM_BADSTATE;
+            break;
+        }
+        if (b->pool) {
+            u64 lo = b->addr > addr ? b->addr : addr, hi = blk_end(b) < end ? blk_end(b) : end;
+            u64 off = b->pool - 1 + lo - b->addr;
+            /* GPU ownership promotes ordinary memory into the pool too. Only borrowed pages are aliases. */
+            if (pool_mapped_elsewhere_nl(off, hi - lo, lo) || host_view_nl(off, hi - lo)) {
+                r = MEM_BADSTATE;
+                break;
+            }
+        }
+    }
     if (!r) {
+        own_drop(addr, size); /* Cancel pending GPU writes before releasing their backing pages. */
         for (i = blk_index_nl(addr); i < g_nblk && g_blk[i].addr < end; i++) {
             const MemBlock* b = &g_blk[i];
             u64 lo = b->addr > addr ? b->addr : addr, hi = blk_end(b) < end ? blk_end(b) : end;
             if (b->state != MS_FREE) freed += hi - lo;
+            if (b->pool) pool_free_nl(b->pool - 1 + lo - b->addr, hi - lo);
         }
         unmap_nl(addr, size);
         __atomic_store_n(&g_phys_mapped, freed < g_phys_mapped ? g_phys_mapped - freed : 0, __ATOMIC_RELEASE);

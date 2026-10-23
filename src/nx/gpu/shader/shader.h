@@ -89,6 +89,7 @@ typedef struct {
        reject */
     u32 early_fragment_tests;
     ShXfb xfb; /* key: transform feedback's capture of this program's outputs */
+    int writes_viewport; /* the last vertex stage selects one of the 16 viewport/scissor pairs */
 } ShaderInfo;
 #define SH_DC_COLOR_MAX  10 /* slots tex_dc_color_funcs has room for */
 /* Each stage has a descriptor set (shader_vk_set), its bindings grouped by kind. */
@@ -117,6 +118,8 @@ extern int g_shader_stage_point_size;
 /* vertex and tessellation programs may write the layer (shaderOutputLayer, the ShaderLayer capability); without it
    their layer writes go away (layer 0). 1 offline */
 extern int g_shader_output_layer;
+/* ViewportIndex output: bit 0 vertex/evaluation, bit 1 geometry. 3 offline. */
+extern int g_shader_viewport_index;
 /* the Geometry capability, for fragment programs reading Layer or PrimitiveId */
 extern int g_shader_geometry;
 /* shaderFloat16, which fp16 texture results need. 1 offline */

@@ -1688,8 +1688,9 @@ static struct {
     VkPipelineLayout layout; /* the one sets were bound through: another may disturb them */
     VkDescriptorSet sets[5];
     u32 fb, cull, front, topo, restart, discard, bias_on, dt, dw, dcmp, dbounds, st;
-    VkViewport vp;
-    VkRect2D sc;
+    VkViewport vp[16];
+    VkRect2D sc[16];
+    u32 viewports;
     float lw, bias[3], bc[4];
     u32 sfront[7], sback[7];
 } g_dyn;
@@ -1713,16 +1714,16 @@ u64 g_vk_drawn, g_vk_skipped;
 /* NVB197_SET_VIEWPORT_COORDINATE_SWIZZLE (0x0A18) can negate Y before the scale and offset. A negative Vulkan
    height implements the same mapping without changing texture coordinates or guest render-target contents.
    Reference: NVIDIA open-gpu-doc/classes/3d/clb197.h. */
-VkViewport vk_render_viewport(const u32* r) {
+VkViewport vk_render_viewport_at(const u32* r, u32 index) {
     float vt[6];
-    memcpy(vt, &r[0x280], sizeof vt);
+    memcpy(vt, &r[0x280 + index * 8], sizeof vt);
     float sx = vt[0], sy = vt[1], tx = vt[3], ty = vt[4], ax = sx < 0 ? -sx : sx, ay = sy < 0 ? -sy : sy;
     VkViewport vp;
     int small = 2 * ax < 1 || 2 * ay < 1;
     if (small != !(r[0x64B] & 1))
         LOG_LIMIT(1, "vulkan: viewport scale %g x %g with transform enable %x\n", sx, sy, r[0x64B]);
     if (small) {
-        u32 vx = r[0x300], vy = r[0x301];
+        u32 vx = r[0x300 + index * 4], vy = r[0x301 + index * 4];
         vp = (VkViewport){vk_scf(vx & 0xFFFF), vk_scf(vy & 0xFFFF), vk_scf(vx >> 16), vk_scf(vy >> 16), 0, 1};
     } else
         vp = (VkViewport){vk_scf(tx - ax), vk_scf(ty - sy), vk_scf(2 * ax), vk_scf(2 * sy), 0, 1};
@@ -1731,13 +1732,13 @@ VkViewport vk_render_viewport(const u32* r) {
         vp.y += vk_scf((float)(r[0x3FE] >> 16));
         vp.height = -vp.height;
     }
-    if (((r[0x286] >> 4) & 7) == 3) {
+    if (((r[0x286 + index * 8] >> 4) & 7) == 3) {
         vp.y += vp.height;
         vp.height = -vp.height;
     }
     float zn, zf;
-    memcpy(&zn, &r[0x302], 4);
-    memcpy(&zf, &r[0x303], 4);
+    memcpy(&zn, &r[0x302 + index * 4], 4);
+    memcpy(&zf, &r[0x303 + index * 4], 4);
     if (vt[2] != 0.0f || vt[5] != 0.0f) {
         zn = vt[5] - ((r[0x35F] & 1) ? 0.0f : vt[2]);
         zf = vt[5] + vt[2];
@@ -1746,6 +1747,7 @@ VkViewport vk_render_viewport(const u32* r) {
     vp.maxDepth = zf < 0 ? 0 : zf > 1 ? 1 : zf;
     return vp;
 }
+VkViewport vk_render_viewport(const u32* r) { return vk_render_viewport_at(r, 0); }
 /* the vertices of the geometry program's input primitive: the tessellator's output primitive (0xC8: the domain in
    bits 0-1, isolines 0, and the output in bits 8-9, points 0), or the draw's topology */
 static u32 gs_input_vertices(u32 topology, int tes_on, u32 params) {
@@ -2677,29 +2679,43 @@ retry:
         rec_CmdBindVertexBuffers2(cb, 0, k->nbind, vbuf, voff, NULL, g_vk.has_dynamic_stride ? pl->stride : NULL);
 
     VkViewport vp = vk_render_viewport(r);
-    if (!(vp.width > 0) || !(vp.height != 0)) {
-        draw_images_discard(&images);
-        return; /* no area: nothing is drawn (and Vulkan takes none) */
-    }
-    DYNV(vp, vp, rec_CmdSetViewportWithCount(cb, 1, &vp));
-    VkRect2D sc = {{0, 0}, g_rp.ext};
-    if (r[0x380] & 1) {
-        u32 xs = r[0x381], ys = r[0x382];
-        i32 x0 = (i32)vk_scf(xs & 0xFFFF), x1 = (i32)vk_scf(xs >> 16), y0 = (i32)vk_scf(ys & 0xFFFF),
-            y1 = (i32)vk_scf(ys >> 16);
-        if (r[0x4EB] & 1) {
-            i32 clip_height = (i32)vk_scf((float)(r[0x3FE] >> 16));
-            i32 old_y0 = y0;
-            y0 = clip_height - y1;
-            y1 = clip_height - old_y0;
+    u32 viewports = last->si.writes_viewport ? 16 : 1;
+    VkViewport viewport[16] = {{0}};
+    VkRect2D scissor[16] = {{{0}}};
+    for (u32 i = 0; i < viewports; i++) {
+        viewport[i] = vk_render_viewport_at(r, i);
+        int area = viewport[i].width > 0 && viewport[i].height != 0;
+        if (!area) /* An empty guest viewport clips everything. Vulkan still needs a valid transform. */
+            viewport[i] = (VkViewport){0, 0, 1, 1, 0, 1};
+        VkRect2D sc = {{0, 0}, area ? g_rp.ext : (VkExtent2D){0, 0}};
+        if (area && (r[0x380 + i * 4] & 1)) {
+            u32 xs = r[0x381 + i * 4], ys = r[0x382 + i * 4];
+            i32 x0 = (i32)vk_scf(xs & 0xFFFF), x1 = (i32)vk_scf(xs >> 16);
+            i32 y0 = (i32)vk_scf(ys & 0xFFFF), y1 = (i32)vk_scf(ys >> 16);
+            if (r[0x4EB] & 1) {
+                i32 clip_height = (i32)vk_scf((float)(r[0x3FE] >> 16));
+                i32 old_y0 = y0;
+                y0 = clip_height - y1;
+                y1 = clip_height - old_y0;
+            }
+            if (x0 < 0) x0 = 0;
+            if (y0 < 0) y0 = 0;
+            if (x1 > (i32)g_rp.ext.width) x1 = (i32)g_rp.ext.width;
+            if (y1 > (i32)g_rp.ext.height) y1 = (i32)g_rp.ext.height;
+            sc = x1 > x0 && y1 > y0 ? (VkRect2D){{x0, y0}, {(u32)(x1 - x0), (u32)(y1 - y0)}}
+                                   : (VkRect2D){{0, 0}, {0, 0}};
         }
-        if (x0 < 0) x0 = 0;
-        if (y0 < 0) y0 = 0;
-        if (x1 > (i32)g_rp.ext.width) x1 = (i32)g_rp.ext.width;
-        if (y1 > (i32)g_rp.ext.height) y1 = (i32)g_rp.ext.height;
-        sc = x1 > x0 && y1 > y0 ? (VkRect2D){{x0, y0}, {(u32)(x1 - x0), (u32)(y1 - y0)}} : (VkRect2D){{0, 0}, {0, 0}};
+        scissor[i] = sc;
     }
-    DYNV(sc, sc, rec_CmdSetScissorWithCount(cb, 1, &sc));
+    if (fresh || g_dyn.viewports != viewports || memcmp(g_dyn.vp, viewport, viewports * sizeof *viewport)) {
+        memcpy(g_dyn.vp, viewport, viewports * sizeof *viewport);
+        rec_CmdSetViewportWithCount(cb, viewports, viewport);
+    }
+    if (fresh || g_dyn.viewports != viewports || memcmp(g_dyn.sc, scissor, viewports * sizeof *scissor)) {
+        memcpy(g_dyn.sc, scissor, viewports * sizeof *scissor);
+        rec_CmdSetScissorWithCount(cb, viewports, scissor);
+    }
+    g_dyn.viewports = viewports;
     /* Triangle facing has its own window-origin control, independent of viewport scale and swizzle. */
     {
         VkCullModeFlags cull = !r[0x646]           ? VK_CULL_MODE_NONE

@@ -320,6 +320,31 @@ int kobj_never_signaled(KObj* o) {
     return 0;
 }
 
+/* GPU-owned physical pages retain their normal guest state after moving into the alias pool. */
+static void test_physical_pool(void)
+{
+	u64 a = ALIAS_BASE + 0x1000000;
+	MemPoolRun runs[4];
+	u32 n;
+	MemBlock b;
+	u64 used = mem_pool_used();
+
+	CHECK(mem_map_physical(a, 0x4000, 1ull << 30) == 0);
+	CHECK(mem_own_prepare(a, 0x3000, runs, 4, &n) == 0 && n == 1);
+	CHECK(mem_pool_used() == used + 0x3000);
+	CHECK(mem_unmap_physical(a + 0x1000, 0x1000) == 0);
+	CHECK(mem_pool_used() == used + 0x2000);
+	mem_query(a, &b);
+	CHECK(b.state == MS_NORMAL && b.pool);
+	mem_query(a + 0x2000, &b);
+	CHECK(b.state == MS_NORMAL && b.pool);
+	CHECK(mem_unmap_physical(a, 0x4000) == 0);
+	CHECK(mem_pool_used() == used && g_phys_mapped == 0);
+	CHECK(mem_map_physical(a, 0x4000, 1ull << 30) == 0);
+	CHECK(gr32(a) == 0 && gr32(a + 0x2000) == 0);
+	CHECK(mem_unmap_physical(a, 0x4000) == 0);
+}
+
 int main(void) {
     hle_init();
     u64 info = STACK_BASE, off;
@@ -348,6 +373,7 @@ int main(void) {
     test_shared_memory();
     test_pool_full(info);
     test_cycles();
+    test_physical_pool();
     CHECK(mapping_depth == 0);
     if (g_ww) CHECK(plat_ww_scan(g_mem, AS_SIZE, on_written) == 0); /* tracking never went off */
     printf("memory alias: %u checks passed%s\n", checks, g_ww ? "" : " (no write tracking)");

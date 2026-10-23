@@ -130,6 +130,15 @@ static int check_viewport_orientation(void) {
     vp = vk_render_viewport(r);
     CHECK(vp.y == 120 && vp.height == -34);
     CHECK(vk_render_front_face(r) == VK_FRONT_FACE_CLOCKWISE);
+	/* Viewport 1 has independent transform, swizzle and depth registers. */
+	float second[6] = {10, 20, 0.25f, 50, 60, 0.5f};
+	memcpy(&r[0x288], second, sizeof second);
+	r[0x28e] = 0x6420;
+	r[0x4eb] = 0;
+	vp = vk_render_viewport_at(r, 1);
+	CHECK(vp.x == 40 && vp.y == 40 && vp.width == 20 && vp.height == 40);
+	CHECK(vp.minDepth == 0.25f && vp.maxDepth == 0.75f);
+	CHECK(vk_render_viewport(r).width == 64);
     return 0;
 }
 

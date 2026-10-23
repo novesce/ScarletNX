@@ -926,6 +926,7 @@ void vk_ui_draw(VkCommandBuffer cb, VkImage sc, const int safe[4]);
 void vk_ui_swapchain_gone(void); /* its images' views go before the swapchain does */
 void vk_render_clear(GpuChannel* ch, u32 v);
 VkViewport vk_render_viewport(const u32* r);
+VkViewport vk_render_viewport_at(const u32* r, u32 index);
 int vk_render_depth_clamp(const u32* r);
 VkFrontFace vk_render_front_face(const u32* r);
 void vk_render_draw_texture(GpuChannel* ch);

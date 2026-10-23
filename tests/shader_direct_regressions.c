@@ -1296,6 +1296,36 @@ static void layer_capabilities(void) {
     g_shader_output_layer = g_shader_geometry = 1;
 }
 
+static void viewport_capabilities(void)
+{
+	const u64 write = 0xeff07f800687ff00ull; /* AST a[0x68], R0 */
+	const u32 geometry_sph[3] = {1u << 24, 7u << 24, 3};
+	const u32 none[3] = {0};
+	int stages[3] = {ST_VS, ST_TES, ST_GS};
+
+	for (int i = 0; i < 3; i++) {
+		ShaderInfo info = {0};
+		size_t words = 0;
+		u32* code = translate_stage(&write, 1, stages[i], i == 2 ? geometry_sph : none, i == 2 ? 3 : 0,
+					    &info, &words);
+		check_translated(code, &info, "viewport index stores translate in vertex, evaluation and geometry stages");
+		if (code) {
+			check(info.writes_viewport, "viewport writes request indexed dynamic state");
+			check(has_builtin(code, words, 10), "viewport index has its own scalar output");
+			check(!has_builtin(code, words, 0), "viewport index is not a position component");
+			check(count_opcode(code, words, 17, i == 2 ? 57 : 70) == 1, "viewport output declares the stage capability");
+		}
+		free(code);
+	}
+	g_shader_viewport_index = 0;
+	ShaderInfo info = {0};
+	size_t words = 0;
+	u32* code = translate(&write, 1, ST_VS, &info, &words, 1);
+	check_refused(code, &info, "viewport index output unavailable", "unsupported devices refuse viewport output");
+	free(code);
+	g_shader_viewport_index = 3;
+}
+
 /* Loads from a constant buffer (a Uniform variable bound below 18) by result type: u32 or anything else. */
 static void cbuf_load_types(const u32* code, size_t words, int* integer, int* other) {
     u32 bound = words > 5 ? code[3] : 0, uint_type = 0;
@@ -2439,6 +2469,7 @@ int main(int argc, char** argv) {
     issue126_shader_modes();
     between_stages();
     layer_capabilities();
+    viewport_capabilities();
     fragment_queries();
     eden_forms();
     pexit_flow();
