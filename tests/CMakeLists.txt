@@ -457,6 +457,15 @@ snx_test_target(snx-test-crc32-helper 11)
 target_link_libraries(snx-test-crc32-helper PRIVATE snx_llvm snx_driver ${CMAKE_DL_LIBS})
 add_test(NAME crc32_helper COMMAND snx-test-crc32-helper)
 
+# the vector FP instructions with fast paths through the LLVM steps against the soft-float helpers, lane by lane,
+# with lanes the host's arithmetic can and can't take in one vector
+add_executable(snx-test-llvm-vfp-lanes llvm_vfp_lanes.c llvm_steps.c
+    "${PROJECT_SOURCE_DIR}/src/common/cpu/aarch64/cpu_helpers.c")
+snx_test_target(snx-test-llvm-vfp-lanes 11)
+snx_cpu_helpers_flags(snx-test-llvm-vfp-lanes)
+target_link_libraries(snx-test-llvm-vfp-lanes PRIVATE snx_llvm snx_driver ${CMAKE_DL_LIBS})
+add_test(NAME llvm_vfp_lanes COMMAND snx-test-llvm-vfp-lanes)
+
 add_executable(snx-test-a64-fp-arithmetic a64_fp_arithmetic_test.c
     "${PROJECT_SOURCE_DIR}/src/common/cpu/aarch64/cpu_helpers.c")
 snx_test_target(snx-test-a64-fp-arithmetic 11)
