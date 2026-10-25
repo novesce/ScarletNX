@@ -13,6 +13,8 @@ Generated modules include runtime ABI code. Game assets, keys and firmware are e
 | hactool / cJSON / ConvertUTF (`src/nx/runtime/driver/hactool`, with ScarletNX's changes) | ISC / MIT / Unicode license |
 | LibHac storage code, ported into hactool (`src/nx/runtime/driver/hactool/storage.c`) | MIT |
 | NVN's types and function prototypes (`src/nx/gpu/nvn/nvn.h`), h1k421's reconstruction, as [nxnative](https://github.com/seedds/nxnative) carries it | MIT (in the file) |
+| nvn_direct's NVN objects and command records (`src/nx/gpu/nvn/nvn_obj.h`), ported from [nxnative](https://github.com/seedds/nxnative)'s `dm/gfx/nvn/hle_nvn.c` and `nvn_obj.h`, Copyright (c) 2026 seedds | MIT |
+| NVN texture storage layout (`src/nx/gpu/nvn/nvn_tex.c`), ported from nxnative's `dm/gfx/nvn/nvn_tex.c` (MIT, seedds), whose algorithm is [deko3d](https://github.com/devkitPro/deko3d)'s `source/dk_image.cpp`, Copyright (C) 2018-2020 fincs | MIT / zlib |
 | OpenSSL | Apache 2.0 |
 | DejaVu Sans 2.37 (the shared fonts' stand-in, `cmake/shared_fonts.cmake`) | the Bitstream Vera license ([text](../dist/licenses/DejaVu/LICENSE)) |
 | yuzu's controller button glyphs (`font_nintendo_extended.cpp`, as Eden carries it) | GPL-2.0-or-later |
