@@ -119,11 +119,27 @@ static void read_targets(const DsTargets* tg, Surf** rt, Surf** zt, u32* n) {
     }
 }
 
+/* the size the targets rt (n of them) and zt have in common */
+static VkExtent2D target_extent(Surf* const* rt, const Surf* zt, u32 n) {
+    VkExtent2D ext = {~0u, ~0u};
+    for (u32 i = 0; i < n; i++)
+        if (rt[i]) {
+            if (rt[i]->sw < ext.width) ext.width = rt[i]->sw;
+            if (rt[i]->sh < ext.height) ext.height = rt[i]->sh;
+        }
+    if (zt) {
+        if (zt->sw < ext.width) ext.width = zt->sw;
+        if (zt->sh < ext.height) ext.height = zt->sh;
+    }
+    return ext;
+}
 /* opens a rendering pass on these targets (begun at its first command: rp_record), or keeps the open one if it is the
    same set. zt_ro: the depth target is
    bound read-only, so draws can sample it too (soft particles test against depth they also read). fb: color slots the
-   draw samples, which the pass needs in ATTACHMENT_FEEDBACK_LOOP_OPTIMAL (feedback_order) */
-static int render_begin(Surf** rt, Surf* zt, u32 n, int zt_ro, int srgb_write, u32 fb) {
+   draw samples, which the pass needs in ATTACHMENT_FEEDBACK_LOOP_OPTIMAL (feedback_order). area: the render area when no
+   attachment has a surface (a draw's color targets all sampled and none written, render_draw), the targets' the guest
+   bound */
+static int render_begin(Surf** rt, Surf* zt, u32 n, int zt_ro, int srgb_write, u32 fb, VkExtent2D area) {
     srgb_write = !!srgb_write;
     if (!n && !zt) return 0;
     if (!zt) zt_ro = 0;
@@ -188,6 +204,7 @@ static int render_begin(Surf** rt, Surf* zt, u32 n, int zt_ro, int srgb_write, u
         if (zt->sw < ext.width) ext.width = zt->sw;
         if (zt->sh < ext.height) ext.height = zt->sh;
     }
+    if (ext.width == ~0u) ext = area; /* nothing bound with a surface: the bound targets' size */
     u32 layers = ~0u;
     for (u32 i = 0; i < n; i++)
         if (rt[i] && rt[i]->layers < layers) layers = rt[i]->layers;
@@ -301,7 +318,7 @@ static int feedback_order(u32 read, u32 write) {
         memcpy(rt, g_rp.rt, sizeof rt);
         vk_render_end();
         g_vk_fb_restarts++;
-        return render_begin(rt, g_rp.zt, g_rp.n, g_rp.zt_ro, g_rp.srgb_write, g_rp.fb);
+        return render_begin(rt, g_rp.zt, g_rp.n, g_rp.zt_ro, g_rp.srgb_write, g_rp.fb, g_rp.ext);
     }
     VkMemoryBarrier2 mb = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
@@ -459,7 +476,7 @@ void vk_render_clear(const DrawState* ds, const DrawClear* c, const DrawOwner* o
         LOG_LIMIT(64, "gpu-trace-target: clear depth target=%llx %ux%u depth=%d stencil=%d value=%g\n",
                   (unsigned long long)zt->gva, zt->w, zt->h, v & 1, (v >> 1) & 1, dz);
     int zt_undefined = zt && zt->layout == VK_IMAGE_LAYOUT_UNDEFINED;
-    if (!render_begin(rt, zt, n, 0, ds->tgt.srgb_write, 0)) return;
+    if (!render_begin(rt, zt, n, 0, ds->tgt.srgb_write, 0, target_extent(rt, zt, n))) return;
     u32 layers = ~0u;
     for (u32 i = 0; i < g_rp.n; i++)
         if (g_rp.rt[i] && g_rp.rt[i]->layers < layers) layers = g_rp.rt[i]->layers;
@@ -753,9 +770,9 @@ static u32 attr_bytes(u32 size) {
 /* the word at byte off of stage's constant buffer bank, as ds binds it: an inline block's, or guest memory's (0 for
    an unbound buffer) */
 static u32 cb_word(const DrawState* ds, int stage, u32 bank, u64 off) {
-    const u8* in = ds_cb_inline(ds, stage, bank);
+    DsCbBlock in = ds_cb_inline(ds, stage, bank);
     u64 a = bank < DS_CBUFS ? ds->bind.cb_addr[stage][bank] : 0;
-    return in ? ds_inline_word(in, off) : a ? gmem_r32(a + off) : 0;
+    return in.bytes ? ds_inline_word(in, off) : a ? gmem_r32(a + off) : 0;
 }
 static u32 tex_handle(const DrawState* ds, int stage, u32 tcb, const ShTex* st) {
     u32 ci = (st->bindless ? st->bl_cbuf : tcb) & 31, c2i = st->bl2_cbuf & 31;
@@ -1040,21 +1057,21 @@ static int cb_get(const DrawState* ds, int stage, int i, u32 sz, VkBuffer* buf, 
         const u8* in; /* or the inline block staged, of generation gen */
         u64 gen;
     } c[5][18];
-    const u8* in = ds_cb_inline(ds, stage, (u32)i);
-    if (in) {
-        if (c[stage][i].in == in && c[stage][i].gen == ds->gen[DS_INLINE] && c[stage][i].frame == vk_submit_number() &&
-            c[stage][i].sz >= sz) {
+    DsCbBlock in = ds_cb_inline(ds, stage, (u32)i);
+    if (in.bytes) {
+        if (c[stage][i].in == in.bytes && c[stage][i].gen == ds->gen[DS_INLINE] &&
+            c[stage][i].frame == vk_submit_number() && c[stage][i].sz >= sz) {
             *buf = c[stage][i].buf;
             *off = c[stage][i].off;
             return 1;
         }
         u8* p = vk_stage(sz, vk_stage_align(), buf, off);
         if (!p) return 0;
-        u32 n = sz < DS_INLINE_BANK ? sz : DS_INLINE_BANK;
-        memcpy(p, in, n);
+        u32 n = sz < in.size ? sz : in.size;
+        memcpy(p, in.bytes, n);
         memset(p + n, 0, sz - n); /* past the block: zeros, as an unbound buffer reads */
         c[stage][i].a = 0;
-        c[stage][i].in = in;
+        c[stage][i].in = in.bytes;
         c[stage][i].gen = ds->gen[DS_INLINE];
         c[stage][i].frame = vk_submit_number();
         c[stage][i].sz = sz;
@@ -1119,7 +1136,7 @@ static void cb_prefetch(const DrawState* ds, int stage, const VkSh* s, int step)
     for (u32 m = s->si.cbuf_mask & 0x3FFFF; m; m &= m - 1) {
         int i = __builtin_ctz(m);
         u64 a = ds->bind.cb_addr[stage][i];
-        if (a && !ds_cb_inline(ds, stage, (u32)i)) vk_buf_prefetch(a, cb_range(ds, stage, s, i), step);
+        if (a && !ds_cb_inline(ds, stage, (u32)i).bytes) vk_buf_prefetch(a, cb_range(ds, stage, s, i), step);
     }
 }
 
@@ -1418,20 +1435,20 @@ static int tex_tables_set(const DrawState* ds, int stage, const VkSh* s, const i
     for (int table = 0; table < count; table++) {
         const ShTex* st = &s->si.tex[first[table]];
         u32 shift = (u32)st->flags >> 4, bank = st->bl_cbuf & 31;
-        const u8* in = ds_cb_inline(ds, stage, bank);
+        DsCbBlock in = ds_cb_inline(ds, stage, bank);
         u64 cba = bank < 18 ? ds->bind.cb_addr[stage][bank] : 0;
-        u32 size = in ? DS_INLINE_BANK : cba ? ds->bind.cb_size[stage][bank] : 0;
-        if (!in && (size > 65536 || !size)) size = 65536;
+        u32 size = in.bytes ? in.size : cba ? ds->bind.cb_size[stage][bank] : 0;
+        if (!in.bytes && (size > 65536 || !size)) size = 65536;
         for (u32 k = 0; k < SNX_TEX_ARRAY; k++) {
             u32 at = st->cbuf_off * 4 + (k << shift);
             /* past the constant buffer: the null texture. A handle of 0 is header 0 with sampler 0, a texture like any
                other (edenprobe's bindless case samples it) */
-            if ((!cba && !in) || at + 4 > size) {
+            if ((!cba && !in.bytes) || at + 4 > size) {
                 map[table * SNX_TEX_ARRAY + k] = NO_ENTRY;
                 need_null = 1;
                 continue;
             }
-            u32 handle = in ? ds_inline_word(in, at) : gmem_r32(cba + at);
+            u32 handle = in.bytes ? ds_inline_word(in, at) : gmem_r32(cba + at);
             u32 id = 0;
             while (id < used && handles[id] != handle) id++;
             if (id == used) {
@@ -1531,7 +1548,7 @@ static void draw_storage_read(const DrawState* ds, VkDrawStorage* draw, VkSh* vs
     for (int s = 0; s < 2; s++) {
         if (!sh[s]) continue;
         int stage = s ? 4 : 0;
-        u64 cb0 = ds_cb_inline(ds, stage, 0) ? 0 : ds->bind.cb_addr[stage][0];
+        u64 cb0 = ds_cb_inline(ds, stage, 0).bytes ? 0 : ds->bind.cb_addr[stage][0];
         draw->n[s] = sh[s]->si.ngbuf < 16 ? sh[s]->si.ngbuf : 16;
         if (cb0 && draw->n[s]) vk_buf_mem_need(cb0, 0x610);
         for (int i = 0; i < draw->n[s]; i++) {
@@ -1539,11 +1556,11 @@ static void draw_storage_read(const DrawState* ds, VkDrawStorage* draw, VkSh* vs
             u32 v[3] = {0, 0, 0}, desc = sh[s]->si.gbuf_cbuf_off[i];
             /* the constant buffer holding the address (SH_GBUF_*): NVN's descriptors in cbuf 0, or one of the
                program's own */
-            const u8* in = ds_cb_inline(ds, stage, SH_GBUF_BANK(desc));
-            u64 cb = in ? 0 : ds->bind.cb_addr[stage][SH_GBUF_BANK(desc)];
+            DsCbBlock in = ds_cb_inline(ds, stage, SH_GBUF_BANK(desc));
+            u64 cb = in.bytes ? 0 : ds->bind.cb_addr[stage][SH_GBUF_BANK(desc)];
             if (cb && SH_GBUF_BANK(desc)) vk_buf_mem_need(cb + SH_GBUF_OFFSET(desc), 8);
             if (cb) vk_gmem_words(cb + SH_GBUF_OFFSET(desc), v, SH_GBUF_BANK(desc) ? 2 : 3);
-            for (u32 w = 0; in && w < (SH_GBUF_BANK(desc) ? 2u : 3u); w++)
+            for (u32 w = 0; in.bytes && w < (SH_GBUF_BANK(desc) ? 2u : 3u); w++)
                 v[w] = ds_inline_word(in, SH_GBUF_OFFSET(desc) + 4 * w);
             b->size = vk_gbuf_desc(stage, desc, v, &b->addr);
             b->bare = SH_GBUF_BANK(desc) != 0;
@@ -1753,7 +1770,7 @@ static VkDescriptorSet stage_set_(const DrawState* ds, int stage, VkSh* s, Surf*
     for (int i = 0; i < s->si.nimg; i++) {
         const u32 bank = s->si.img[i].bindless ? s->si.img[i].bl_cbuf : tcb;
         u64 cba = bank < 18 ? ds->bind.cb_addr[stage][bank] : 0;
-        if ((!cba && !ds_cb_inline(ds, stage, bank)) || !images) return VK_NULL_HANDLE;
+        if ((!cba && !ds_cb_inline(ds, stage, bank).bytes) || !images) return VK_NULL_HANDLE;
         u32 handle = cb_word(ds, stage, bank, (u64)s->si.img[i].cbuf_off * 4);
         u64 tic_base = ds->bind.tex_pool;
         u32 tic[8];
@@ -2456,6 +2473,7 @@ retry:
     /* a color target the fragment shader samples but doesn't write (no output for it, or a write mask of 0) is drawn
        without: a game's lighting passes may keep the whole G-buffer bound while they read some of it, which
        Maxwell allows, and Vulkan can't sample an attachment of the pass */
+    VkExtent2D bound = target_extent(rt, zt, n); /* the render area should none of them stay */
     if (fs)
         for (u32 j = 0; j < n; j++) {
             if (!rt[j] || (((fs->si.sph[18] >> (j * 4)) & 15) && ds->blend.mask[j])) continue;
@@ -2482,7 +2500,7 @@ retry:
         if (cleared_frame != g_vk_present || cleared != zt) {
             cleared_frame = g_vk_present;
             cleared = zt;
-            if (render_begin(rt, zt, 0, 0, ds->tgt.srgb_write, 0)) {
+            if (render_begin(rt, zt, 0, 0, ds->tgt.srgb_write, 0, target_extent(rt, zt, 0))) {
                 VkClearAttachment a = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT |
                                                      (zt->f.stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0)};
                 a.clearValue.depthStencil = (VkClearDepthStencilValue){1.0f, 0};
@@ -2836,7 +2854,7 @@ retry:
     }
     int zt_undefined = zt && zt->layout == VK_IMAGE_LAYOUT_UNDEFINED;
     if (!n && !zt ? !render_begin_empty()
-                  : !render_begin(rt, zt, n, zt_ro, ds->tgt.srgb_write, fb) || !feedback_order(fb, writes)) {
+                  : !render_begin(rt, zt, n, zt_ro, ds->tgt.srgb_write, fb, bound) || !feedback_order(fb, writes)) {
         draw_images_discard(&images);
         return;
     }
