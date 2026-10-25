@@ -19,7 +19,7 @@ static int mesh_pixel_check(GpuChannel* channel, u64 target, u32 instance, const
     u64 drawn = g_vk_drawn;
     vk_lock();
     rt_clear(channel, target, 4, 4, 0, 0);
-    DrawCall call = {4, 0, 0, 3, 0, instance, 1, NULL}; /* a triangle list of 3 vertices, from instance */
+    DrawCall call = {.topology = 4, .count = 3, .base_instance = instance, .instances = 1};
     channel->r3d_dirty = ~0u; /* the registers were set directly */
     mx_draw_state_sync(channel);
     vk_render_draw(&channel->ds, &call, &channel->owner);

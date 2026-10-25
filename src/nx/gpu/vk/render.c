@@ -2121,7 +2121,7 @@ static int draw_shaders(const DrawState* ds, u32 topology, DrawShaders* o) {
 /* stream s's address and bytes (to its limit, 0 when the limit is below) */
 static u64 stream_start(const DsVertexBuffers* b, u32 s) { return b->addr[s]; }
 static u64 stream_len(const DsVertexBuffers* b, u32 s) { return b->size[s]; }
-/* the attributes (of inputs) whose offsets start at or past the end of their streams */
+/* Attributes whose relative offsets start outside their bindings. */
 static u32 attributes_empty(const DsVertexFormat* vf, const DsVertexBuffers* b, u32 inputs) {
     u32 e = 0;
     while (inputs) {
@@ -2555,7 +2555,8 @@ retry:
        same too */
     TargetFormats tf;
     target_formats(rt, zt, n, &tf);
-    if (kept && (memcmp(&tf, &g_draw.tf, sizeof tf) || attributes_empty(&ds->vfmt, &ds->vbuf, vs->si.in_mask) != g_draw.plan.empty))
+    if (kept &&
+        (memcmp(&tf, &g_draw.tf, sizeof tf) || attributes_empty(&ds->vfmt, &ds->vbuf, vs->si.in_mask) != g_draw.plan.empty))
         kept = 0;
     PipeKey made_k;
     VertexPlan made_pl;
