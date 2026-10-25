@@ -190,6 +190,7 @@ static void release(Release* r) {
     int queued;
     SNX_ZONE_V(z, "vk release queue", r->samples);
     vk_lock();
+    vk_rt_publish_linear();
     vk_gfx_image_put_aside();
     r->cgate = vk_compute_put_aside();
     pm_lock(&g_rlock);

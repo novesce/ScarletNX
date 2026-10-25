@@ -220,8 +220,11 @@ static SnxIr* new_ir(const char* name, char opt, const char* target_triple, int 
         ir->tm = LLVMCreateTargetMachineWithOptions(target, triple, options);
         LLVMDisposeTargetMachineOptions(options);
     } else {
+        /* LoongArch's calls as PCADDU18I and JIRL (CALL36, 128 GiB either way), which the medium code model makes: the
+           small one's BL (B26) reaches 128 MiB, less than a game's code, and is LLVM 19's default (later ones make
+           medium the default) */
         ir->tm = LLVMCreateTargetMachine(target, triple, cpu, features, codegen_level(opt), LLVMRelocPIC,
-                                         LLVMCodeModelDefault);
+                                         loongarch_triple(triple) ? LLVMCodeModelMedium : LLVMCodeModelDefault);
     }
 #ifdef __ANDROID__
     /* AArch64's machine outliner holds a unit's functions in memory and outlines nothing at O2: on Android that memory

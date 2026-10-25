@@ -1727,6 +1727,126 @@ static u32 fswzadd_lanes(u64 w, u32 mode) {
     return lanes;
 }
 
+/* the comparisons that write two predicates (bits 3-5 and 0-2) and read a third (39-41, PSETP two more) */
+static int predicate_comparison(int op) {
+    switch (op) {
+        case O_FSETP_R:
+        case O_FSETP_C:
+        case O_FSETP_I:
+        case O_ISETP_R:
+        case O_ISETP_C:
+        case O_ISETP_I:
+        case O_DSETP_R:
+        case O_DSETP_C:
+        case O_DSETP_I:
+        case O_HSETP2_R:
+        case O_HSETP2_C:
+        case O_HSETP2_I:
+        case O_CSETP:
+        case O_VSETP:
+        case O_PSETP: return 1;
+        default: return 0;
+    }
+}
+
+/* whether the instruction writes predicate p: the comparisons' two results, AL2P's (bits 44-46), VOTE's (45-47),
+   the carry or zero that SHFL, LOP, LOP3 and LEA give (48-50), FCHK's, and any R2P */
+static int writes_predicate(u64 w, int op, u32 p) {
+    if (predicate_comparison(op)) return B(w, 3, 3) == p || B(w, 0, 3) == p;
+    switch (op) {
+        case O_AL2P: return B(w, 44, 3) == p;
+        case O_VOTE: return B(w, 45, 3) == p;
+        case O_SHFL:
+        case O_LOP_R:
+        case O_LOP_C:
+        case O_LOP_I:
+        case O_LOP3_R:
+        case O_LEA_LR:
+        case O_LEA_LC:
+        case O_LEA_LI: return B(w, 48, 3) == p;
+        case O_FCHK_R:
+        case O_FCHK_C:
+        case O_FCHK_I: return B(w, 3, 3) == p;
+        case O_R2P_R:
+        case O_R2P_C:
+        case O_R2P_I: return 1;
+        default: return 0;
+    }
+}
+
+/* whether the instruction reads predicate p, as the translator reads them (pred_read's callers): its guard, but the
+   stack instructions' it takes no notice of, a guarded write of p (which keeps p where the guard fails), the
+   operand at bits 39-41 of the comparisons, selects and min and max, PSET's and PSETP's other two, and P2R's set */
+static int reads_predicate(u64 w, int op, u32 p) {
+    int guarded = B(w, 16, 3) != 7 || B(w, 19, 1);
+    if (B(w, 16, 3) == p && op != O_SSY && op != O_PBK && op != O_PCNT && op != O_PEXIT && op != O_CAL) return 1;
+    if (guarded && writes_predicate(w, op, p)) return 1;
+    if (op == O_PSET || op == O_PSETP) return B(w, 12, 3) == p || B(w, 29, 3) == p || B(w, 39, 3) == p;
+    if (predicate_comparison(op)) return B(w, 39, 3) == p;
+    switch (op) {
+        case O_CSET:
+        case O_VOTE:
+        case O_SEL_R:
+        case O_SEL_C:
+        case O_SEL_I:
+        case O_FSET_R:
+        case O_FSET_C:
+        case O_FSET_I:
+        case O_ISET_R:
+        case O_ISET_C:
+        case O_ISET_I:
+        case O_DSET_R:
+        case O_DSET_C:
+        case O_DSET_I:
+        case O_HSET2_R:
+        case O_HSET2_C:
+        case O_HSET2_I:
+        case O_FMNMX_R:
+        case O_FMNMX_C:
+        case O_FMNMX_I:
+        case O_IMNMX_R:
+        case O_IMNMX_C:
+        case O_IMNMX_I:
+        case O_DMNMX_R:
+        case O_DMNMX_C:
+        case O_DMNMX_I: return B(w, 39, 3) == p;
+        case O_P2R_R:
+        case O_P2R_C:
+        case O_P2R_I: return !B(w, 40, 1);
+        default: return 0;
+    }
+}
+
+/* AL2P's predicate (bits 44-46) is a range check no source describes. The NVN compiler gives every AL2P one, P0 to P6
+   in turn, and overwrites or leaves them, so a program is translated without it only when nothing can see it: no
+   instruction reads the predicate, or, in the straight run after the AL2P, a comparison or AL2P without a guard writes
+   it whole before anything reads it or branches. An EXIT without a guard ends the run, unless a PEXIT may take it */
+static int al2p_predicate_unseen(const u64* insn, u32 n, u32 at) {
+    u32 p = B(insn[at], 44, 3), i;
+    int read = 0, pexit = 0;
+    if (p == 7) return 1;
+    for (i = 11; i < n; i++) {
+        const Op* op = IDX_OK(i) && i != at ? decode(insn[i]) : NULL;
+        if (!op) continue;
+        read |= reads_predicate(insn[i], op->id, p);
+        pexit |= op->id == O_PEXIT;
+    }
+    if (!read) return 1;
+    for (i = at + 1; i < n; i++) {
+        const Op* op = IDX_OK(i) ? decode(insn[i]) : NULL;
+        if (!IDX_OK(i)) continue;
+        if (!op || reads_predicate(insn[i], op->id, p)) return 0;
+        if (B(insn[i], 16, 4) == 7 && (op->id == O_AL2P || predicate_comparison(op->id)) &&
+            writes_predicate(insn[i], op->id, p))
+            return 1;
+        if (op->id == O_BRA || op->id == O_BRX || op->id == O_JMP || op->id == O_SYNC || op->id == O_BRK ||
+            op->id == O_CONT || op->id == O_CAL || op->id == O_RET || op->id == O_PRET)
+            return 0;
+        if (op->id == O_EXIT && flow_always(insn[i])) return !pexit;
+    }
+    return 1;
+}
+
 static int supported(u64 w, int op) {
     switch (op) {
         case O_EXIT: return cc_valid(B(w, 0, 5));
@@ -1785,13 +1905,16 @@ static int supported(u64 w, int op) {
                    (sr >= 0x25 && sr <= 0x27) || sr == 0x38 || sr == 0x39 || sr == 0x3a || sr == 0x3b || sr == 0x3c ||
                    (sr >= 0x50 && sr <= 0x53);
         }
-        /* Attribute addresses use the same byte offsets as ALD/AST. The optional range predicate is not modeled. */
-        case O_AL2P: return B(w, 44, 3) == 7;
+        /* Attribute addresses use the same byte offsets as ALD/AST. The range predicate is not modeled: a program
+           whose AL2P predicate something can read is refused (al2p_predicate_unseen) */
+        case O_AL2P: return 1;
         /* ALD and AST: a patch's attributes (bit 31) are its tessellation levels and 30 vectors from 0x20. Which stage
-           has which is stage_has's. ALD.O (bit 32) reads a control program's per-vertex outputs. */
+           has which is stage_has's. ALD.O (bit 32) reads a control program's per-vertex outputs. With an index
+           register (an AL2P's result), an input vector of the header's map, at the register plus addr */
         case O_ALD: {
             u32 addr = B(w, 20, 10), count = B(w, 47, 2) + 1;
-            if (B(w, 8, 8) != 255 || B(w, 0, 8) + count > 255) return 0;
+            if (B(w, 0, 8) + count > 255) return 0;
+            if (B(w, 8, 8) != 255) return !B(w, 31, 1) && !B(w, 32, 1);
             if (B(w, 31, 1)) return addr + count * 4 <= 0x200;
             return (addr >= 0x70 && addr + count * 4 <= 0x280) ||
                    ((addr == 0x60 || addr == 0x2f4 || addr == 0x2f8 || addr == 0x2fc) && count == 1) ||
@@ -1960,6 +2083,8 @@ static int supported(u64 w, int op) {
         case O_FMNMX_I: return !B(w, 47, 1);
         case O_IPA: {
             u32 addr = B(w, 30, 8) * 4;
+            /* IPA.IDX: the address is the index register's alone (an AL2P's result), as Eden and Ryujinx read it */
+            if (B(w, 38, 1)) return B(w, 8, 8) != 255;
             return ((addr >= 0x80 && addr < 0x280) || (addr >= 0x70 && addr < 0x80) || addr == 0x60 || addr == 0x64 ||
                     addr == 0x2e0 || addr == 0x2e4 || addr == 0x3fc) &&
                    !B(w, 38, 1);
@@ -2094,6 +2219,7 @@ static int stage_has(u64 w, int op, int stage) {
     u32 addr = B(w, 20, 10);
     if (op == O_ALD) {
         if (stage == ST_FS || stage == ST_CS) return 0;
+        if (B(w, 8, 8) != 255) return 1; /* indexed: the stage's generic inputs */
         if (B(w, 31, 1)) return stage == ST_TCS || stage == ST_TES;
         if (stage == ST_TCS && B(w, 32, 1) && addr < 0x70) return 0;
         if (addr == 0x2f8 || addr == 0x2fc) return stage == ST_VS;
@@ -2928,7 +3054,19 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
             op->id != O_MEMBAR && op->id != O_CCTL && op->id != O_CCTLL && op->id != O_IDE && op->id != O_BPT &&
             op->id != O_PEXIT)
             used[d] = 1;
-        if (op->id == O_ALD || op->id == O_AST) {
+        if (op->id == O_AL2P && !al2p_predicate_unseen(insn, n, i))
+            return direct_reject(si, "AL2P range predicate read");
+        if (op->id == O_ALD && a != 255) {
+            /* an indexed read can reach any generic input the header's map lists (bytes 0x18 to 0x27, a bit for
+               each of an input's four components) */
+            u32 width = B(insn[i], 47, 2) + 1, vertex = B(insn[i], 39, 8);
+            used[a] = 1;
+            if (between && vertex < 255) used[vertex] = 1;
+            for (u32 k = 0; k < width; k++)
+                if (d + k < 255) used[d + k] = 1;
+            for (u32 v = 0; v < 32; v++)
+                if ((sph[6 + v / 8] >> (v % 8 * 4)) & 15) inputs_used[v] = 1;
+        } else if (op->id == O_ALD || op->id == O_AST) {
             u32 addr = B(insn[i], 20, 10), width = B(insn[i], 47, 2) + 1, vertex = B(insn[i], 39, 8);
             int input = op->id == O_ALD && !(stage == ST_TCS && B(insn[i], 32, 1));
             if (op->id == O_AST && a != 255) indexed_store = 1;
@@ -3292,8 +3430,10 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
             int bindless;
             if (buffer && stage != ST_CS) return direct_reject(si, "buffer surface outside compute");
             /* a fragment program's 2D loads are texel fetches, as a compute program's are: render.c binds the raw
-               view their slot asks for */
-            if (stage != ST_CS && stage != ST_FS) return direct_reject(si, "surface operation outside supported stage");
+               view their slot asks for. A vertex program stores and reduces through images as a fragment one does
+               (one game filters a texture so, a vertex for each texel, with no compute at all) */
+            if (stage != ST_CS && stage != ST_FS && (stage != ST_VS || op->id == O_SULD))
+                return direct_reject(si, "surface operation outside supported stage");
             bank = 0;
             off = B(insn[i], 36, 13);
             handle = B(insn[i], 39, 8);
@@ -3621,7 +3761,17 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
                     if (mask & (1u << component) && dst < 255) used[dst++] = 1;
             }
         }
-        if (op->id == O_IPA) {
+        if (op->id == O_IPA && B(insn[i], 38, 1)) {
+            /* indexed: any generic input the header's map gives a mode, the perspective ones through FragCoord */
+            if (B(insn[i], 51, 1)) needs_glsl = 1;
+            used[a] = 1;
+            for (u32 v = 0; v < 32; v++)
+                if ((sph[6 + v / 4] >> (v % 4 * 8)) & 0xff) {
+                    inputs_used[v] = 1;
+                    if (ipa_interpolation(sph, v) == 2) needs_fragcoord = 1;
+                }
+            if (B(insn[i], 54, 2) == 1 && b < 255) used[b] = 1;
+        } else if (op->id == O_IPA) {
             if (B(insn[i], 51, 1)) needs_glsl = 1;
             u32 addr = B(insn[i], 30, 8) * 4;
             if (addr == 0x64) {
@@ -4710,6 +4860,39 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
                         : sr == 0x1d && stage != ST_FS ? spv_emit_constant_u32(&c->emit, c->u32_type, 0x00ff0000u)
                                                        : c->zero;
             reg_write(c, d, value);
+        } else if (op == O_ALD && a != 255) {
+            /* indexed: each word at the register plus addr (and 4 for the next) is a declared input's component,
+               the input picked by the address's vector (0x80 the first generic one, 0x70 the position after the
+               vertex stage) and the component by its word. An address of no declared input reads 0, as in Eden */
+            u32 width = B(w, 47, 2) + 1;
+            u32 vertex = between ? shared_index(c, reg_read(c, B(w, 39, 8)), in_vertices) : 0;
+            u32 base = spv_emit_iadd_u32(&c->emit, c->u32_type, reg_read(c, a),
+                                         spv_emit_constant_u32(&c->emit, c->u32_type, B(w, 20, 10)));
+            u32 two = spv_emit_constant_u32(&c->emit, c->u32_type, 2),
+                three = spv_emit_constant_u32(&c->emit, c->u32_type, 3);
+            u32 four = spv_emit_constant_u32(&c->emit, c->u32_type, 4);
+            for (u32 k = 0; k < width; k++) {
+                u32 offset = k ? spv_emit_iadd_u32(&c->emit, c->u32_type, base,
+                                                   spv_emit_constant_u32(&c->emit, c->u32_type, k * 4))
+                               : base;
+                u32 vector = spv_emit_shift_right_u32(&c->emit, c->u32_type, offset, four);
+                u32 component = spv_emit_bitwise_and_u32(
+                    &c->emit, c->u32_type, spv_emit_shift_right_u32(&c->emit, c->u32_type, offset, two), three);
+                u32 value = c->zero;
+                for (u32 v = 0; v <= 32; v++) {
+                    u32 variable = v < 32 ? inputs[v] : between ? position_in : 0;
+                    if (!variable) continue;
+                    u32 type = v < 32 ? input_component_type[v] : c->f32_type;
+                    u32 bits = spv_emit_load(
+                        &c->emit, type,
+                        spv_emit_interface_scalar_pointer(&c->emit, 1, type, variable, vertex, component));
+                    if (type != c->u32_type) bits = spv_emit_bitcast(&c->emit, c->u32_type, bits);
+                    u32 at = spv_emit_constant_u32(&c->emit, c->u32_type, v < 32 ? 8 + v : 7);
+                    value = spv_emit_select(&c->emit, c->u32_type, spv_emit_i_equal(&c->emit, c->bool_type, vector, at),
+                                            bits, value);
+                }
+                reg_write(c, d + k, value);
+            }
         } else if (op == O_ALD && (between || B(w, 31, 1))) {
             u32 addr = B(w, 20, 10), width = B(w, 47, 2) + 1, vertex = 0, k;
             int patch = B(w, 31, 1);
@@ -6488,6 +6671,49 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
             u32 value = spv_emit_select(&c->emit, c->u32_type, test, truth, c->zero);
             if (B(w, 47, 1)) flags_logic(c, value);
             reg_write(c, d, value);
+        } else if (op == O_IPA && B(w, 38, 1)) {
+            /* indexed: the generic input at the index register's address, picked among those the header gives a
+               mode by its vector (one nothing feeds reads 0, 0, 0, 1) and interpolated in its own mode, then the
+               instruction's mode and saturation, as below */
+            u32 offset = reg_read(c, a);
+            u32 vector = spv_emit_shift_right_u32(&c->emit, c->u32_type, offset,
+                                                  spv_emit_constant_u32(&c->emit, c->u32_type, 4));
+            u32 component =
+                spv_emit_bitwise_and_u32(&c->emit, c->u32_type,
+                                         spv_emit_shift_right_u32(&c->emit, c->u32_type, offset,
+                                                                  spv_emit_constant_u32(&c->emit, c->u32_type, 2)),
+                                         spv_emit_constant_u32(&c->emit, c->u32_type, 3));
+            u32 last =
+                spv_emit_i_equal(&c->emit, c->bool_type, component, spv_emit_constant_u32(&c->emit, c->u32_type, 3));
+            u32 wcoord = fragcoord
+                             ? spv_emit_vec4_extract(&c->emit, c->f32_type, spv_emit_load(&c->emit, vec4, fragcoord), 3)
+                             : 0;
+            u32 value = zero_f;
+            for (u32 v = 0; v < 32; v++) {
+                u32 bits;
+                if (!((sph[6 + v / 4] >> (v % 4 * 8)) & 0xff)) continue;
+                if (inputs[v]) {
+                    bits = spv_emit_load(
+                        &c->emit, c->f32_type,
+                        spv_emit_interface_scalar_pointer(&c->emit, 1, c->f32_type, inputs[v], 0, component));
+                    if (ipa_interpolation(sph, v) == 2 && wcoord) {
+                        bits = spv_emit_fmul(&c->emit, c->f32_type, bits, wcoord);
+                        spv_emit_no_contraction(&c->emit, bits);
+                    }
+                } else /* no output feeds it (in_unfed_mask) */
+                    bits = spv_emit_select(&c->emit, c->f32_type, last,
+                                           spv_emit_constant_f32(&c->emit, c->f32_type, 1.0f), zero_f);
+                value = spv_emit_select(&c->emit, c->f32_type,
+                                        spv_emit_i_equal(&c->emit, c->bool_type, vector,
+                                                         spv_emit_constant_u32(&c->emit, c->u32_type, 8 + v)),
+                                        bits, value);
+            }
+            if (B(w, 54, 2) == 1) {
+                value = spv_emit_fmul(&c->emit, c->f32_type, value, reg_read_as(c, b, c->f32_type));
+                spv_emit_no_contraction(&c->emit, value);
+            }
+            value = float_saturate(c, value, B(w, 51, 1));
+            reg_write_as(c, d, value, c->f32_type);
         } else if (op == O_IPA) {
             u32 addr = B(w, 30, 8) * 4;
             u32 component = (addr >> 2) & 3;

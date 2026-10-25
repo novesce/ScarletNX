@@ -6,6 +6,7 @@
    over the stand-in for its slot */
 #include "nx/hle/services/pl.c"
 #include "nx/hle/hle.c"
+#include "kobj_ids.h" /* the kernel objects the stubs make, as ids */
 
 static unsigned checks;
 #define CHECK(x)                                                                                                       \
@@ -143,11 +144,6 @@ static void covered(u32 off, u32 size, int own_glyphs) {
     }
     if (own_glyphs) CHECK(cmap_lookup(shm + off, size, 0xE0E0) != space); /* the button glyph is its own */
     else CHECK(cmap_lookup(shm + off, size, 'A') != 0);
-}
-
-int kobj_never_signaled(KObj* o) {
-    (void)o;
-    return 0;
 }
 
 int main(void) {

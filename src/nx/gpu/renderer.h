@@ -81,8 +81,13 @@ typedef struct Renderer {
     int (*blit_mem)(const GpuBlit* b);
     void (*rt_flush)(u64 gva);  /* a render target at gva is about to be read from guest memory: write it back */
     void (*rt_reload)(u64 gva); /* guest memory under a render target changed: load it again */
-    /* a compute launch (q: its QMD's 64 words, converted to host numbers by compute.c) */
-    void (*dispatch)(GpuChannel* ch, const u32* q, u64 code);
+    /* A compute dispatch of the state d (gpu/draw_state.h), which the front end fills for the call (the compute
+       engine's launch description, the NVN replay's own fill) and the renderer only reads: the program, the grid,
+       block and shared memory, the constant buffers (guest memory or d's inline blocks: NVN's driver banks, the
+       dispatch size at 0x200 of bank 0, the uniform buffer table from 0x210, storage buffers from 0x310 and texture
+       handles in bank 2 with tex_bank 2), and the texture and sampler pools in guest memory. Storage buffers are read
+       through constant buffer 0 as a draw's are. Called on the GPU thread */
+    void (*dispatch)(const DispatchState* d);
     /* gmem_read and gmem_ptr land pending compute or graphics storage writes before reading memory */
     void (*cs_mem_need)(u64 a, u64 n);
     /* 0 when no pending result or queued release covers [a, a + n): a read needs none of the mem_need hooks */
@@ -110,22 +115,41 @@ typedef struct Renderer {
        clears under it run on (the channel's render_pred), held until render_predicate_drop */
     int (*render_predicate)(u64 a, int equal, u32* pred);
     void (*render_predicate_drop)(u32 pred);
-    /* the 3D engine's samples-passed counter (occlusion queries), one per channel: it counts from its reset, while
-       SampleCounterEnable is on. A report writes the count at gva as a release, len 4 (the count's low word) or 16 (the
-       count, then ticks). samples_report 0: no count to give (no reset yet), and the caller writes a value of its own */
-    void (*samples_reset)(GpuChannel* ch);
-    void (*samples_enable)(GpuChannel* ch, int on);
-    int (*samples_report)(GpuChannel* ch, u64 gva, u32 len, u64 ticks);
+    /* the 3D engine's samples-passed counter (occlusion queries), one per draw owner (DrawState.owner: a channel's
+       id, another front end's queue): it counts that owner's draws from its reset, while SampleCounterEnable is on. A
+       report writes the count at gva as a release, len 4 (the count's low word) or 16 (the count, then ticks).
+       samples_report 0: no count to give (no reset yet), and the caller writes a value of its own. A render enable on a
+       report's count is render_predicate's, whichever owner made the report */
+    void (*samples_reset)(u32 owner);
+    void (*samples_enable)(u32 owner, int on);
+    int (*samples_report)(u32 owner, u64 gva, u32 len, u64 ticks);
     /* a GPFIFO submission ran to its end or waits (gpu_park): what the guest may look at now goes to the GPU */
     void (*stream_end)(void);
     void (*release_retire)(u32 id); /* finish this syncpoint's queued releases before its id is reused */
     void (*report_stall)(void); /* the stall watchdog: what the renderer holds back. Any thread, unlocked */
+    /* a game pause (gpu_hold): everything recorded is submitted and done on the GPU, its results landed and every queued
+       release performed, so nothing of the renderer's writes guest memory until the next job. The GPU thread, between
+       jobs. NULL when the renderer has nothing in flight */
+    void (*idle)(void);
+    /* a save state's load, the GPU held and guest memory about to be replaced: every surface, buffer and counter kept
+       of guest memory goes, so each later use reads the state's memory. NULL when the renderer keeps nothing */
+    void (*reset)(void);
+    /* a save state's save, the GPU held: every render target's pixels written back to guest memory where they can be,
+       so the state holds them. NULL when the renderer keeps none */
+    void (*flush_targets)(void);
+    /* a save state's render targets whose pixels guest memory doesn't hold (the depth targets), read back into io (0,
+       or -1), and after the load's reset those of a state, for the targets the loaded game makes. NULL when the
+       renderer keeps none */
+    int (*save_targets)(struct StateIo* io);
+    int (*load_targets)(struct StateIo* io);
     /* presenting a guest framebuffer */
     /* crop: the part shown (left, top, right, bottom), all 0 for the whole buffer */
     /* transform: Android buffer flags, bit 0 horizontal flip and bit 1 vertical flip */
     void (*present_buffer)(u64 cpu_addr, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt, const i32 crop[4],
                            u32 transform);
     u64 (*screenshot)(const char* path); /* the hash of the frame it saved */
+    /* the last presented frame scaled to w x h RGBA8 (a save state's thumbnail): 0, or -1 when there is none */
+    int (*thumbnail)(u8* rgba, u32 w, u32 h);
     /* the window again, its last frame (or black) under the on-screen controls and the game's menu, for when the game
        has shown nothing for a while: the frontend's loop calls it while either shows. NULL when there is no window */
     void (*refresh)(void);

@@ -1109,10 +1109,13 @@ void vk_tex_frame(void) {
        memory if they are needed again. Those whose pixels would be lost (vk_surf_reclaim) go before five minutes
        only under the budget's pressure (vk_mem_trim), and a target holding a draw a texture would take stays until
        then. The recency lists hand out the oldest first, so this costs what goes. The lossy pass looks every 600
-       presents: it passes over the targets it keeps, and asking whether one holds such a draw can hash its memory */
+       presents: it passes over the targets it keeps, and asking whether one holds such a draw can hash its memory.
+       Render targets later ones drew all over hold nothing: every 30 presents those unused for a second and eight
+       presents go (a game at a dynamic resolution makes its scene's targets again each frame) */
     u32 before = vk_present_before(20000000000ull, 120);
     vk_surf_reclaim(VK_LRU_TEX, before, ~0ull, VK_RECLAIM_LOSSLESS);
     vk_surf_reclaim(VK_LRU_RT, before, ~0ull, VK_RECLAIM_LOSSLESS);
+    if (g_vk_present % 30 == 0) vk_rt_reclaim_superseded(vk_present_before(1000000000ull, 8), ~0ull);
     if (g_vk_present % 600 == 0) {
         u32 lossy_before = vk_present_before(300000000000ull, 600);
         vk_surf_reclaim(VK_LRU_TEX, lossy_before, ~0ull, VK_RECLAIM_IDLE);
@@ -1186,11 +1189,13 @@ static void copy_layers(VkCommandBuffer cb, Surf* s, Surf* t, u32 l, u32 dst, u3
 /* a texture whose layers, levels or 3D slices were drawn as render targets of their own is copied from those targets
    on the GPU: they are never written back to its memory. Only a target matching one subresource (or, layered, the
    layers from one), whose backing memory has not been overwritten since its draw. Generated textures can be first
-   sampled several frames later. Targets are never block compressed: such a texture can't take their texels */
+   sampled several frames later. Targets are never block compressed, but a compressed texture takes a target whose
+   texels are as many bytes as its blocks, a texel for a block: a game compressing on the GPU draws the blocks so (one
+   game's text labels, BC5 drawn as RGBA32UI) */
 static void tex_take_drawn(Surf* t) {
     /* a converted format's texels differ from its host image's, but a depth texture takes its targets' host images
        as they are (the same format, below): D24S8's guest packing is converted only when it is loaded from memory */
-    if (!t || t->is_rt || (t->f.conv && !t->f.depth) || t->f.bw != 1) return;
+    if (!t || t->is_rt || (t->f.conv && !t->f.depth)) return;
     Surf* small[32];
     Surf** d = small;
     u64 stride = t->layer_size;
@@ -1295,16 +1300,23 @@ static void tex_take_drawn(Surf* t) {
         u64 rem = off - (u64)layer * stride, lo = 0;
         for (u32 l = 0; l < t->levels && layer < t->layers; l++) {
             u32 lw = t->w >> l ? t->w >> l : 1, lh = t->h >> l ? t->h >> l : 1;
+            /* a compressed level in blocks, the target's texels. The copy's extent counts the target's texels, and
+               the blocks over a level's edge are the level's */
+            lw = (lw + t->f.bw - 1) / t->f.bw;
+            lh = (lh + t->f.bh - 1) / t->f.bh;
             /* a block-linear level's rows take whole GOBs (64 bytes), so a target drawn as wide as them covers the
-               level (a 120-texel depth pyramid level drawn 128 wide, a cube mip narrower than a GOB one GOB wide):
-               only its left lw texels are the level's */
-            int padded_row = t->bl && s->bl && s->f.vk == t->f.vk && s->w > lw &&
+               level (a 120-texel depth pyramid level drawn 128 wide, a cube mip narrower than a GOB one GOB wide, a
+               230-texel BC5 label's 58 blocks drawn 60 wide): only its left lw texels are the level's */
+            int padded_row = t->bl && s->bl && (s->f.vk == t->f.vk || t->f.bw > 1) && s->w > lw &&
                              ((u64)s->w * s->f.bpp + 63) / 64 == ((u64)lw * t->f.bpp + 63) / 64;
             if (rem == lo && (s->w == lw || padded_row) && s->h == lh) {
                 if (!vk_rt_drawn_fresh(s)) break; /* newer guest memory at this address takes precedence */
-                /* a layered target spaced as the texture's layers fills as many of them as it has */
+                /* a layered target spaced as the texture's layers fills as many of them as it has, at any level: one
+                   game draws each level of its reflection cube through a target of six layers a whole face apart,
+                   whose layer k is face k of that level (taken at level 0 alone, faces 1 to 5 of the blurred levels
+                   kept guest memory's bytes, and its shiny surfaces reflected noise) */
                 u32 count = 1;
-                if (s->layers > 1 && !s->volume && l == 0 && s->layer_size == stride) /* a volume's are GOB slices */
+                if (s->layers > 1 && !s->volume && s->layer_size == stride) /* a volume's are GOB slices */
                     count = s->layers < t->layers - layer ? s->layers : t->layers - layer;
                 copy_layers(copy_begin(s, t), s, t, l, layer, count, lw, lh, 0);
                 mark_copied(s, t);

@@ -510,6 +510,8 @@ int plat_address_space(u64* mapped, u64* largest_free) {
         last = at + size;
         at = last;
     }
+#else
+    (void)last;
 #endif
     if (!total) return 0;
     *mapped = total;

@@ -179,6 +179,17 @@ void vk_submit(VkSemaphore wait, VkPipelineStageFlags2 wait_stage, VkSemaphore s
    it at another: whichever submit comes next takes them, so commands recorded from now on never run before the wait */
 void vk_submit_after(VkSemaphore sem, u64 wait, u64 signal);
 void vk_finish(void); /* submits and waits until the GPU has done everything, and lands every result */
+/* a save state's load (Renderer.reset): every surface, buffer and sample counter kept of the old guest memory goes */
+void vk_surf_forget_all(void);
+void vk_buf_forget_all(void);
+void vk_query_forget_all(void);
+u32 vk_rt_flush_all(void); /* a save: every render target's pixels written back where it can be, the count */
+/* a save state's depth targets (surface.c): every live one's pixels into io, read back (0, or -1); a load's, kept for
+   the targets the loaded game makes of the same place, format and size; and those dropped */
+struct StateIo;
+int vk_zt_save(struct StateIo* io);
+int vk_zt_load(struct StateIo* io);
+void vk_zt_forget(void);
 extern u64 g_vk_finishes, g_vk_finish_ns; /* statistics: vk_finish calls and their wait (the GPU thread idles) */
 void vk_frame_next(void);                 /* ends the frame (a present): the next records in the other slot */
 void vk_frame_check(void);                /* at the start of a draw or dispatch: ends a frame that has grown too big */
@@ -426,7 +437,9 @@ typedef struct Surf {
                          DONT_CARE while nothing wrote it since */
     u8 discarded;
     u32 drawn_at;   /* render targets: g_vk_present when last drawn to */
+    u64 draw_wseq;  /* render targets: wseq at its last draw or clear (vk_rt_drawn), 0 before one */
     int in_drawn;   /* in surface.c's list of drawn targets, entered at drawn_from */
+    int in_linear;  /* a pitch-linear color target in surface.c's list of those drawn since the last release */
     u64 drawn_from;
     u64 draw_gw;    /* guest-memory generation at the first draw this present or since a full replacement */
     u64 draw_hash;  /* fallback guest-memory hash at that baseline */
@@ -505,6 +518,8 @@ int vk_surf_can_writeback(const Surf* s);
 void vk_surf_flush(Surf* s, const u8* original); /* original preserves newer guest writes for storage images */
 /* s's pixels published over its guest bytes, GPU-owned and not waited for: 1, or 0 when only vk_surf_flush can */
 int vk_surf_publish(Surf* s);
+/* a release: the pitch-linear color targets drawn since the last one published, for the CPU to read */
+void vk_rt_publish_linear(void);
 void vk_surf_wrote(Surf* s); /* its image changed: its copies are out of date (wgen), and it is the newest (wseq) */
 /* vk_surf_flush in two halves, the GPU not waited for: the bytes a write-back of s copies (0 for none), its copy
    recorded into buf at at (host-readable once the submit being recorded is done), and its landing from those bytes p,
@@ -544,6 +559,8 @@ VkImageAspectFlags vk_aspect(const VkFmt* f);
 #define VK_RECLAIM_IDLE     1
 #define VK_RECLAIM_ANY      2
 u64 vk_surf_reclaim(int kind, u32 before, u64 want, int lossy);
+/* the render targets later ones drew all over (no pixels to lose), last used before `before`, up to `want` bytes */
+u64 vk_rt_reclaim_superseded(u32 before, u64 want);
 void vk_surf_stats(int kind, u32* count, u64* bytes, u32* parked);
 /* frees cache entries (surfaces and own buffers), the least recently used first, when the heap's use with `extra`
    bytes more would be past 90% of its budget: idle lossless ones down to 80%, the lossless working set down to 95%,
@@ -786,15 +803,15 @@ void vk_release_drain(void);
 /* query.c: the samples-passed counter with occlusion queries (renderer.h samples_*), under vk_lock. vk_query_draw before
    a game's draw in a rendering pass, vk_query_pass_end before the pass ends or a draw of the renderer's own in it
    (render.c), vk_query_flush outside a pass before a submit (cmd.c) */
-void vk_query_draw(VkCommandBuffer cb, u32 chan, u32 msaa_mode); /* msaa_mode: 3D 0x574 */
+void vk_query_draw(VkCommandBuffer cb, u32 owner, u32 msaa_mode); /* msaa_mode: 3D 0x574 */
 void vk_query_pass_end(VkCommandBuffer cb);
 void vk_query_flush(VkCommandBuffer cb);
-void vk_query_reset(u32 chan);
-void vk_query_enable(u32 chan, int on);
-int vk_query_report(u32 chan, u64 gva, u32 len, u64 ticks);
+void vk_query_reset(u32 owner);
+void vk_query_enable(u32 owner, int on);
+int vk_query_report(u32 owner, u64 gva, u32 len, u64 ticks);
 /* a report performed (release.c): the count of counter's segments [first, end) */
 u64 vk_query_value(u32 counter, u64 first, u64 end);
-#define VK_QUERY_COUNTERS 8 /* query.c's samples-passed counters, a channel's each */
+#define VK_QUERY_COUNTERS 8 /* query.c's samples-passed counters, a draw owner's each */
 /* render enable predicates (release.c's vk_render_predicate): a queued report of counter's segments [first, end) gets
    a predicate slot, held once, that the next vk_query_pred_flush writes (2, *slot set), or its count is known now: 1
    not zero, 0 zero. -1 when there can be no predicate: the device can't make them, or there's no memory for the
@@ -959,7 +976,7 @@ struct RendererPrepare;
 void vk_pipeline_prepare(struct RendererPrepare* p);
 
 /* compute.c */
-void vk_dispatch(GpuChannel* ch, const u32* q, u64 code);
+void vk_dispatch(const DispatchState* d);
 void vk_compute_land(void); /* pending compute results into guest memory, now */
 /* the compute results so far, submitted and put aside to land later: the batch to wait for (0: none pending) */
 u64 vk_compute_put_aside(void);

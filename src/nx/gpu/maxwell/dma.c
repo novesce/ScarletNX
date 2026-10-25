@@ -11,6 +11,7 @@
    GpuDmaOp (gpu.h) and done on the GPU by the renderer's dma_copy (vk/dma.c), which covers Eden's CopyPitchToPitch,
    CopyBlockLinearToPitch and CopyPitchToBlockLinear by each side's layout. Also the copies of linear sources read at
    submission (dma_snap_*), which gpu.c's submission scan makes. Register names are maxwell_dma_regs.h's */
+#include "nx/runtime/state_io.h"
 #include "nx/gpu/maxwell/engines_int.h"
 #include "nx/gpu/maxwell/maxwell_dma_regs.h"
 
@@ -263,4 +264,79 @@ void dma_method(GpuChannel* ch, u32 m, u32 v) {
     if (m >= MAXWELL_DMA_NUM_REGS) return;
     ch->rdma[m] = v;
     if (m == MAXWELL_DMA_LAUNCH_DMA) dma_launch(ch, v);
+}
+
+/* ------------------------------------------------------------ save states */
+/* the snapshots still to be used, ring by ring in order: the jobs a load puts back in the queue take them */
+int dma_snap_save(StateIo* io) {
+    u32 c, i;
+    int r = 0;
+    pm_lock(&g_dma.lk);
+    for (c = 0; c < 128 && !r; c++) {
+        DmaSnapRing* q = g_dma.rings[c];
+        if (!q || q->tail == q->head) continue;
+        r |= io_put32(io, c + 1) | io_put32(io, q->head - q->tail);
+        for (i = q->tail; i != q->head && !r; i++) {
+            const DmaSnap* e = &q->e[i % SNAP_RING];
+            r |= io_put64(io, e->job) | io_put64(io, e->src) | io_put64(io, e->len) | io_put32(io, e->launch);
+            r |= io_put(io, e->data, e->len);
+        }
+    }
+    r |= io_put32(io, 0);
+    pm_unlock(&g_dma.lk);
+    return r;
+}
+/* the rings of a state's snapshots, read but not yet in place */
+struct DmaStaged {
+    DmaSnapRing* q[128];
+};
+void dma_snap_staged_free(DmaStaged* d) {
+    u32 c, i;
+    if (!d) return;
+    for (c = 0; c < 128; c++)
+        if (d->q[c]) {
+            for (i = d->q[c]->tail; i != d->q[c]->head; i++) free(d->q[c]->e[i % SNAP_RING].data);
+            free(d->q[c]);
+        }
+    free(d);
+}
+DmaStaged* dma_snap_parse(StateIo* io) {
+    DmaStaged* d = (DmaStaged*)calloc(1, sizeof *d);
+    u32 c, n, i;
+    if (!d) return NULL;
+    for (;;) {
+        DmaSnapRing* q;
+        if (io_get32(io, &c)) goto bad;
+        if (!c) return d;
+        if (c > 128 || d->q[c - 1] || io_get32(io, &n) || n > SNAP_RING) goto bad;
+        if (!(q = d->q[c - 1] = (DmaSnapRing*)calloc(1, sizeof *q))) goto bad;
+        for (i = 0; i < n; i++) {
+            DmaSnap* e = &q->e[i];
+            if (io_get64(io, &e->job) || io_get64(io, &e->src) || io_get64(io, &e->len) || io_get32(io, &e->launch) ||
+                e->len > SNAP_TOTAL || !(e->data = (u8*)malloc(e->len ? (size_t)e->len : 1)))
+                goto bad;
+            q->head = i + 1; /* freed with the ring from here on */
+            if (io_get(io, e->data, e->len)) goto bad;
+        }
+    }
+bad:
+    dma_snap_staged_free(d);
+    return NULL;
+}
+void dma_snap_install(DmaStaged* d) {
+    u32 c, i;
+    u64 gen = gpu_mem_generation(); /* the guest memory they were read from is the state's, as new as any */
+    for (c = 0; c < 128; c++) dma_snap_reset(c);
+    pm_lock(&g_dma.lk);
+    for (c = 0; d && c < 128; c++)
+        if (d->q[c]) {
+            for (i = d->q[c]->tail; i != d->q[c]->head; i++) {
+                d->q[c]->e[i % SNAP_RING].gen = gen;
+                g_dma.bytes += d->q[c]->e[i % SNAP_RING].len;
+            }
+            g_dma.rings[c] = d->q[c];
+            d->q[c] = NULL;
+        }
+    pm_unlock(&g_dma.lk);
+    free(d);
 }

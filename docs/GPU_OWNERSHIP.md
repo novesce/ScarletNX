@@ -7,6 +7,11 @@ the ownership map and copies it on the GPU. Only when the guest CPU (recompiled 
 touches an owned range is the data written back into guest memory, the one readback the rules allow, and the range
 is the CPU's again.
 
+Render targets stay the renderer's: their pixels reach guest memory only when a consumer asks. Pitch-linear color
+targets are the exception, as a game draws into those to read the result on the CPU: each release publishes the ones
+drawn since the last (`vk_rt_publish_linear` in `vk/surface.c`), and storage images are published the same way
+(`vk_surf_publish`). A block linear target the CPU reads gets no write-back yet.
+
 The trap model is Skyline's (read for the design only: its source is MPL-2.0 and was withdrawn at the console maker's
 request, so nothing is copied from it). The fault is taken differently on each host (below).
 

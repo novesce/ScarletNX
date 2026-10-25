@@ -262,6 +262,10 @@ u64 vk_surf_reclaim(int list, u32 before, u64 want, int lossy) {
     (void)list, (void)before, (void)want, (void)lossy;
     return 0;
 }
+u64 vk_rt_reclaim_superseded(u32 before, u64 want) {
+    (void)before, (void)want;
+    return 0;
+}
 u32 vk_present_before(u64 ago_ns, u32 presents) {
     (void)ago_ns, (void)presents;
     return 0;

@@ -33,14 +33,14 @@ static const char* gradient_paths[3];
 static const char* texture_paths[6];
 static const char* arithmetic_path;
 static const char* beyond_paths[3];
-static const char* attribute_paths[6];
+static const char* attribute_paths[7];
 static const char* pexit_path;
 static const char* global_dynamic_path;
 static const char* xfb_path;
 static const char* passthrough_paths[6];
 static const char* structured_paths[2];
 static const char* fswzadd_path;
-static char* fixture_paths[71];
+static char* fixture_paths[72];
 static size_t fixture_count;
 
 static const char* fixture_path(const char* directory, const char* name) {
@@ -2292,9 +2292,22 @@ static void attribute_pointer(void) {
     code = translate(&base, 1, ST_VS, &info, &words, 0);
     check_translated(code, &info, "AL2P accepts the zero register");
     free(code);
+    /* The range predicate (P0 here) isn't modeled: a program translates when nothing can read it, as the NVN
+       compiler's never are (one game's fragment programs leave theirs, or overwrite them with a comparison before
+       the alpha test reads it), and is refused when a later instruction may read it */
     const u64 predicate = base & ~(7ull << 44);
     code = translate(&predicate, 1, ST_VS, &info, &words, 0);
-    check_refused(code, &info, "AL2P", "AL2P range predicate is not silently discarded");
+    check_translated(code, &info, "AL2P with a range predicate nothing reads translates");
+    free(code);
+    const u64 guarded_mov = (mov32i(2, 1) & ~(0xfull << 16)) | (0ull << 16); /* @P0 MOV32I R2, 1 */
+    const u64 read_after[] = {predicate, guarded_mov};
+    code = translate(read_after, 2, ST_VS, &info, &words, 0);
+    check_refused(code, &info, "AL2P range predicate read", "AL2P range predicate that is read is refused");
+    free(code);
+    const u64 fsetp_p0 = 0x36b183be80070507ull; /* the alpha test's FSETP P0, PT, R5, imm */
+    const u64 overwritten[] = {predicate, fsetp_p0, guarded_mov};
+    code = translate(overwritten, 3, ST_VS, &info, &words, 0);
+    check_translated(code, &info, "AL2P range predicate overwritten before its read translates");
     free(code);
     /* The driver offers a direct CBE export path and ordinary attribute exports. With direct export disabled,
        its address registers are zero and its stores must not allocate or access a global-buffer descriptor. */
@@ -2318,6 +2331,49 @@ static void attribute_pointer(void) {
         seed_stores += (code[i] & 0xffff) == 62 && (code[i] >> 16) == 3 && is_constant_value(code, words, code[i + 2], 3);
     check(seed_stores == 3, "ISBERD preserves the vertex index");
     if (code) save_fixture(attribute_paths[5], code, words);
+    free(code);
+}
+
+/* ALD with an index register, as a game's vertex programs read an attribute AL2P addressed: the inputs it can reach
+   are the ones the header's map lists (generic 1 and 3 here), each of the two words read picks one of them by the
+   address's vector, and a patch read through a register stays refused */
+static void indexed_attribute_load(void) {
+    const u64 al2p = (0xefa070010607ff01ull & ~(0xffull | (0xffull << 8) | (0x7ffull << 20))) | 5ull | (4ull << 8);
+    const u64 ald = (0xefd9ff800707ff00ull & ~((0xffull << 8) | (0x3ffull << 20) | (3ull << 47))) | (5ull << 8) |
+                    (1ull << 47); /* ALD R0, a[R5], 2 words */
+    const u64 instructions[] = {mov32i(4, 0x90), al2p, ald, 0xeff000000007ff00ull | (0x80ull << 20) | (1ull << 47)};
+    ShaderInfo info;
+    size_t slots, words = 0;
+    u64* code = guest_program(instructions, 4, NULL, &slots);
+    if (!code) return;
+    set_sph(code, 6, 0xf0f0); /* generic inputs 1 and 3, all four components */
+    memset(&info, 0, sizeof info);
+    u32* spv = spirv_of(code, slots * sizeof *code, ST_VS, &info, &words, 0, 1, 1, 1);
+    check_translated(spv, &info, "ALD through an index register translates");
+    check(spv && info.in_mask == ((1u << 1) | (1u << 3)), "an indexed ALD declares the inputs the header maps");
+    check(spv && count_opcode(spv, words, 169, 0xffffffffu) >= 4, "each indexed word selects among the inputs");
+    if (spv) save_fixture(attribute_paths[6], spv, words);
+    free(spv);
+    free(code);
+    const u64 patch[] = {mov32i(4, 0x20), ald | (1ull << 31)};
+    spv = translate(patch, 2, ST_TES, &info, &words, 0);
+    check_refused(spv, &info, "ALD", "a patch read through an index register is refused");
+    free(spv);
+    /* a game's fragment programs: AL2P R8, R2 + 0x80 and IPA.IDX.MUL R0, a[R8], R7 into colour 0, the inputs the
+       header gives a mode (0 and 1, perspective) the candidates */
+    const u64 fragment_al2p =
+        (0xefa070010607ff01ull & ~(0xffull | (0xffull << 8) | (0x7ffull << 20))) | 8ull | (2ull << 8) | (0x80ull << 20);
+    const u64 fragment[] = {mov32i(2, 0x10), fragment_al2p, 0xe06000c800770800ull};
+    code = guest_program(fragment, 3, NULL, &slots);
+    if (!code) return;
+    set_sph(code, 6, 0xaaaa);
+    set_sph(code, 18, 0xf);
+    memset(&info, 0, sizeof info);
+    spv = spirv_of(code, slots * sizeof *code, ST_FS, &info, &words, 0, 1, 1, 1);
+    check_translated(spv, &info, "IPA.IDX translates");
+    check(spv && info.in_mask == 3u, "IPA.IDX declares the inputs the header gives a mode");
+    check(spv && count_opcode(spv, words, 169, 0xffffffffu) >= 2, "IPA.IDX selects among the inputs");
+    free(spv);
     free(code);
 }
 
@@ -2686,7 +2742,7 @@ int main(int argc, char** argv) {
             snprintf(name, sizeof name, "beyond_%d", i);
             beyond_paths[i] = fixture_path(argv[1], name);
         }
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < 7; i++) {
             snprintf(name, sizeof name, "attribute_%d", i);
             attribute_paths[i] = fixture_path(argv[1], name);
         }
@@ -2708,7 +2764,7 @@ int main(int argc, char** argv) {
             structured_paths[i] = fixture_path(argv[1], name);
         }
         fswzadd_path = fixture_path(argv[1], "fswzadd");
-        if (fixture_count != 71) {
+        if (fixture_count != 72) {
             fprintf(stderr, "failed to allocate fixture paths\n");
             return 2;
         }
@@ -2745,6 +2801,7 @@ int main(int argc, char** argv) {
     beyond_eden();
     system_values();
     attribute_pointer();
+    indexed_attribute_load();
     structured_flow();
     fswzadd_forms();
     for (size_t i = 0; i < fixture_count; i++) free(fixture_paths[i]);

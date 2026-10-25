@@ -23,6 +23,7 @@
 /* Including the production file exposes its service constructors without test hooks in the runtime. */
 #include "nx/hle/filesystem/fs.c"
 #include "nx/hle/hle.c"
+#include "kobj_ids.h" /* the kernel objects the stubs make, as ids */
 
 u8* g_mem;
 u64 g_as_size = AS_MAX; /* the reservation's size, mem.c's, which this test does not link */
@@ -208,13 +209,14 @@ void svcobj_unref(SvcObj* obj) {
 }
 /* the notifiers' events: counted, so the test sees each one dropped with its notifier */
 static int test_events;
-KEvent* owned_event(const char* name) {
+u32 owned_event(const char* name) {
     KEvent* event = calloc(1, sizeof *event);
     CHECK(event != NULL);
     (void)name;
+    event->o.type = KO_EVENT;
     event->o.refs = 1;
     test_events++;
-    return event;
+    return kobj_id(&event->o);
 }
 void kobj_unref(KObj* o) {
     if (--o->refs) return;
@@ -223,7 +225,8 @@ void kobj_unref(KObj* o) {
 }
 static KEvent* test_handles[32]; /* handle 0x100 + i is a reference on test_handles[i], as the kernel's would be */
 static unsigned test_nhandles;
-u32 ev_handle(KEvent* event) {
+u32 ev_handle(u32 ev) {
+    KEvent* event = kev(ev);
     CHECK(test_nhandles < sizeof test_handles / sizeof test_handles[0]);
     event->o.refs++;
     test_handles[test_nhandles] = event;
@@ -1579,6 +1582,117 @@ static int tree_has(const char* path) {
     pm_unlock(&g_hle.fs.tree.lock);
     return found;
 }
+/* save states (runtime/state.c): the bytes a state's sections hold, in memory */
+typedef struct {
+    u8* p;
+    u64 n, at;
+} StateBytes;
+static int bytes_put(void* ctx, const void* p, u64 n) {
+    StateBytes* b = (StateBytes*)ctx;
+    u8* more = (u8*)realloc(b->p, (size_t)(b->n + n + 1));
+    if (!more) return -1;
+    b->p = more;
+    memcpy(b->p + b->n, p, (size_t)n);
+    b->n += n;
+    return 0;
+}
+static int bytes_get(void* ctx, void* p, u64 n) {
+    StateBytes* b = (StateBytes*)ctx;
+    if (n > b->n - b->at) return -1;
+    memcpy(p, b->p + b->at, (size_t)n);
+    b->at += n;
+    return 0;
+}
+static void temp_empty(void) { /* as fs_init leaves it: every launch starts the temporary storage empty */
+    pm_lock(&g_hle.fs.tree.lock);
+    FsTreeResult r = fs_tree_remove(&g_hle.fs.tree, NULL, "save/temp", 1, 1, 0);
+    pm_unlock(&g_hle.fs.tree.lock);
+    CHECK(r == FS_TREE_OK || r == FS_TREE_NOTFOUND);
+}
+/* the state's open file systems, files and folders found again, as state_load does first: NULL with why when refused */
+static FsStaged* resolve_fs(StateBytes* list, StateBytes* temp, const HleFs* saved, char* why, size_t size) {
+    StateIo lio = {list, bytes_put, bytes_get}, tio = {temp, bytes_put, bytes_get};
+    list->at = 0;
+    if (temp) temp->at = 0;
+    return fs_state_resolve(&lio, temp ? &tio : NULL, saved, why, size);
+}
+/* and then what the running game had open let go of, and the state's in place: 0, or -1 with why when refused */
+static int load_fs(StateBytes* list, StateBytes* temp, const HleFs* saved, char* why, size_t size) {
+    FsStaged* st = resolve_fs(list, temp, saved, why, size);
+    if (!st) return -1;
+    fs_state_drop();
+    fs_state_install(st);
+    return 0;
+}
+/* A state holds the application's temporary storage whole, which every launch empties: a load in a fresh process puts
+   its folders and files back before it opens what the game had open there, and a load in the running game takes what
+   the game wrote there since away. A state from before states held it is refused as it was, and one whose save/temp
+   names a path out of it, or lacks a file the game had open there, is refused before anything changes */
+static void test_state_temp(SvcObj* proxy) {
+    StateBytes list = {0}, temp = {0}, bad = {0};
+    StateIo lio = {&list, bytes_put, bytes_get}, tio = {&temp, bytes_put, bytes_get}, bio = {&bad, bytes_put, bytes_get};
+    char why[256];
+    SvcObj* fs = open_save_data(proxy, 51, 4); /* Temporary */
+    CHECK(tree_has("save/temp"));
+    fs_command(fs, 0, "/a.bin", 0, 0);
+    fs_command(fs, 2, "/d", 0, 0);
+    fs_command(fs, 0, "/d/b.bin", 0, 0);
+    SvcObj* a = open_object(fs, 8, "/a.bin", 7);
+    write_data(a, 0, "hello", 5, 0);
+    SvcObj* b = open_object(fs, 8, "/d/b.bin", 7);
+    write_data(b, 0, "xyz", 3, 0);
+    svcobj_unref(b);
+    HleFs* saved = (HleFs*)malloc(sizeof *saved);
+    CHECK(saved != NULL);
+    *saved = g_hle.fs; /* what the state's g_hle holds of fs */
+    CHECK(!fs_state_save(&lio) && !fs_state_temp_save(&tio));
+
+    /* a fresh process: nothing open (Windows deletes no open file), save/temp empty, and the game had it and a.bin in it
+       open */
+    fs_state_drop();
+    temp_empty();
+    CHECK(!tree_has("save/temp"));
+    CHECK(!resolve_fs(&list, NULL, saved, why, sizeof why) &&
+          strstr(why, "the game had save/temp open, which isn't there"));
+    FsStaged* fresh = resolve_fs(&list, &temp, saved, why, sizeof why);
+    CHECK(fresh != NULL);
+    fs_state_install(fresh);
+    CHECK(tree_has("save/temp/a.bin") && tree_has("save/temp/d") && tree_has("save/temp/d/b.bin"));
+    CHECK(read_data(a, 0, 16, 0) == 5 && !memcmp(GP(0x5000), "hello", 5)); /* a.bin open again, its bytes the state's */
+    b = open_object(fs, 8, "/d/b.bin", 1);
+    CHECK(read_data(b, 0, 16, 0) == 3 && !memcmp(GP(0x5000), "xyz", 3));
+    svcobj_unref(b);
+
+    /* the running game: what it wrote there since the save goes, what was there comes back */
+    write_data(a, 0, "HELLO, again", 12, 0);
+    fs_command(fs, 0, "/c.bin", 4, 0);
+    CHECK(!load_fs(&list, &temp, saved, why, sizeof why));
+    CHECK(!tree_has("save/temp/c.bin") && tree_has("save/temp/d/b.bin"));
+    CHECK(read_data(a, 0, 16, 0) == 5 && !memcmp(GP(0x5000), "hello", 5));
+
+    /* a save/temp naming a path out of it, and one without the a.bin the game had open: refused, nothing changed */
+    static const char out[] = "../escape.bin";
+    u32 one = 1, file = 2, n = sizeof out - 1, zero = 0;
+    u64 size = 1;
+    CHECK(!io_put32(&bio, one) && !io_put32(&bio, file) && !io_put32(&bio, n) && !io_put(&bio, out, n) &&
+          !io_put64(&bio, size) && !io_put(&bio, "x", 1) && !io_put32(&bio, zero));
+    CHECK(load_fs(&list, &bad, saved, why, sizeof why) && !strcmp(why, "its temporary storage is damaged"));
+    free(bad.p);
+    bad = (StateBytes){0};
+    CHECK(!io_put32(&bio, one) && !io_put32(&bio, zero));
+    CHECK(load_fs(&list, &bad, saved, why, sizeof why) &&
+          strstr(why, "the game had save/temp/a.bin open, which the state's temporary storage doesn't hold"));
+    CHECK(tree_has("save/temp/a.bin") && read_data(a, 0, 16, 0) == 5);
+
+    svcobj_unref(a);
+    svcobj_unref(fs);
+    temp_empty();
+    free(bad.p);
+    free(list.p);
+    free(temp.p);
+    free(saved);
+    puts("PASS a state's save/temp: put back in a fresh process and over the running game's, damaged ones refused");
+}
 /* the event notifiers (500, 501, 510) give the same event each time, never signaled, and drop it with themselves;
    OpenSaveDataTransferProhibiter (83) gives a prohibiter; OpenDataFileSystemWithProgramIndex (204) has no data
    filesystem for this program and no other program */
@@ -1771,10 +1885,6 @@ static void cleanup_service(void) {
     CHECK(test_shared == 0);
 }
 
-int kobj_never_signaled(KObj* o) {
-    (void)o;
-    return 0;
-}
 
 /* rhash against the RomFS format's definition, worked by hand: the seed is the parent's offset xor 123456789
    (0x075BCD15), each byte rotates right by 5 then xors in. "a": 0x075BCD15 ror 5 = 0xA83ADE68, xor 0x61 = 0xA83ADE09.
@@ -1924,6 +2034,7 @@ int main(int argc, char** argv) {
     test_virtual_services(fs, proxy);
     test_extracted_romfs(proxy);
     test_save_data(proxy);
+    test_state_temp(proxy);
     test_notifiers_and_program_index(proxy);
     svcobj_unref(fs);
     svcobj_unref(proxy);

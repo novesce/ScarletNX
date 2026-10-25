@@ -282,7 +282,7 @@ void vk_pipeline_init(void) {
             g_shader_texture_arrays = 0;
         for (i = 0; i < SNX_VKB_END; i++) {
             int image = i >= SNX_VKB_IMG && i < SNX_VKB_RS;
-            if (image && (s >= 2 || i - SNX_VKB_IMG >= image_slots)) continue; /* compute and fragment */
+            if (image && (s >= 2 || i - SNX_VKB_IMG >= image_slots)) continue; /* compute, vertex and fragment */
             if (i >= SNX_VKB_TEXARRAY && !g_shader_texture_arrays) continue;
             if (i >= SNX_VKB_IMGBUF && i < SNX_VKB_TEXARRAY && (s != 0 || i - SNX_VKB_IMGBUF >= buffer_slots)) continue;
             if (i >= SNX_VKB_IMGBUF && i < SNX_VKB_TEXARRAY) image = 1;
@@ -290,7 +290,10 @@ void vk_pipeline_init(void) {
                 .binding = i,
                 .descriptorType = binding_type(i),
                 .descriptorCount = (i == SNX_VKB_TEXARRAY || i == SNX_VKB_TEXDEPTH) ? SNX_TEX_ARRAY : 1,
-                .stageFlags = image ? (s == 0 ? VK_SHADER_STAGE_COMPUTE_BIT : VK_SHADER_STAGE_FRAGMENT_BIT) : vis[s]};
+                .stageFlags = !image               ? vis[s]
+                              : s == 1             ? VK_SHADER_STAGE_FRAGMENT_BIT
+                              : i < SNX_VKB_IMGBUF ? VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT
+                                                   : VK_SHADER_STAGE_COMPUTE_BIT};
         }
         for (int arrays = 0; arrays < 2; arrays++) {
             u32 n = count;
@@ -449,12 +452,13 @@ static u32* sh_spirv(VkSh* s, const u8* code, u64 h, int stage, const u32 mask[2
             image_slots = g_vk.props.limits.maxDescriptorSetStorageImages;
         int needs_unformatted = 0;
         for (int i = 0; i < s->si.nimg; i++) needs_unformatted |= s->si.img[i].kind == 0;
-        if (stage != ST_FS || (u32)s->si.nimg > image_slots ||
-            (needs_unformatted && !g_vk.feat.shaderStorageImageWriteWithoutFormat)) {
+        /* a vertex program's stores need the device's vertexPipelineStoresAndAtomics */
+        if ((stage != ST_FS && (stage != ST_VS || !g_vk.feat.vertexPipelineStoresAndAtomics)) ||
+            (u32)s->si.nimg > image_slots || (needs_unformatted && !g_vk.feat.shaderStorageImageWriteWithoutFormat)) {
             free(spv);
             spv = NULL;
             snprintf(s->si.first_unsupported, sizeof s->si.first_unsupported,
-                     "fragment storage image feature or descriptor limit");
+                     "storage image stage, feature or descriptor limit");
         }
     }
     return spv;
