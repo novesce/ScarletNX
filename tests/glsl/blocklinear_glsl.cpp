@@ -4,7 +4,7 @@
 // both ways, against gpu.c's bl_offset walked byte by byte: rows not a multiple of 16 or 64 bytes, blocks of 1 to 32
 // GOBs high and 1 to 4 deep, moves that start inside a GOB and a block, volumes, and bound ranges that start before
 // or after the layout's first byte (the biases). A deswizzle writes every linear byte of the rows it moves, a swizzle
-// only the 16 byte runs of them. tests/astc_vulkan.c runs the SPIR-V build of the same file on a Vulkan device.
+// only valid row bytes, preserving a partial run's padding. tests/astc_vulkan.c runs the SPIR-V build on Vulkan.
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -16,6 +16,7 @@ using namespace glsl;
 // what blocklinear.comp declares, under its names
 struct Mover : Invocation {
     uint runs, rows, lin_runs, y0, gob_y0, z0, bh, hmask, bd, dmask, bsh, block_row, slab, bl_bias, lin_bias, to_bl;
+    uvec4 tail_mask;
     const uvec4* src;
     uvec4* dst;
 #include "nx/gpu/texture/blocklinear.glsl"
@@ -71,13 +72,18 @@ static void one(uint32_t row_bytes, uint32_t h, uint32_t d, uint32_t bh, uint32_
                                   m.bl_bias = bl_bias, m.lin_bias = lin_pad;
                                   m.src = to_bl ? lin.data() : bl_bound;
                                   m.dst = to_bl ? bl_bound : lin.data();
+                                  for (uint32_t c = 0; c < 4; c++) {
+                                      uint32_t tail = row_bytes % 16;
+                                      uint32_t bytes = !tail ? 4 : tail > 4 * c ? tail - 4 * c : 0;
+                                      m.tail_mask[c] = bytes >= 4 ? ~0u : (1u << (bytes * 8)) - 1;
+                                  }
                               });
         const uint8_t* b = (const uint8_t*)bl.data() + pad * 16 - lo;
         const uint8_t* l = (const uint8_t*)(lin.data() + lin_pad);
         std::vector<uint8_t> moved(bl.size() * 16, 0), lmoved(lin.size() * 16, 0);
         for (uint32_t z = 0; z < slices; z++)
             for (uint32_t y = 0; y < rows; y++)
-                for (uint32_t x = 0; x < runs * 16; x++) {
+                for (uint32_t x = 0; x < (to_bl ? row_bytes : runs * 16); x++) {
                     uint64_t o = bl_offset(x, y0 + y, z0 + z, row_bytes, h, bh, bd);
                     uint64_t li = ((uint64_t)z * rows + y) * lin_runs * 16 + x;
                     moved[pad * 16 - lo + o] = 1;
@@ -99,6 +105,7 @@ static void one(uint32_t row_bytes, uint32_t h, uint32_t d, uint32_t bh, uint32_
 }
 
 int main() {
+    for (uint32_t width = 1; width <= 33; width++) one(width, 3, 2, 0, 0, 0, 3, 0, 2);
     for (int i = 0; i < 400; i++) {
         uint32_t row_bytes = 1 + random_word() % 400, h = 1 + random_word() % 90, bh = random_word() % 6;
         uint32_t d = 1, bd = 0;

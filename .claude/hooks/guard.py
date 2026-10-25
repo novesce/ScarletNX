@@ -20,7 +20,7 @@ import sys
 
 # Files that belong to the game's owner or are made from them: never staged, uploaded or edited
 GAME_EXT = re.compile(
-    r'\.(keys|xci|nsp|nsz|xcz|nca|nro|nso|npdm|tik|cert|snxs|spv|ppm|vkshaders|vkshipped|jitcache)$', re.I
+    r'\.(keys|xci|nsp|nsz|xcz|nca|nro|nso|npdm|tik|cert|snxs|spv|ppm|vkshaders|vkshipped|vkscan|jitcache)$', re.I
 )
 GAME_DIR = re.compile(r'(^|/)(games|work|deps|keys|dumps|exefs|romfs|shader_cache)(/|$)')
 

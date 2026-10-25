@@ -32,7 +32,7 @@ typedef struct CsPipe {
     VkCbReads cbr; /* the constant buffer words translation read */
     int failed;
     struct CsPipe* next;
-    struct CsPipe* keyed; /* the program translated for the integer-ness of the 2D images last bound to it */
+    struct CsPipe* keyed; /* the program translated for the numeric types of the images last bound to it */
 } CsPipe;
 static CsPipe* g_csp[256];
 
@@ -629,19 +629,19 @@ void vk_compute_mem_need_map(u64 a, u64 n) {
 
 /* the pipeline of a program (80 zero bytes, then the code), by its code and launch parameters, and by the constant
    buffer words its translation read */
-/* A program is translated for the integer textures it is given, as fragment shaders are keyed (an integer texture
-   bound where the shader declares a float one has no view), and for its 2D storage images whose store kind is the
-   other one than a bindless image's default, unsigned (ShaderInfo.rt_int_mask bits 8 and up). */
+/* A program is translated for the numeric types of its sampled and storage images. Storage stores use
+   rt_int_mask bits 8 and up to switch the bound/bindless default between float and integer, and rt_sint_mask's
+   corresponding bits to select signed stores. Atomics retain their R32ui declaration. */
 typedef struct {
     u64 tex_int, tex_sint;
-    u32 image;
+    u32 image, image_sint;
 } CsKey;
 static CsPipe* cs_pipe(const u8* code, u32 lx, u32 ly, u32 lz, u32 shm, CsKey k) {
     static CsPipe allocation_failed = {.failed = 1};
     u32 blen;
     u64 key = vk_shader_hash(code, 0x10000 + 80, &blen, cs_cb_read) ^ ((u64)lx << 40) ^ ((u64)ly << 48) ^
               ((u64)lz << 56) ^ ((u64)shm << 20) ^ ((u64)k.image << 32) ^ (u64)k.tex_int * 0x9E3779B97F4A7C15ull ^
-              (u64)k.tex_sint * 0xC2B2AE3D27D4EB4Full;
+              (u64)k.tex_sint * 0xC2B2AE3D27D4EB4Full ^ (u64)k.image_sint * 0xA24BAED4963EE407ull;
     CsPipe* p = g_csp[key & 255];
     while (p && (p->key != key || !vk_cb_reads_hold(&p->cbr, cs_cb_read))) p = p->next;
     if (p) return p;
@@ -655,6 +655,7 @@ static CsPipe* cs_pipe(const u8* code, u32 lx, u32 ly, u32 lz, u32 shm, CsKey k)
     p->si.cs_local[2] = lz;
     p->si.shared_size = (int)shm;
     p->si.rt_int_mask = k.image << 8;
+    p->si.rt_sint_mask = k.image_sint << 8;
     p->si.tex_int_mask = k.tex_int;
     p->si.tex_sint_mask = k.tex_sint;
     const char* corpus = vk_corpus_dir();
@@ -841,7 +842,7 @@ void vk_dispatch(GpuChannel* ch, const u32* q, u64 code) {
     u32* rc = ch->rcomp;
     u32 gx = qmd_grid_dim_x(q), gy = qmd_grid_dim_y(q), gz = qmd_grid_dim_z(q), lx = qmd_block_dim_x(q),
         ly = qmd_block_dim_y(q), lz = qmd_block_dim_z(q), shm = qmd_shared_alloc(q);
-    CsKey ck = {0, 0, 0};
+    CsKey ck = {0};
     u32 tcb_key;
     u64 tic_key_base;
     CsBufImg bimg[8] = {0};
@@ -887,7 +888,7 @@ void vk_dispatch(GpuChannel* ch, const u32* q, u64 code) {
 	    fe->epoch != g_vk_epoch || fe->lx != lx || fe->ly != ly || fe->lz != lz ||
         fe->shm != shm || !vk_cb_reads_hold(&p->cbr, cs_cb_read)) {
         static u8 code_buf[0x10000 + 80]; /* compute programs have no header: 80 zero bytes stand in for one */
-        CsKey unkeyed = {0, 0, 0};
+        CsKey unkeyed = {0};
         cs_read_code(pa, code_buf);
         p = cs_pipe(code_buf, lx, ly, lz, shm, unkeyed);
 		*fe = (struct cs_fast){
@@ -897,8 +898,8 @@ void vk_dispatch(GpuChannel* ch, const u32* q, u64 code) {
 			.lx = lx, .ly = ly, .lz = lz, .shm = shm, .p = p,
 		};
     }
-    /* A 2D store is translated unsigned for a bindless image and float for a bound one. An image of the other
-       class (a bindless RGBA8 target), or an integer texture, needs the program translated again, keyed on it. */
+    /* Stores default to unsigned for bindless images and float for bound ones. Descriptors of another class,
+       signed stores, and integer sampled textures select a variant keyed on their numeric types. */
     tcb_key = kepler_compute_tex_cb_index(rc);
     tic_key_base = kepler_compute_address(rc, KEPLER_COMPUTE_TIC);
     if (!p->failed)
@@ -925,10 +926,11 @@ void vk_dispatch(GpuChannel* ch, const u32* q, u64 code) {
                 continue;
             vk_gmem_words(tic_key_base + (h & 0xFFFFF) * 32ull, tic, 8);
             if (vk_image_key(&p->si, i, tic)) ck.image |= 1u << i;
+            if (vk_tex_num(tic, NULL) == 2) ck.image_sint |= 1u << i;
         }
-    if (ck.tex_int || ck.image) {
+    if (ck.tex_int || ck.image || ck.image_sint) {
         if (!p->keyed || (p->keyed->si.rt_int_mask >> 8) != ck.image || p->keyed->si.tex_int_mask != ck.tex_int ||
-            p->keyed->si.tex_sint_mask != ck.tex_sint) {
+            p->keyed->si.tex_sint_mask != ck.tex_sint || (p->keyed->si.rt_sint_mask >> 8) != ck.image_sint) {
             static u8 keyed_code[0x10000 + 80];
             cs_read_code(pa, keyed_code);
             p->keyed = cs_pipe(keyed_code, lx, ly, lz, shm, ck);
@@ -941,7 +943,7 @@ void vk_dispatch(GpuChannel* ch, const u32* q, u64 code) {
     }
     int needs_unformatted_image = 0;
     for (i = 0; i < p->si.nimg; i++)
-        needs_unformatted_image |= p->si.img[i].kind == 0 || (p->si.img[i].type == 1 && p->si.img[i].kind == 2);
+        needs_unformatted_image |= p->si.img[i].kind != 1;
     if (needs_unformatted_image && !g_vk.feat.shaderStorageImageWriteWithoutFormat) {
         LOG_LIMIT(1, "vulkan: storage image writes need shaderStorageImageWriteWithoutFormat (skipped)\n");
         g_cs_skips[CS_SKIP_FEATURE]++;
@@ -1194,7 +1196,7 @@ rebind:
             }
             Surf* t = st->flags & 1 ? vk_tex_from_tic_raw(tic) : vk_tex_from_tic(tic);
             if ((st->flags & 1) && !t) {
-                LOG_LIMIT(4, "vulkan: raw surface load requires an RGBA8 texture (skipped)\n");
+                LOG_LIMIT(4, "vulkan: raw surface load requires a 32-bit color format (skipped)\n");
                 g_cs_skips[CS_SKIP_TEXTURE]++;
                 cs_abandon_binding(originals);
                 return;
@@ -1247,7 +1249,7 @@ rebind:
                 return;
             }
             vk_gmem_words(tic_base + (h & 0xFFFFF) * 32ull, tic, 8);
-            Surf* t = vk_tex_from_tic(tic);
+            Surf* t = vk_tex_from_tic_storage(tic);
             u64 image_bytes;
             VkImageView view = vk_storage_image_view(t, &p->si, i, &image_bytes);
             if (!view) {

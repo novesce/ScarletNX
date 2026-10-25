@@ -21,18 +21,20 @@
 
 ## Status: stage 1 + stage 2a + stages 2b1–2b4 + initial 3a/3b/FS
 
-`scarletnx-3ds` runs **application CIAs** through
+`scarletnx-3ds` runs **application games** — a `.cia`, a cartridge image
+(`.cci`, `.3ds`), a bare NCCH (`.cxi`, an `.app`, homebrew's `.hbb`), a bundle of
+one (`.bcci`, `.bcxi`, `.bcia`), or a z3ds one (`.zcci`, `.zcxi`, `.zcia`) — through
 **offline static AOT -> native module -> checked ARM/Thumb execution**,
 with the compiler built into the driver. A launch reuses a finished extraction
 and module and runs until the game exits or its window closes (or for `--seconds N`,
 after which it reports where each thread is).
 
-A CIA's game is a folder of the data folder's `recompiled/`, named after its title
+A game's folder is a folder of the data folder's `recompiled/`, named after its title
 ID as a Switch game's is named (`recompiled/0004000000123400/`). It holds the compiled
 module (`<title ID>_code.so`, `_code.dll` on Windows), the blocks runs compiled at
 run time (`<title ID>.hints`), the game's state (`sdmc/`, `savedata/`, frames,
 audio), `<title ID>.ini` and a copy of the runtime named `<title ID>`. The `.ini`
-names the CIA (`source=`), the console (`model=`) and the system (`system=3ds`),
+names the game (`source=`), the console (`model=`) and the system (`system=3ds`),
 which the launcher and a build's deploy pick the driver by. Running the copy plays the
 game, as a Switch game's copy does: `recompiled/<title ID>/<title ID> --seconds=60
 --script=15000:1`, or `scarletnx-3ds --game=recompiled/<title ID>`. Where scarletnx is
@@ -40,21 +42,47 @@ also the 3DS driver (`SNX_MULTICALL`), the copy is scarletnx, which runs a 3DS g
 under a 3DS title ID's name. A build copies its runtime beside every game again
 (`cmake/deploy.cmake`): a 3DS title ID's folder gets the 3DS driver. `--outdir DIR`
 names another folder of games, and `--output DIR` the game's folder itself. A game
-an older version kept in `work/3ds/<the CIA's name>` moves into its new folder the
+an older version kept in `work/3ds/<the game's name>` moves into its new folder the
 first time it is played, its module and hints renamed.
 
+What a file holds is read from its own header, not its name: a CIA's magic at 0, an
+NCSD's at 0x100, a bare NCCH's at 0x100 (`src/3ds/loader/loader.c`). A bundle is a
+tar whose game is its first entry named as a game's, read where it lies in the
+archive (`src/3ds/loader/tar.c`), each header held to its checksum and no entry's
+data read past the archive's end. A z3ds game is Azahar's launcher's compressed one:
+its frames are decompressed once into the plain container beside the title's folder
+(`<folder>.unpacked.cci`, named by the input's extension without its z) and read from
+then on as that container is (`src/3ds/loader/z3ds.c`), the stream held to the size
+its header declares. A cartridge
+image's game is its NCSD partition 0, and the whole image is read where it lies (the
+loader takes a card-sized image, up to 8 GiB, since nothing of it is written). A
+cartridge whose partitions carry the game's update title (the base title ID with the
+update high bits 0x0004000e00000000, in partition 7 or a New 3DS's 6) is played as
+that update: the update NCCH's ExHeader, code, ExeFS sections and RomFS are the
+game's, as Azahar's `overlay_ncch` is, so the process the game runs in is the update
+title's, as the console runs it once an update is applied, while the game's folder
+stays named by the base NCCH's title ID, as the card is one game. A CIA's content
+table, ticket and TMD are parsed as before;
+a cartridge and a bare NCCH have none, and their NCCH is checked as a CIA's boot
+content is.
+
 An encrypted CIA, as a console dump is, is decrypted once with the user's own keys
-into `work/3ds/<the CIA's name>.decrypted.cia` (beside the folder `--output` names),
-which is read from then on (`src/3ds/loader/decrypt.c`). The keys are an `aes_keys.txt` in Azahar's
+into a copy beside the title's folder (`<folder>.decrypted.cia`, published only
+complete), which is read from then on (`src/3ds/loader/decrypt.c`). The keys are an `aes_keys.txt` in Azahar's
 format, looked for in `~/.3ds/aes_keys.txt` (`%USERPROFILE%\.3ds` on Windows) as
 the Switch driver looks in `~/.switch`, or named with `--keys FILE`. They are
 never part of ScarletNX. Both layers come off: each content's AES-CBC under the
 ticket's title key (itself under the common key), and the NCCH's AES-CTR under
 the primary key (slot 0x2C) and the secondary one its crypto method names (0x2C,
 0x25, 0x18, 0x1B). The decrypted CIA says NoCrypto and carries the decrypted
-contents' hashes, and it is checked as any CIA is before it is published, so keys
-that are not the console's never leave a CIA behind. Seed crypto (seeddb) is not
-supported yet.
+contents' hashes, and it is checked as any game is before it is published, so keys
+that are not the console's never leave a game behind. Seed crypto (seeddb) is not
+supported yet. An encrypted cartridge image or bare NCCH has no CIA layer: its
+NCCHs' own layer is taken off where each NCCH lies (the game partition and an update
+partition both), and the whole image copied through into the copy beside the title's
+folder (`<folder>.decrypted.cci`), named by the input's extension, then checked as
+any image is (a bundle's copy is the bare game, read from then on by its content). A copy of a card-sized image takes its size in disk, and an
+already-decrypted image is read as it is.
 
 Code the static discovery misses (an indirect call's target, a return into it)
 compiles when the dispatch first reaches it (`src/3ds/aot/jit.c`, through the ARM
@@ -177,10 +205,16 @@ Implemented:
 - Stage 1: `SNX_BUILD_3DS`, independent driver, Old/New 3DS board profiles,
   physical-range bounds checks, lifecycle/base ticks, GUI CIA drops/browser/
   recents and strict routing to the 3DS driver without Switch-only flags.
-- `src/3ds/loader/`: streaming CIA sections; signature-dependent ticket/TMD
-  offsets; title, boot-index, content bitmap, unique ID/index, content-info and
-  SHA-256 validation. Boot content is selected by its TMD index, not table order.
-  All present contents and container metadata are materialized on disk.
+- `src/3ds/loader/`: the container by the file's own header (a CIA, an NCSD
+  cartridge image, a bare NCCH); streaming CIA sections; signature-dependent
+  ticket/TMD offsets; title, boot-index, content bitmap, unique ID/index,
+  content-info and SHA-256 validation. Boot content is selected by its TMD index,
+  not table order. All present contents and container metadata are materialized on
+  disk. A cartridge image's game is its NCSD partition 0, its update taken by title
+  ID from the later partitions, both read where they lie (up to a card's 8 GiB);
+  a bare NCCH fills the file. A proto image (its content size in bytes, as an early
+  tool's is) is read as Azahar's `is_proto` reads it, with the usual priority given
+  to an application whose ExHeader names none.
 - Decrypted application NCCH/ExHeader, checked process segment/BSS metadata,
   ExeFS files and hashes, bounded backward LZSS/BLZ `.code` expansion, and IVFC
   level-3 RomFS extraction into a host tree. Traversal/invalid UTF-16, metadata
@@ -430,15 +464,16 @@ Unknown SVCs still stop explicitly. No service or device success is fabricated,
 except for unknown commands and services, which answer success as a Switch game's
 do unless `--ctr_auto_stub_ipc=0` asks for the console's answers.
 
-By default nothing of the CIA is extracted. `scarletnx-3ds game.cia` maps the CIA read-only and checks it as the
-extraction would (the CIA and TMD tables, every content's SHA-256, the NCCH and ExHeader hashes, each ExeFS file's
+By default nothing of the game is extracted. `scarletnx-3ds game` maps the game read-only and checks it as the
+extraction would (a CIA's content table and its every content's SHA-256, the NCCH and ExHeader hashes, each ExeFS file's
 hash, the RomFS superblock and its metadata). The game's ExeFS files and its RomFS (level 3, the image the game reads)
 are then read where they lie in the mapping, and only the decompressed `.code` is copied into memory. The game's
 folder keeps its module, its copy of the runtime and its state alone: `sdmc/` and the frames and audio it writes. An extraction an earlier
 `--extract-container` left there is taken away, its compiled module and saves kept. The image's identity is the same
-either way, so a module compiled in one mode loads in the other.
+either way, so a module compiled in one mode loads in the other. The manifest records which container the game came
+from (`container=`, and `overlay=1` when it is a cartridge's update), which the image loader ignores.
 
-`--extract-container` (the launcher's *Extract dump*) extracts the CIA into its folder first and plays from
+`--extract-container` (the launcher's *Extract dump*) extracts the game into its folder first and plays from
 the extraction, as before. `-x` extracts only:
 
 ```sh
@@ -447,11 +482,13 @@ build/3ds/scarletnx-3ds -x --output work/my-title game.cia
 
 The output is a directory containing `contents/*.app`, `exefs/` (with
 expanded/page-padded `.code`), `romfs/`, raw container/NCCH/ExHeader metadata and
-`manifest.ini` with source/code hashes and segment layout. The default directory
+`manifest.ini` with source/code hashes and segment layout (a CIA's `contents/` and
+container metadata; a cartridge image's, a bare NCCH's and a bundle's without them,
+a bundle's game read from its entry). The default directory
 is the game's folder, `recompiled/<title ID>`, in the data folder the Switch driver uses
 (`--data DIR`, else a portable copy's folder, else the user's data folder, from a
 build tree too). On Linux the user's data folder keeps `work/` (the decrypted CIAs)
-in `~/.cache/scarletnx/work/3ds/`. No source CIA
+in `~/.cache/scarletnx/work/3ds/`. No source game
 needs to be mounted by the future guest FS. Extraction is privately staged, then
 published only after all checks succeed, and a failure removes the staging files.
 As in the Switch driver, a folder already at the output path is taken as a
@@ -488,16 +525,19 @@ status**. When the last thread ends with ExitThread the driver prints
 - 0: help/info, extract-only or compile-only (`-r`) success, a guest that exited
   or a window that was closed.
 - 1: malformed data, IO or limit failure, ABI mismatch or guest fault.
-- 2: invalid CLI arguments or missing/non-CIA file path.
+- 2: invalid CLI arguments or a missing/non-game file path.
 - 3: unsupported format, ISA or SVC, a failed compile, the text-size cap, a
   missing static target, an exhausted block budget or a guest with no thread that
   can ever run again.
 
 ### Current limits and trust
 
-Only application CIA/NCCH content is supported (encrypted ones decrypted with the
-user's keys as above, without seed crypto), not updates, DLC, system titles or nonstandard NCCH media units/platforms. Input and
-total materialized output are each capped at 1 GiB; metadata tables at 16 MiB,
+Only application content is supported: a CIA (encrypted ones decrypted with the
+user's keys as above, without seed crypto), a cartridge image's game partition and
+update partition, and a bare NCCH — not a cartridge's manual or DLP partitions as
+content of their own, DLC, system titles or nonstandard NCCH media units/platforms. A
+cartridge image may be as large as a card (8 GiB), since it is read where it lies; a
+CIA's input and the total materialized output are each capped at 1 GiB; metadata tables at 16 MiB,
 code at 64 MiB, entries at 100000, and RomFS nesting at 64. Host filenames must
 be portable safe components (maximum 255 UTF-8 bytes); unsafe/reserved names
 are rejected rather than silently renamed. Host paths with control characters
@@ -507,10 +547,11 @@ are refused to prevent log/banner injection. Larger/unsupported inputs fail clos
 signatures, certificate trust, ticket rights and ExHeader access-descriptor
 signatures are not authenticated. The headers' and superblocks' hashes (NCCH
 ExHeader, ExeFS and RomFS superblocks, the TMD's tables) are checked every time.
-The whole-data ones (each content, each ExeFS file, the input itself) are checked
-by an extraction only, not by the launch that reads a CIA where it lies, where they
+The whole-data ones (each CIA content, each ExeFS file, the input itself) are checked
+by an extraction only, not by the launch that reads a game where it lies, where they
 cost seconds on a retail title; an extraction to a folder given hashes no input. The
-internal IVFC hash tree is not separately verified.
+internal IVFC hash tree is not separately verified. The NCSD header's RSA signature
+is read and ignored, as a CIA's sections' are.
 AOT execution is **not a host security sandbox**. Run only images you trust:
 compiler correctness is not isolation, and native loading can execute host
 constructors before descriptor validation. A launch loads the `<title ID>_code.so` an
@@ -546,7 +587,8 @@ build/3ds/scarletnx-3ds --model new --board-info
 build/3ds/scarletnx-3ds --output work/small-title --max-blocks 100000 small.cia
 ```
 
-The 3DS tests are named `3ds_*` and `ctr_*` (`ctest -R "3ds|ctr"`), and the ARM
+The 3DS tests are named `3ds_*` and `ctr_*` (`ctest -R "3ds|ctr"`, `3ds_cci` the
+cartridge images' and bare NCCHs'), and the ARM
 CPU tests the 3DS shares with the Switch's 32-bit games `arm_*`. Use `-DSNX_BUILD_GUI=ON` to include the launcher and its
 regression tests. `-DSNX_BUILD_3DS=OFF` omits the driver with its compiler and
 runtime (the GUI diagnoses its absence). The profile decoder test needs no LLVM.
@@ -599,7 +641,23 @@ constants from `src/core/core_timing.h`, and the system-initialization design in
 title_metadata,ticket,signature,ncch_container}.*`, `src/core/loader/ncch.cpp`
 and `src/core/hle/romfs.cpp`. The bounded BLZ implementation credits the
 Citra/Azahar algorithm; the extractor and page controller are new C code.
-Initial 2b CPU/profile and bus code is new project C code using ARMv6K/legacy
+The z3ds support (`src/3ds/loader/z3ds.c`) reads Azahar's `Z3DSWriteIOFile` and
+`Z3DSReadIOFile` (`common/file_derived.{h,cpp}`, GPL-3.0-or-later) for the container's
+header and its zstd seekable stream, whose frames a streaming decompressor takes in
+order and whose seek-table footer is the skippable frame it skips; the unpacker is new
+C code over zstd's own streaming API.
+The bundle support (`src/3ds/loader/tar.c`) reads Azahar's `TarArchive`
+(`common/tar_file.cpp`, GPL-3.0-or-later) for what a bundle is taken to be: a ustar
+archive, the game its first entry named as a game's, hidden and non-file entries
+skipped, and duplicate names refused; the reader is new C code over the POSIX
+header layout.
+The cartridge-image support (`src/3ds/loader/ncsd.c`, the container
+dispatch, the update overlay) reads `ncch_container.cpp`'s `AutoOpenNCCHNCSD`,
+`LoadHeader` and `is_proto`, and `loader/ncch.cpp`'s `OpenUpdateNCCH`,
+`UPDATE_TID_HIGH` and `overlay_ncch` at revision
+`68202bc4ff7edf9d7280ec0dcd6572b7cd1ae26e` (GPL-3.0-or-later) for the NCSD
+partition layout and the base/update semantics; the C implementation is new, as
+the CIA one is. Initial 2b CPU/profile and bus code is new project C code using ARMv6K/legacy
 Thumb architectural semantics; it does not copy an Azahar CPU engine. The
 shared emitter retains its existing notices. LLVM's `mpcore` assembler model
 and Unicorn 2.1.4's ARM11 MPCore model are test references, not runtime engines.

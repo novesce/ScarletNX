@@ -281,7 +281,8 @@ Remaining examples: POSIX.
   its checkout's `build/native-recomp` (`build/win64-recomp` on Windows). `-q` (`--quiet`) prints no progress.
   `--keep-c` is the deprecated spelling of `--keep-ir`.
 - **Codegen:** `--no-build` stages data/INI only; `--jit-only` omits AOT functions.
-  `--chunk N` sets instructions per code unit. Each unit's object is kept in `units/` of the cache folder
+  `--chunk N` (`--unit_instructions=N`) sets the instructions per code unit: 90000 by default, 20000 on Android and
+  iOS, where a smaller unit takes less memory at once. Each unit's object is kept in `units/` of the cache folder
   ([Folders](#folders)), which every game's recompile shares, under the SHA-256 of the unit's LLVM IR, the LLVM, the
   CPU and its features, the optimization level and the LLVM Internals: a unit found there is not compiled again (a
   recompile after an `SNX_ABI` change that leaves the unit's IR alone, or of a game whose code changed in a few units),
@@ -309,6 +310,7 @@ With `--out work/Game` and `--outdir games` as above (without them, see [Folders
 | `recompiled/<id>/shader_cache/vk_pipelines.bin` | Vulkan pipeline cache |
 | `recompiled/<id>/shader_cache/<id>.vkshaders` | Translated shaders and the pipelines made, made again at the next start |
 | `recompiled/<id>/shader_cache/<id>.vkshipped` | The shaders found in the game's own files and executables, prepared ahead of time (`prepare_shaders`), each read when the game first draws with it. It can be large: one game's 2,700 shaders took 245 MB, another's 18,500 took 2 GB |
+| `recompiled/<id>/shader_cache/<id>.vkscan` | The game's files found to hold no shaders, so that after an update of ScarletNX or the driver the files aren't all read again to look for them |
 
 ## GDB (Linux)
 
@@ -533,8 +535,8 @@ first run from. It says first what older versions did that this one does otherwi
 only said, nothing is moved), then asks:
 
 1. **Appearance**: the launcher's language (app.ini's `language`), starting on the one it has (the system's, until
-   one is picked), and in the launcher's setup its theme and UI scale beside it; the terminal's asks the language
-   alone.
+   one is picked), and in the launcher's setup its theme, UI scale, side panel and Games' view and icon size beside it;
+   the terminal's asks the language alone.
 2. **Install type**: installed, in the user's folders ([Folders](#folders)), or portable, everything in
    `.scarletnx/` beside the program (or the AppImage), which it makes. An app (Android, iOS) has no other.
 3. **Folders**, the launcher's: where its recompiled games go and the folders of dumps it lists (Settings > App >
@@ -570,8 +572,8 @@ written, so a data folder with no users.ini plays as `Player`, uid `0123456789ab
 ## Settings / input
 
 `Game.ini`: help rewritten at startup, most settings hot-reload. `--key=value` overrides one run.
-Restart for `docked`, `fullscreen`, `language`, `resolution`, `anisotropy`, `memory_gb`, `heap_max_mb`, `airplane_mode`,
-`ldn`, `room`, `pipeline_threads`, `prepare_shaders`, `jit_threads`, and the `[Debug]` settings other than `log`, `auto_stub_ipc` and `diag`.
+Restart for `docked`, `fullscreen`, `language`, `resolution`, `anisotropy`, `memory_gb`, `memory_fit`, `heap_max_mb`,
+`thread_stack_mb`, `map_limit_mb`, `map_limit_files`, `airplane_mode`, `ldn`, `room`, `pipeline_threads`, `prepare_shaders`, `jit_threads`, and the `[Debug]` settings other than `log`, `auto_stub_ipc` and `diag`.
 `scarletnx --settings` prints each setting the launcher's Settings offer, one a line: its section, key, default,
 type, range and help, tab-separated. Every setting, the recompiler's too, is described once in
 `src/nx/runtime/settings.txt`, which the build generates the tables and `g_settings` from.
@@ -579,18 +581,26 @@ type, range and help, tab-separated. Every setting, the recompiler's too, is des
 | Key | Default | Effect |
 | --- | --- | --- |
 | `source` | none | The dump the game was made from, which the recompile writes. Without `--extract-container` the game reads its ExeFS and RomFS from it. Left out, the `<id>.source` link older versions made is read instead |
+| `state_slots` | `10` | The save state slots the menu's Save states page lists and F9 steps through, 1 to 32 |
+| `state_auto_backup` | `1` | `1` saves the game to the auto slot before a save state is loaded over it, so the load can be undone |
 | `docked` | `1` | `1` is TV mode, `0` handheld mode (1280x720) |
 | `fullscreen` | `0` | `1` starts fullscreen, except in timed test runs (`--seconds`, `--frames`). `-f` or `--fullscreen=0` sets it for one run. F11 or Alt+Enter switches without changing it |
 | `language` | `1` | The game's language, English (US). The `.ini` lists the others, `0` to `17`. One the runtime doesn't know is English (US) |
 | `showcase` | `0` | `1` draws player 1's buttons and sticks, as the game gets them, and the frames a second in a corner of the window, for a video. F6 turns it on and off |
 | `showcase_corner` | `br` | The corner `showcase` draws in: `tl` top left, `tr` top right, `bl` bottom left, `br` bottom right |
+| `stats` | `0` | `1` draws the frames a second, the last frame's time, the processor and memory the game takes (`?` where the system does not tell) and a graph of its last 120 frames' times (guides at 60 and 30 FPS, a frame slower than 30 FPS in red) in a corner over the game. F12 or the game's menu turns it on and off |
+| `stats_corner` | `tl` | The corner `stats` draws in, as `showcase_corner`'s; in showcase's own corner it goes beside showcase's box, toward the middle |
 | `resolution` | `1` | Internal 3D scale, `0.25` to `4`: `1` native, `2` double, `0.75` and `0.5` faster |
 | `shadows` | `1` | `0` skips shadow maps |
 | `vsync` | `1` | Images are shown only on the display's refresh, so nothing tears. `0` doesn't wait for it: the newest image is shown on the next refresh where the display can do that, else at once (which may tear). A display that can do neither waits for the refresh as `1` does |
 | `anisotropy` | `0` | Texture filtering as the game asks. `2` to `16` sharpens surfaces seen at an angle |
 | `fps_limit` | `game` | The pace the game asks for, as on the console: 60 FPS, or 30 for a game made for 30. `0` is unlimited, and `10` to `1000` is that many FPS |
 | `memory_gb` | `0` | Memory the game sees. Below `6` it is the console's 3.2 GB, `6` gives 4.8 GB and `8` gives 6.8 GB. Games that run out of memory on 3.2 GB need `6` |
+| `memory_fit` | `0` (iOS `1`) | `1` tells the game no more of `memory_gb`'s memory than the device can still give it, measured as the game starts, less what the rest of ScarletNX takes, so a device with less than the console has is not run out of memory. The log says what it measured. `0` tells it all of it |
 | `heap_max_mb` | `0` | The most heap the game can allocate, in MB. `0` is as much as the memory allows |
+| `map_limit_mb` | `0` (iOS `256`) | The most of the game's RomFS and ExeFS files mapped into memory, in MB: the ExeFS and a `romfs.bin` at start, a `romfs` folder's files as the game first reads them. `0` is no limit. A file past it is read from disk when the game asks, which is slower and leaves address space for threads and graphics where a device has little |
+| `map_limit_files` | `0` (iOS `2048`) | The most of those files mapped. `0` is no limit. Each mapped file holds a descriptor, of which a device may give the whole app a few thousand |
+| `thread_stack_mb` | `32` (iOS `8`) | The host stack of each of the game's threads, in MB, which a game's deep calls take. Less leaves address space for more threads where a device has little, and a game that calls very deep may then stop |
 | `pipeline_threads` | `0` | Threads that make the GPU's new pipelines while the game goes on, and those of earlier runs before it starts with `prepare_shaders=2`. `0` uses all the computer's threads but two, two to twelve. `1` to `32` is that many. More make a first run's new pipelines sooner, with less CPU left for the game |
 | `async_pipelines` | `0` | `1` skips what a new shader draws while its pipeline is made, where the game would otherwise pause until it is ready. The game no longer stops where a new shader first appears, and the things that shader draws show up a few frames later. `0` waits for every pipeline |
 | `prepare_shaders` | `2` | Prepares the shaders the game ships in its files and executables ahead of time, so the game's draws needn't make them and it stutters less. They are prepared again after ScarletNX, the GPU or its driver is updated. `0` (Off) makes each shader only when the game first draws with it. `1` (While playing) prepares them in the background, and the game uses them once all are ready. `2` (Before starting) prepares them behind a loading screen in the launcher theme's look, which also waits for the shader cache of earlier sessions, so an opening movie doesn't stutter. A key that types, an arrow or the keypad, a gamepad button other than Home, or a tap starts the game at once, and the rest is prepared while it runs. Esc quits (on Android, back opens the menu, whose Exit quits). F2 or a gamepad's Home opens the menu, and F11 or Alt+Enter switches fullscreen, without starting the game. The screen shows only when the wait passes a quarter second, its words are in English, and a timed run (`--seconds`) starts its clock after it |
@@ -668,6 +678,13 @@ detected joystick, whether it has an SDL mapping, and any gamepad open error. On
 the hidraw nodes of the console's controllers, for Joy-Con features. Reload udev rules and reconnect the controller
 after installation. Other HIDAPI controllers may need their vendor's own hidraw rule.
 
+On FreeBSD SDL reads the pads itself, over HIDAPI and libusb (the only way an Xbox pad is read: its own protocol is
+not HID) and the `usbhid` stack's `/dev/uhid*` nodes. Install `games/devd-controller-rules` and put your user in the
+`games` group: its devd rules give SDL's libusb the controller's USB device. The `libusb` package must be installed,
+which SDL loads when HIDAPI starts. A pad a driver has claimed — `xb360gp(4)`, `hgame(4)` or `webcamd`, which hand it
+out as `/dev/input/event*` and `/dev/input/js*` — sits where SDL cannot read it: stop that driver and reconnect the
+pad.
+
 | Keyboard | Switch |
 | --- | --- |
 | Arrows; WASD / IJKL | D-pad; L/R sticks |
@@ -676,8 +693,24 @@ after installation. Other HIDAPI controllers may need their vendor's own hidraw 
 | Enter / Backspace | Plus / Minus |
 
 F1 help; F2 the game's menu; F3 screenshot; F4 FPS limit off and on; F5 thread dump; F6 showcase on and off;
-F7 60-second Tracy capture (SNX_TRACY builds); F11/Alt+Enter fullscreen; Escape quit. A window shows at most one
-image per refresh and drops the rest unless images tear, and the game keeps the pace `fps_limit` sets.
+F7 save state; F8 load state; F9 next save state slot; F10 60-second Tracy capture (SNX_TRACY builds); F11/Alt+Enter
+fullscreen; F12 stats on and off; Pause pauses the whole game and resumes it (the window's title says "(paused)");
+Escape quit. A window shows at most one image per refresh and drops the rest unless images tear, and the game keeps
+the pace `fps_limit` sets.
+
+A save state is the whole game at one moment, kept in `states/` in the game's folder, one file a slot. F7 saves to
+the selected slot and F8 loads it, and F9 selects the next slot and says what it holds. The menu's **Save states**
+page lists the slots with the date, the play time and a picture of each, and saves, loads and deletes them. A load
+and a delete ask first. The game waits while the page is open. Before a load the game is saved to the auto slot,
+listed first, so a load can be undone (`state_auto_backup`). The game's own save files are never part of a state,
+and loading one leaves them as they are. A state loads only into the game, update and mods it was saved with. A newer
+ScarletNX loads it too, unless it changed the recompiled code (`SNX_ABI`) or the layout of what a state holds, and
+then it says so.
+
+In the launcher, S on Games lists the save states of the game in focus, the newest first, with the picture of the one
+in focus beside them. Enter plays the game from that state, and Del deletes it after asking. A state this version
+can't load is shown in the failure colour, and Enter on it says why. `--state_load=0:FILE` plays a game from the
+state FILE the same way.
 
 In the game's menu the arrows, Enter and Escape move, select and go back; a gamepad's D-pad or left stick, A and
 B do the same, the on-screen controls' too, and a direction held goes on after a moment.

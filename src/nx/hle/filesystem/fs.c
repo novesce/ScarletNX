@@ -1,12 +1,13 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
    Copyright 2026 the ScarletNX contributors
-   Ported from Eden (src/core/file_sys/fsmitm_romfsbuild.cpp):
-   SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project */
+   Ported from Eden (src/core/file_sys/fsmitm_romfsbuild.cpp, system_archive/mii_model.cpp):
+   SPDX-FileCopyrightText: Copyright 2018, 2019 yuzu Emulator Project */
 /* fsp-srv over the game's indexed data folder: the RomFS (a romfs.bin, an image made up from the romfs/ folder, or
    the game's dump read in place), save data, the SD card and the system archives */
 #include "nx/hle/filesystem/fs.h"
 #include "nx/hle/filesystem/fs_tree.h"
 #include "nx/runtime/main.h"
+#include "nx/runtime/state_io.h"
 #include "nx/runtime/options.h"
 #include "nx/hle/services/services.h"
 #include "nx/hle/services/services_int.h"
@@ -187,7 +188,7 @@ static void dump_open(const char* keys, const char* title_keys) {
     g_hle.fs.dfs = snx_dump_fs(&g_hle.fs.dump);
     if (!g_hle.fs.dfs) fatal("Could not read the game's program in its dump %s: the line before says why", source);
     snx_hac_on_exit(NULL, NULL);
-    pm_init(&g_hle.fs.dlock);
+    pm_init(&g_host.fs.dlock);
     if (kind == SNX_ADDON_UPDATE) {
         LOG("fs: ExeFS and RomFS read from the update %s over the game's dump %s (%.1f MB mapped)\n", addon, source,
             (double)(g_hle.fs.dmap.size + g_hle.fs.amap.size) / 1048576.0);
@@ -263,7 +264,7 @@ static void dlcs_open(const char* keys, const char* title_keys) {
         free(ini);
         free(dump);
     }
-    if (g_hle.fs.naocs && !g_hle.fs.dfs) pm_init(&g_hle.fs.dlock); /* dump_open, before this, made it for the game */
+    if (g_hle.fs.naocs && !g_hle.fs.dfs) pm_init(&g_host.fs.dlock); /* dump_open, before this, made it for the game */
     free(ids);
     free(data);
     free(folder);
@@ -344,9 +345,9 @@ static u8* dump_exefs(const char* path, u64* size) {
     if (i == count || files[i].size > SIZE_MAX) return NULL;
     data = malloc(files[i].size ? (size_t)files[i].size : 1);
     if (!data) return NULL;
-    pm_lock(&g_hle.fs.dlock);
+    pm_lock(&g_host.fs.dlock);
     failed = snx_hac_fs_read(g_hle.fs.dfs, i, 0, data, (size_t)files[i].size);
-    pm_unlock(&g_hle.fs.dlock);
+    pm_unlock(&g_host.fs.dlock);
     if (failed) {
         WARN("fs: could not read %s from the game's dump\n", path);
         free(data);
@@ -362,13 +363,13 @@ u8* fs_html_document(const char* path, u64* size) {
     if (!g_hle.fs.dfs) return NULL;
     full = snx_format("html-document/%s", path);
     if (!full) return NULL;
-    pm_lock(&g_hle.fs.dlock);
+    pm_lock(&g_host.fs.dlock);
     if (!g_hle.fs.html_tried) { /* opened when a page is first asked for, and kept, as the program's is */
         g_hle.fs.html_tried = 1;
         g_hle.fs.hfs = snx_dump_html_fs(&g_hle.fs.dump);
     }
     if (g_hle.fs.hfs) data = snx_romfs_file(g_hle.fs.hfs, full, &n);
-    pm_unlock(&g_hle.fs.dlock);
+    pm_unlock(&g_host.fs.dlock);
     free(full);
     if (data) *size = n;
     return data;
@@ -414,11 +415,13 @@ void fs_init(const char* keys, const char* title_keys) {
     memcpy(g_datadir, g_hle.fs.tree.base, n);
     if (n && g_datadir[n - 1] != '/' && g_datadir[n - 1] != '\\') g_datadir[n++] = '/';
     g_datadir[n] = 0;
-    /* RomFS and ExeFS are what games read most and never change: open and map them once, for the whole run, instead
-       of opening them on demand like the save and SD card files. ExeFS first: each mapped file holds a descriptor
-       (macOS allows 61440 a process), and a game with more files than that left its executables unmapped */
+    /* RomFS and ExeFS are what games read most and never change: map them for the rest of the run, instead of opening
+       them on demand like the save and SD card files. The ExeFS and a romfs.bin at startup; a romfs/ folder's files as
+       the game first reads them (romfs_map), within the same limits: each mapped file holds a descriptor (Windows'
+       C runtime has 8192, macOS allows 61440 a process) and a mapping (many Linux systems allow 65530, which guest
+       memory needs too), and a game reads few of its files at a time (one has 304,000) */
     static const char* const shared_paths[] = {"exefs", "romfs", "romfs.bin"};
-    unsigned shared = 0, failed = 0;
+    FsShare share = {.bytes = (uint64_t)g_settings.map_limit_mb << 20, .files = (unsigned)g_settings.map_limit_files};
     pm_lock(&g_hle.fs.tree.lock);
     /* the console empties the application's temporary storage when the application is launched, and a game finds it
        empty at first use */
@@ -433,16 +436,32 @@ void fs_init(const char* keys, const char* title_keys) {
         FsNode* node;
         if (g_hle.fs.dump.patch.found) break; /* an update's, read over the game's dump: the game's files unread */
         if (fs_tree_lookup(&g_hle.fs.tree, NULL, shared_paths[i], &node)) continue;
-        r = fs_tree_share(&g_hle.fs.tree, node, &shared, &failed);
+        share.lazy = !strcmp(shared_paths[i], "romfs");
+        r = fs_tree_share(&g_hle.fs.tree, node, &share);
         if (r != FS_TREE_OK) fatal("Could not map %s%s (error %d)", g_datadir, shared_paths[i], r);
     }
+    g_host.fs.romfs = share; /* what is left of the limits */
+    g_host.fs.romfs.lazy = 1;
     pm_unlock(&g_hle.fs.tree.lock);
-    LOG("fs: %u RomFS/ExeFS files mapped for the whole run\n", shared);
-    if (failed) WARN("fs: %u RomFS/ExeFS files could not be mapped, they are read on demand\n", failed);
+    LOG("fs: %u RomFS/ExeFS files mapped for the whole run, %.1f MB\n", share.shared,
+        (double)share.mapped_bytes / 1048576.0);
+    if (share.skipped)
+        LOG("fs: %u RomFS/ExeFS files past map_limit_mb=%d or map_limit_files=%d are read on demand\n", share.skipped,
+            g_settings.map_limit_mb, g_settings.map_limit_files);
+    if (share.failed) WARN("fs: %u RomFS/ExeFS files could not be mapped, they are read on demand\n", share.failed);
 }
 
-/* Contents held in memory, read without the host: an injected file, or one mapped at startup */
-static int node_in_memory(const FsNode* node) { return node->is_virtual || node->fd >= 0; }
+/* Contents held in memory, read without the host: an injected file, or one mapped */
+static int node_in_memory(const FsNode* node) { return node->is_virtual || fs_tree_mapped(node); }
+/* tree.lock held: a RomFS file the game reads mapped, unless it is or the limits are reached (fs_tree_map). The first
+   file past them is said in the log */
+static void romfs_map(FsNode* node) {
+    unsigned skipped = g_host.fs.romfs.skipped;
+    if (!fs_tree_map(&g_hle.fs.tree, node, &g_host.fs.romfs) || skipped || g_host.fs.romfs.skipped == skipped) return;
+    LOG("fs: %u RomFS/ExeFS files mapped, past map_limit_mb=%d or map_limit_files=%d: the game's other files are read "
+        "on demand\n",
+        g_host.fs.romfs.shared, g_settings.map_limit_mb, g_settings.map_limit_files);
+}
 static const u8* node_memory(const FsNode* node) { return node->is_virtual ? node->virtual_data : node->map; }
 
 /* Callers hold tree.lock: content I/O is permitted only after resolving an indexed node. */
@@ -478,7 +497,7 @@ int fs_map_file(const char* path, PFileMap* map) {
     if (dump_has_exefs(path)) return -1;
     pm_lock(&g_hle.fs.tree.lock);
     if (!fs_tree_lookup(&g_hle.fs.tree, NULL, path, &node) && !node->is_dir) {
-        if (node->fd >= 0) { /* already mapped for the whole run: lend that view */
+        if (fs_tree_mapped(node)) { /* already mapped for the rest of the run: lend that view */
             map->data = node->map;
             map->size = node->size;
             map->borrowed = 1;
@@ -583,9 +602,12 @@ static void rnode_free(RNode* n) {
     }
 }
 /* dir's child named name, made where it has none. One of the other kind is replaced, everything under it gone: a mod's
-   file over the game's folder of its name, or its folder over a file */
-static RNode* rnode_child(RNode* dir, const char* name, int is_dir) {
-    RNode **at = &dir->children, *n;
+   file over the game's folder of its name, or its folder over a file. last: the child this returned before for dir
+   (NULL for none), where the search starts when name comes after it. Its callers place a folder's entries in strcmp
+   order, so each is found a step past the last, and a folder of n files is laid out in n steps, not n * n / 2 (one
+   game's folder of 75,940 took a minute at every start) */
+static RNode* rnode_child(RNode* dir, RNode* last, const char* name, int is_dir) {
+    RNode **at = last && strcmp(last->name, name) < 0 ? &last->next : &dir->children, *n;
     int c = 1;
     while (*at && (c = strcmp((*at)->name, name)) < 0) at = &(*at)->next;
     if (*at && !c) {
@@ -604,8 +626,9 @@ static RNode* rnode_child(RNode* dir, const char* name, int is_dir) {
    folders over those of the folder of its name */
 static void rnode_lay(RNode* into, const FsNode* dir) {
     const FsNode* c;
+    RNode* n = NULL;
     for (c = dir->children; c; c = c->next) {
-        RNode* n = rnode_child(into, c->name, c->is_dir);
+        n = rnode_child(into, n, c->name, c->is_dir);
         if (c->is_dir)
             rnode_lay(n, c);
         else {
@@ -771,9 +794,9 @@ static int image_read(u64 off, void* dst, u64 size, int locked, int quiet) {
         return 0;
     }
     if (g_hle.fs.dfs) {
-        pm_lock(&g_hle.fs.dlock);
+        pm_lock(&g_host.fs.dlock);
         rc = size > SIZE_MAX ? -1 : snx_hac_fs_read_romfs(g_hle.fs.dfs, off, out, (size_t)size);
-        pm_unlock(&g_hle.fs.dlock);
+        pm_unlock(&g_host.fs.dlock);
         if (rc) {
             memset(out, 0, (size_t)size);
             if (!quiet)
@@ -817,6 +840,7 @@ static char* image_name(const u8* p, u32 length) {
    the tables don't hold */
 static int image_dir(RImage* im, u32 off, RNode* into, unsigned depth) {
     u32 child, file;
+    RNode* last = NULL;
     if (depth > ROM_DEPTH_MAX || (u64)off + ROM_DIR_ENTRY > im->dir_bytes) return -1;
     child = snx_ld_le32(im->dirs + off + 8);
     file = snx_ld_le32(im->dirs + off + 12);
@@ -836,7 +860,7 @@ static int image_dir(RImage* im, u32 off, RNode* into, unsigned depth) {
             free(name);
             return -1;
         }
-        n = rnode_child(into, name, 0);
+        n = last = rnode_child(into, last, name, 0);
         free(name);
         n->node = NULL;
         n->base = im->data + at;
@@ -852,7 +876,7 @@ static int image_dir(RImage* im, u32 off, RNode* into, unsigned depth) {
         length = snx_ld_le32(e + 20);
         if (length > im->dir_bytes - child - ROM_DIR_ENTRY || !(name = image_name(e + ROM_DIR_ENTRY, length)))
             return -1;
-        n = rnode_child(into, name, 1);
+        n = last = rnode_child(into, last, name, 1);
         free(name);
         if (image_dir(im, child, n, depth + 1)) return -1;
         child = snx_ld_le32(e + 4);
@@ -992,11 +1016,17 @@ static int rfile_read(RFile* rf, u64 rel, u8* dst, u64 size, int quiet) {
     if (!node) return image_read(rf->base + rel, dst, size, 0, quiet); /* the game's image's, under the mods' */
     if (!quiet && !__atomic_exchange_n(&rf->logged, 1, __ATOMIC_RELAXED))
         LOG("RomFS: reading %s (%.1f KB)\n", node->name, (double)node->size / 1024.0);
-    if (node->fd >= 0) { /* mapped for the whole run, and never changes */
+    if (fs_tree_mapped(node)) { /* mapped for the rest of the run, and never changes */
         memcpy(dst, node->map + rel, (size_t)size);
         return 0;
     }
     pm_lock(&g_hle.fs.tree.lock);
+    if (!quiet) romfs_map(node); /* the game's read: the runtime's own (the shader pass) maps nothing */
+    if (fs_tree_mapped(node)) {
+        pm_unlock(&g_hle.fs.tree.lock);
+        memcpy(dst, node->map + rel, (size_t)size);
+        return 0;
+    }
     if (node->is_virtual && node->attached) {
         memcpy(dst, node->virtual_data + rel, (size_t)size);
         pm_unlock(&g_hle.fs.tree.lock);
@@ -1180,9 +1210,9 @@ static int nn_fssrv_sf_IStorage_Read(SvcObj* self, i64 offset, IpcBuf buffer, i6
         u64 total = snx_hac_fs_romfs_size(fs);
         R_UNLESS(sz <= (u64)INT64_MAX - off && off <= total && sz <= total - off, FS_OUT_OF_RANGE);
         R_UNLESS(buffer_valid(a, sz) && sz <= SIZE_MAX, FS_OUT_OF_RANGE);
-        pm_lock(&g_hle.fs.dlock);
+        pm_lock(&g_host.fs.dlock);
         rc = snx_hac_fs_read_romfs(fs, off, GP(a), (size_t)sz);
-        pm_unlock(&g_hle.fs.dlock);
+        pm_unlock(&g_host.fs.dlock);
         return rc ? FS_OUT_OF_RANGE : 0;
     }
     if (!data) { /* the RomFS */
@@ -1359,6 +1389,7 @@ static SvcObj* file_new(FsNode* node, u32 mode, int storage, u32* rc) {
         return NULL;
     }
     /* a mapped node is readonly, so this handle only reads, from the mapping */
+    if (!(mode & 2)) romfs_map(node);
     FILE* host = node_in_memory(node) ? NULL : node_open(node, (mode & 2) ? "rb+" : "rb");
     if (!node_in_memory(node) && !host) {
         *rc = FS_NOTFOUND;
@@ -1607,11 +1638,39 @@ static void ngword2_name(u32 i, char name[32]) {
         snprintf(name, 32, "version.dat");
 }
 static u32 ngword2_file_size(u32 i) { return i < NGWORD2_AC_COUNT ? NGWORD2_AC_SIZE : 4; }
-static const u8* ngword2_file_data(u32 i) { return i < NGWORD2_AC_COUNT ? ngword2_ac : ngword2_version; }
-/* the 52 files in a RomFS laid out like romfs_build's */
-static void ngword2rom_init(void) {
-    u8* m = g_hle.fs.ngword2rom;
-    u32 dbuckets = hcount(1), fbuckets = hcount(NGWORD2_FILES);
+static void ngword2_file_write(u32 i, u8* out) {
+    memcpy(out, i < NGWORD2_AC_COUNT ? ngword2_ac : ngword2_version, ngword2_file_size(i));
+}
+
+/* MiiModel, the Mii parts' shapes and textures, as a placeholder with no parts in it. The SDK's resource loader (as a
+   game links it, nn::mii::detail) reads each file whole and indexes it from its start, checking nothing of its
+   header: after 0xc bytes (a magic, NFTR for the textures and NFSR for the shapes as Eden's stand-in has them in
+   system_archive/mii_model.cpp, then a version), two arrays of a u32 per part type, each type's largest decompressed
+   part and its alignment, then a table of entries per type, {offset, decompressed size, compressed size, ...}: 28
+   bytes each from 0x64 in a texture file, 88 from 0x6c in a shape file, which two more tables follow (72 bytes per
+   hair type, then 36 per face type). A part whose decompressed size is 0 is absent and skipped, so all-nought tables
+   hold no part, and the files must be as long as the tables, or the loader reads past them */
+#define MIIMODEL_DATA_ID      0x0100000000000802ull
+#define MIIMODEL_FILES        6
+#define MIIMODEL_TEXTURE_SIZE 0x2428u  /* 0x64 + 327 entries of 28 bytes */
+#define MIIMODEL_SHAPE_SIZE   0x14dd4u /* 0x6c + 1027 entries of 88, 132 of 72, 12 of 36 */
+static void miimodel_name(u32 i, char name[32]) {
+    static const char* const names[MIIMODEL_FILES] = {"NXTextureLowLinear.dat", "NXTextureLowSRGB.dat",
+                                                      "NXTextureMidLinear.dat", "NXTextureMidSRGB.dat",
+                                                      "ShapeHigh.dat",          "ShapeMid.dat"};
+    snprintf(name, 32, "%s", names[i]);
+}
+static u32 miimodel_file_size(u32 i) { return i < 4 ? MIIMODEL_TEXTURE_SIZE : MIIMODEL_SHAPE_SIZE; }
+static void miimodel_file_write(u32 i, u8* out) {
+    memcpy(out, i < 4 ? "NFTR" : "NFSR", 4);
+    put32(out + 4, 1);
+}
+
+/* a synthesized archive's files, in a RomFS laid out like romfs_build's with every file in its root folder, into m
+   (cap bytes, nought where a file's writer leaves it); gives the bytes used */
+static u64 filesrom_init(u8* m, size_t cap, u32 count, void (*file_name)(u32, char[32]), u32 (*file_size)(u32),
+                         void (*file_write)(u32, u8*), const char* what) {
+    u32 dbuckets = hcount(1), fbuckets = hcount(count);
     u64 dhash = 0x50;
     u64 dtab = dhash + (u64)dbuckets * 4;
     u64 fhash = dtab + ROM_DIR_ENTRY;
@@ -1620,15 +1679,15 @@ static void ngword2rom_init(void) {
     u32 i;
     char name[32];
 
-    for (i = 0; i < NGWORD2_FILES; i++) {
-        ngword2_name(i, name);
+    for (i = 0; i < count; i++) {
+        file_name(i, name);
         fsize += entry_size(ROM_FILE_ENTRY, name);
         dsize = (dsize + 15) & ~(u64)15;
-        dsize += ngword2_file_size(i);
+        dsize += file_size(i);
     }
     fdata = (ftab + fsize + 0x1FF) & ~(u64)0x1FF;
-    if (fdata + dsize > sizeof g_hle.fs.ngword2rom) fatal("NgWord2: the synthesized archive does not fit\n");
-    memset(m, 0, sizeof g_hle.fs.ngword2rom);
+    if (fdata + dsize > cap) fatal("%s: the synthesized archive does not fit\n", what);
+    memset(m, 0, cap);
     memset(m + dhash, 0xFF, (size_t)dbuckets * 4);
     memset(m + fhash, 0xFF, (size_t)fbuckets * 4);
     /* the root folder, its files starting at table offset 0 */
@@ -1639,16 +1698,16 @@ static void ngword2rom_init(void) {
     put32(m + dtab + 12, 0);
     put32(m + dtab + 16, ROM_NONE);
     put32(m + dtab + 20, 0);
-    for (i = 0; i < NGWORD2_FILES; i++) {
+    for (i = 0; i < count; i++) {
         u32 len, b;
-        u64 size = ngword2_file_size(i);
+        u64 size = file_size(i);
         u8* e;
-        ngword2_name(i, name);
+        file_name(i, name);
         len = (u32)strlen(name);
         data = (data + 15) & ~(u64)15;
         e = m + ftab + off;
         put32(e, 0); /* the root folder */
-        put32(e + 4, i + 1 < NGWORD2_FILES ? (u32)(off + entry_size(ROM_FILE_ENTRY, name)) : ROM_NONE);
+        put32(e + 4, i + 1 < count ? (u32)(off + entry_size(ROM_FILE_ENTRY, name)) : ROM_NONE);
         put64(e + 8, data);
         put64(e + 16, size);
         b = rhash(0, name) % fbuckets;
@@ -1656,7 +1715,7 @@ static void ngword2rom_init(void) {
         put32(m + fhash + (u64)b * 4, (u32)off);
         put32(e + 28, len);
         memcpy(e + ROM_FILE_ENTRY, name, len);
-        memcpy(m + fdata + data, ngword2_file_data(i), (size_t)size);
+        file_write(i, m + fdata + data);
         data += size;
         off += entry_size(ROM_FILE_ENTRY, name);
     }
@@ -1670,7 +1729,7 @@ static void ngword2rom_init(void) {
     put64(m + 56, ftab);
     put64(m + 64, fsize);
     put64(m + 72, fdata);
-    g_hle.fs.ngword2rom_size = fdata + data;
+    return fdata + data;
 }
 /* save data folders, by SaveDataType */
 static const char* const g_save_kinds[] = {"system", "user", "bcat", "device", "temp", "cache", "sysbcat"};
@@ -1879,6 +1938,12 @@ static int nn_fssrv_sf_IFileSystemProxy_OpenDataStorageByDataId(SvcObj* self, nn
         if (data_id == NGWORD2_DATA_ID) {
             r = fs_tree_add_virtual(&g_hle.fs.tree, p, g_hle.fs.ngword2rom, g_hle.fs.ngword2rom_size, &node);
             if (!r) LOG("fs: provided synthesized NgWord2 system archive %016llx\n", (unsigned long long)data_id);
+        } else if (data_id == MIIMODEL_DATA_ID) {
+            r = fs_tree_add_virtual(&g_hle.fs.tree, p, g_hle.fs.miimodelrom, g_hle.fs.miimodelrom_size, &node);
+            if (!r)
+                LOG("fs: provided placeholder MiiModel system archive %016llx: no Mii parts in it, so Miis draw "
+                    "without faces (your firmware's goes in system/archives)\n",
+                    (unsigned long long)data_id);
         } else {
             r = fs_tree_add_virtual(&g_hle.fs.tree, p, g_hle.fs.emptyrom, sizeof g_hle.fs.emptyrom, &node);
             if (!r) LOG("fs: provided empty system archive %016llx\n", (unsigned long long)data_id);
@@ -1893,17 +1958,17 @@ static int nn_fssrv_sf_IFileSystemProxy_OpenDeviceOperator(SvcObj* self, SvcObj*
     *device_operator = nn_fssrv_sf_IDeviceOperator_new();
     R_SUCCEED();
 }
-/* a notifier keeps one event (u[0]), which GetEventHandle gives each time. The card is always there, no game card
+/* a notifier keeps one event (its id in u[0]), which GetEventHandle gives each time. The card is always there, no game card
    comes or goes and system data never updates, so it is never signaled */
-static void notifier_destroy(SvcObj* o) { kobj_unref(&((KEvent*)(size_t)o->u[0])->o); }
+static void notifier_destroy(SvcObj* o) { kobj_unref(kobj_at((u32)o->u[0])); }
 static SvcObj* notifier_new(const char* name) {
     SvcObj* o = nn_fssrv_sf_IEventNotifier_new();
-    o->u[0] = (u64)(size_t)owned_event(name);
+    o->u[0] = owned_event(name);
     o->destroy = notifier_destroy;
     return o;
 }
 static int nn_fssrv_sf_IEventNotifier_GetEventHandle(SvcObj* self, u32* event) {
-    *event = ev_handle((KEvent*)(size_t)self->u[0]);
+    *event = ev_handle((u32)self->u[0]);
     R_SUCCEED();
 }
 static int nn_fssrv_sf_IFileSystemProxy_OpenSdCardDetectionEventNotifier(SvcObj* self, SvcObj** notifier) {
@@ -1936,8 +2001,356 @@ static SvcObj* new_fspldr(void) { return nn_fssrv_sf_IFileSystemProxyForLoader_n
 
 void svc_fs_init(void) {
     emptyrom_init();
-    ngword2rom_init();
+    g_hle.fs.ngword2rom_size = filesrom_init(g_hle.fs.ngword2rom, sizeof g_hle.fs.ngword2rom, NGWORD2_FILES,
+                                             ngword2_name, ngword2_file_size, ngword2_file_write, "NgWord2");
+    g_hle.fs.miimodelrom_size = filesrom_init(g_hle.fs.miimodelrom, sizeof g_hle.fs.miimodelrom, MIIMODEL_FILES,
+                                              miimodel_name, miimodel_file_size, miimodel_file_write, "MiiModel");
     nn_fssrv_sf_IFileSystemProxy_register(new_fsp);
     nn_fssrv_sf_IProgramRegistry_register(new_fsppr);
     nn_fssrv_sf_IFileSystemProxyForLoader_register(new_fspldr);
 }
+
+/* ============================================================ save states */
+/* The open file systems, files and folders are their nodes in the tree, which a load finds again by path: each one's
+   path from the data folder, tree.lock held. 0, or -1 when it doesn't fit */
+static int node_path(const FsNode* node, char* out, size_t cap) {
+    const FsNode* n;
+    size_t len = 0;
+    for (n = node; n && n != g_hle.fs.tree.root; n = n->parent) len += strlen(n->name) + 1;
+    if (!n || len >= cap) return -1;
+    out[len ? len - 1 : 0] = 0;
+    for (n = node; n != g_hle.fs.tree.root; n = n->parent) {
+        size_t k = strlen(n->name);
+        len -= k + 1;
+        memcpy(out + len, n->name, k);
+        if (len) out[len - 1] = '/';
+    }
+    return 0;
+}
+static int put_node(StateIo* io, u32 kind, u32 slot, const FsNode* node) {
+    char path[FS_TREE_PATH_MAX];
+    u32 n;
+    if (!node || node_path(node, path, sizeof path)) return -1;
+    n = (u32)strlen(path);
+    return io_put32(io, kind) | io_put32(io, slot) | io_put32(io, n) | io_put(io, path, n);
+}
+int fs_state_save(StateIo* io) {
+    u32 i;
+    int r = 0;
+    pm_lock(&g_hle.fs.tree.lock);
+    for (i = 0; i < FS_FS_MAX && !r; i++)
+        if (g_hle.fs.fss[i].obj) r |= put_node(io, 1, i, g_hle.fs.fss[i].root);
+    for (i = 0; i < FS_FILE_MAX && !r; i++)
+        if (g_hle.fs.files[i].obj) r |= put_node(io, 2, i, g_hle.fs.files[i].node);
+    for (i = 0; i < FS_DIR_MAX && !r; i++)
+        if (g_hle.fs.dirs[i].obj) r |= put_node(io, 3, i, g_hle.fs.dirs[i].node);
+    r |= io_put32(io, 0);
+    pm_unlock(&g_hle.fs.tree.lock);
+    return r ? -1 : 0;
+}
+/* a file's size and bytes into the state, tree.lock held */
+static int temp_put_file(StateIo* io, FsNode* node) {
+    u8 chunk[1 << 16];
+    u64 left = node->size;
+    FILE* f;
+    if (io_put64(io, node->size)) return -1;
+    if (node_in_memory(node))
+        return node->size ? io_put(io, node->is_virtual ? node->virtual_data : node->map, node->size) : 0;
+    if (!(f = node_open(node, "rb"))) return -1;
+    while (left) {
+        size_t n = left < sizeof chunk ? (size_t)left : sizeof chunk;
+        if (fread(chunk, 1, n, f) != n || io_put(io, chunk, n)) break;
+        left -= n;
+    }
+    fclose(f);
+    return left ? -1 : 0;
+}
+/* dir's folders and files, each before what it holds: its kind (3 a folder, 2 a file), its path under save/temp, and a
+   file's size and bytes; path holds at bytes of dir's own */
+static int temp_put(StateIo* io, FsNode* dir, char* path, size_t at) {
+    FsNode* c;
+    for (c = dir->children; c; c = c->next) {
+        size_t k = strlen(c->name), n = at + !!at + k;
+        if (n >= FS_TREE_PATH_MAX) return -1;
+        if (at) path[at] = '/';
+        memcpy(path + at + !!at, c->name, k);
+        path[n] = 0;
+        if (io_put32(io, c->is_dir ? 3 : 2) || io_put32(io, (u32)n) || io_put(io, path, n) ||
+            (c->is_dir ? temp_put(io, c, path, n) : temp_put_file(io, c)))
+            return -1;
+    }
+    return 0;
+}
+int fs_state_temp_save(StateIo* io) {
+    char path[FS_TREE_PATH_MAX];
+    FsNode* temp = NULL;
+    int had, r;
+    pm_lock(&g_hle.fs.tree.lock);
+    had = fs_tree_lookup(&g_hle.fs.tree, NULL, "save/temp", &temp) == FS_TREE_OK && temp->is_dir;
+    r = io_put32(io, (u32)had) || (had && temp_put(io, temp, path, 0)) || io_put32(io, 0) ? -1 : 0;
+    pm_unlock(&g_hle.fs.tree.lock);
+    return r;
+}
+/* what the game had open goes, and the RomFS's open files (a cache), before the load writes g_hle over them */
+void fs_state_drop(void) {
+    u32 i;
+    pm_lock(&g_hle.fs.tree.lock);
+    for (i = 0; i < FS_FS_MAX; i++)
+        if (g_hle.fs.fss[i].obj) fs_tree_release(g_hle.fs.fss[i].root);
+    for (i = 0; i < FS_FILE_MAX; i++)
+        if (g_hle.fs.files[i].obj) {
+            if (g_hle.fs.files[i].f) fclose(g_hle.fs.files[i].f);
+            fs_tree_release(g_hle.fs.files[i].node);
+        }
+    for (i = 0; i < FS_DIR_MAX; i++)
+        if (g_hle.fs.dirs[i].obj) fs_tree_release(g_hle.fs.dirs[i].node);
+    for (i = 0; i < NOPEN; i++)
+        if (g_hle.fs.openf[i].f) fclose(g_hle.fs.openf[i].f);
+    memset(g_hle.fs.openf, 0, sizeof g_hle.fs.openf);
+    pm_unlock(&g_hle.fs.tree.lock);
+}
+/* A state's open file systems, files and folders, found again by path in the running process's tree and opened, before
+   the running game is touched (a file the game had open that isn't there any more refuses the load), then put in
+   place once the state's g_hle is */
+typedef struct {
+    u32 kind, slot;
+    FsNode* node; /* retained; NULL for one under save/temp, found once the state's temporary storage is in place */
+    FILE* f;
+    char* temp;       /* that one's path, else NULL */
+    const char* mode; /* and a file's mode, as the state's had it */
+} FsReopen;
+/* a folder (3) or file (2) of the state's save/temp, by its path under it, a file with its bytes */
+typedef struct {
+    u32 kind;
+    char* path;
+    u8* data;
+    u64 size;
+} FsTempEntry;
+struct FsStaged {
+    FsReopen* e;
+    u32 n;
+    int temp; /* the state's save/temp: 1 there, 0 not there, -1 a state from before they held it */
+    FsTempEntry* t;
+    u32 nt;
+};
+void fs_state_staged_free(FsStaged* st) {
+    u32 i;
+    if (!st) return;
+    pm_lock(&g_hle.fs.tree.lock);
+    for (i = 0; i < st->n; i++) {
+        if (st->e[i].f) fclose(st->e[i].f);
+        fs_tree_release(st->e[i].node);
+        free(st->e[i].temp);
+    }
+    pm_unlock(&g_hle.fs.tree.lock);
+    for (i = 0; i < st->nt; i++) {
+        free(st->t[i].path);
+        free(st->t[i].data);
+    }
+    free(st->t);
+    free(st->e);
+    free(st);
+}
+/* a path under save/temp a state names: its folders by name, none empty, "." or "..", so it stays under save/temp */
+static int temp_path_ok(const char* p, u32 n) {
+    u32 i, at = 0;
+    for (i = 0; i <= n; i++) {
+        if (i < n && p[i] != '/') {
+            if (p[i] == '\\' || p[i] == ':' || !p[i]) return 0;
+            continue;
+        }
+        if (i == at || (i - at == 1 && p[at] == '.') || (i - at == 2 && p[at] == '.' && p[at + 1] == '.')) return 0;
+        at = i + 1;
+    }
+    return 1;
+}
+/* the state's save/temp read into st: 0, or -1 with why */
+static int temp_read(StateIo* io, FsStaged* st, char* why, size_t whysize) {
+    u32 had, kind, n, cap = 0;
+    if (io_get32(io, &had) || had > 1) goto bad;
+    st->temp = (int)had;
+    for (;;) {
+        FsTempEntry* e;
+        if (io_get32(io, &kind)) goto bad;
+        if (!kind) return 0;
+        if (!had || (kind != 2 && kind != 3) || io_get32(io, &n) || !n || n >= FS_TREE_PATH_MAX) goto bad;
+        if (st->nt == cap) {
+            FsTempEntry* more = (FsTempEntry*)realloc(st->t, sizeof *more * (cap = cap ? cap * 2 : 16));
+            if (!more) {
+                snprintf(why, whysize, "out of memory");
+                return -1;
+            }
+            st->t = more;
+        }
+        e = &st->t[st->nt++];
+        memset(e, 0, sizeof *e);
+        e->kind = kind;
+        if (!(e->path = (char*)malloc(n + 1)) || io_get(io, e->path, n)) goto bad;
+        e->path[n] = 0;
+        if (!temp_path_ok(e->path, n)) goto bad;
+        if (kind == 2 && (io_get64(io, &e->size) || e->size > ((u64)1 << 40) ||
+                          !(e->data = (u8*)malloc(e->size ? (size_t)e->size : 1)) || io_get(io, e->data, e->size)))
+            goto bad;
+    }
+bad:
+    snprintf(why, whysize, "its temporary storage is damaged");
+    return -1;
+}
+/* path, one the state had open, is save/temp or under it: 1, and 0 with why when the state's save/temp doesn't hold
+   it as kind (2 a file, 1 or 3 a folder) */
+static int temp_holds(const FsStaged* st, const char* path, u32 kind, char* why, size_t whysize) {
+    u32 i;
+    if (!strcmp(path, "save/temp") && kind != 2 && st->temp == 1) return 1;
+    for (i = 0; i < st->nt; i++)
+        if (!strcmp(st->t[i].path, path + 10) && (st->t[i].kind == 2) == (kind == 2)) return 1;
+    snprintf(why, whysize, "the game had %s open, which the state's temporary storage doesn't hold", path);
+    return 0;
+}
+FsStaged* fs_state_resolve(StateIo* io, StateIo* temp, const HleFs* loaded, char* why, size_t whysize) {
+    char path[FS_TREE_PATH_MAX];
+    FsStaged* st = (FsStaged*)calloc(1, sizeof *st);
+    u32 kind, slot, n, cap = 0;
+    if (!st) {
+        snprintf(why, whysize, "out of memory");
+        return NULL;
+    }
+    st->temp = -1;
+    if (temp && temp_read(temp, st, why, whysize)) {
+        fs_state_staged_free(st);
+        return NULL;
+    }
+    pm_lock(&g_hle.fs.tree.lock);
+    for (; io;) {
+        FsReopen* r;
+        FsNode* node = NULL;
+        if (io_get32(io, &kind) ||
+            (kind && (io_get32(io, &slot) || io_get32(io, &n) || n >= sizeof path || io_get(io, path, n)))) {
+            snprintf(why, whysize, "its list of open files is damaged");
+            goto bad;
+        }
+        if (!kind) break;
+        path[n] = 0;
+        if ((kind == 1 && slot >= FS_FS_MAX) || (kind == 2 && slot >= FS_FILE_MAX) ||
+            (kind == 3 && slot >= FS_DIR_MAX) || kind > 3) {
+            snprintf(why, whysize, "its list of open files is damaged");
+            goto bad;
+        }
+        /* the state's save/temp takes the running game's place once the load can't be refused: found then */
+        if (st->temp >= 0 && !strncmp(path, "save/temp", 9) && (!path[9] || path[9] == '/')) {
+            if (!temp_holds(st, path, kind, why, whysize)) goto bad;
+        } else if (n ? fs_tree_lookup(&g_hle.fs.tree, NULL, path, &node) != FS_TREE_OK : !(node = g_hle.fs.tree.root)) {
+            snprintf(why, whysize, "the game had %s open, which isn't there any more", path);
+            goto bad;
+        }
+        if (st->n == cap) {
+            FsReopen* more = (FsReopen*)realloc(st->e, sizeof *more * (cap = cap ? cap * 2 : 64));
+            if (!more) {
+                snprintf(why, whysize, "out of memory");
+                goto bad;
+            }
+            st->e = more;
+        }
+        r = &st->e[st->n++];
+        r->kind = kind;
+        r->slot = slot;
+        r->node = node;
+        r->f = NULL;
+        r->mode = (loaded->files[slot].mode & 2) ? "rb+" : "rb";
+        r->temp = NULL;
+        if (!node) {
+            if (!(r->temp = snx_strdup(path))) {
+                snprintf(why, whysize, "out of memory");
+                goto bad;
+            }
+            continue;
+        }
+        fs_tree_retain(node);
+        if (kind == 2 && !node_in_memory(node) && !(r->f = node_open(node, r->mode))) {
+            snprintf(why, whysize, "%s can't be opened again", path);
+            goto bad;
+        }
+    }
+    pm_unlock(&g_hle.fs.tree.lock);
+    return st;
+bad:
+    pm_unlock(&g_hle.fs.tree.lock);
+    fs_state_staged_free(st);
+    return NULL;
+}
+/* the state's save/temp in place of the running game's, files and folders as it had them; past the point a load can be
+   refused, so a failure ends the game (its path in the log, the fatal's text without it) */
+static void temp_restore(const FsStaged* st) {
+    char path[FS_TREE_PATH_MAX];
+    FsTreeResult r = fs_tree_remove(&g_hle.fs.tree, NULL, "save/temp", 1, 1, 0);
+    FsNode* node;
+    u32 i;
+    if (r != FS_TREE_OK && r != FS_TREE_NOTFOUND) {
+        LOG("state: save/temp couldn't be emptied for the save state's (error %d)\n", r);
+        fatal("The save state's temporary storage couldn't be put back");
+    }
+    if (st->temp != 1) return;
+    if ((r = fs_tree_mkdirs(&g_hle.fs.tree, "save/temp", &node))) {
+        LOG("state: save/temp couldn't be made for the save state's (error %d)\n", r);
+        fatal("The save state's temporary storage couldn't be put back");
+    }
+    for (i = 0; i < st->nt; i++) {
+        const FsTempEntry* e = &st->t[i];
+        FILE* f = NULL;
+        snprintf(path, sizeof path, "save/temp/%s", e->path);
+        r = fs_tree_create(&g_hle.fs.tree, NULL, path, e->kind == 3, e->kind == 3 ? 0 : e->size, &node);
+        if (!r && e->kind == 2 && e->size &&
+            (!(f = node_open(node, "rb+")) || fwrite(e->data, 1, (size_t)e->size, f) != e->size))
+            r = FS_TREE_IO;
+        if (f && fclose(f)) r = FS_TREE_IO;
+        if (r) {
+            LOG("state: %s of the save state's temporary storage couldn't be written (error %d)\n", path, r);
+            fatal("The save state's temporary storage couldn't be put back");
+        }
+    }
+}
+void fs_state_install(FsStaged* st) {
+    u32 i;
+    if (!st) return;
+    pm_lock(&g_hle.fs.tree.lock);
+    if (st->temp >= 0) temp_restore(st);
+    for (i = 0; i < st->n; i++) { /* the ones under save/temp, found in the state's */
+        FsReopen* r = &st->e[i];
+        if (!r->temp) continue;
+        if (fs_tree_lookup(&g_hle.fs.tree, NULL, r->temp, &r->node) != FS_TREE_OK) r->node = NULL;
+        fs_tree_retain(r->node);
+        if (!r->node || (r->kind == 2 && !node_in_memory(r->node) && !(r->f = node_open(r->node, r->mode)))) {
+            LOG("state: %s, which the game had open, couldn't be opened in the save state's temporary storage\n",
+                r->temp);
+            fatal("The save state's temporary storage couldn't be put back");
+        }
+    }
+    for (i = 0; i < st->n; i++) {
+        FsReopen* r = &st->e[i];
+        if (r->kind == 1)
+            g_hle.fs.fss[r->slot].root = r->node;
+        else if (r->kind == 3)
+            g_hle.fs.dirs[r->slot].node = r->node;
+        else {
+            g_hle.fs.files[r->slot].node = r->node;
+            g_hle.fs.files[r->slot].f = r->f;
+        }
+        free(r->temp);
+    }
+    pm_unlock(&g_hle.fs.tree.lock);
+    for (i = 0; i < st->nt; i++) {
+        free(st->t[i].path);
+        free(st->t[i].data);
+    }
+    free(st->t);
+    free(st->e);
+    free(st);
+}
+/* the functions a save state may hold of this file (state_fns.h) */
+STATE_FN_TABLE(g_fs_state_fns,
+               STATE_FN("fs", file_destroy),
+               STATE_FN("fs", dir_destroy),
+               STATE_FN("fs", fs_destroy),
+               STATE_FN("fs", notifier_destroy),
+               STATE_FN("fs", file_disp),
+               STATE_FN("fs", dir_disp),
+               STATE_FN("fs", fs_disp));

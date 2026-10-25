@@ -37,9 +37,8 @@ int snx_link_elf(const SnxLinkInput* inputs, size_t count, const char* const* ex
 #ifndef PT_GNU_STACK
 #define PT_GNU_STACK 0x6474e551
 #endif
-/* Below this much code every B and BL reaches its target (128 MiB), and no object gets veneers (elf_object.h).
-   PowerPC64's bl reaches 32 MiB */
-#define VENEER_TEXT     ((uint64_t)120 << 20)
+/* Below this much code (snx_elf_text_size) every PowerPC64 bl reaches its target (32 MiB), and no object gets veneers;
+   AArch64's is SNX_ELF_VENEER_TEXT, which the JIT loader shares */
 #define PPC_VENEER_TEXT ((uint64_t)30 << 20)
 
 typedef struct {
@@ -100,16 +99,6 @@ static void veneer_key(char* key, size_t caller, size_t object, size_t index) {
     sprintf(key, "%lu:%lu:%lu", (unsigned long)caller, (unsigned long)object, (unsigned long)index);
 }
 
-/* text before veneers, which only a module this large needs */
-static uint64_t text_size(const Link* l) {
-    uint64_t size = 0;
-    size_t i, j;
-    for (i = 0; i < l->nobjs; ++i)
-        for (j = 0; j < l->objs[i].eh->e_shnum; ++j)
-            if (l->objs[i].kind[j] == SNX_ELF_TEXT) size += l->objs[i].sh[j].sh_size + l->objs[i].sh[j].sh_addralign;
-    return size;
-}
-
 /* A RISC-V low half's value, the displacement of the HI20 relocation it completes: in the same relocations r (n of
    them, of section s), at the place of the low half's label, the AUIPC. 0, or -1 with the reason */
 static int riscv_hi20_value(Link* l, size_t object, const Elf64_Shdr* s, const Elf64_Rela* r, size_t n,
@@ -147,8 +136,9 @@ static int symbolless(const Link* l, const Elf64_Rela* r) {
    out of reach. x86-64 modules need none, their rel32 calls reaching across the 2 GiB a module may span */
 static int scan_relocations(Link* l) {
     size_t i, j, k, def_object, def_index, slot;
-    int weak, far = (l->machine == EM_AARCH64 && text_size(l) >= VENEER_TEXT) ||
-                    (l->machine == EM_PPC64 && text_size(l) >= PPC_VENEER_TEXT);
+    uint64_t text = snx_elf_text_size(l->objs, l->nobjs);
+    int weak, far = (l->machine == EM_AARCH64 && text >= SNX_ELF_VENEER_TEXT) ||
+                    (l->machine == EM_PPC64 && text >= PPC_VENEER_TEXT);
     char key[72];
     for (i = 0; i < l->nobjs; ++i) {
         SnxElfObject* o = &l->objs[i];

@@ -240,6 +240,9 @@ if(TARGET snx_ctr_board)
             target_link_libraries(snx-test-3ds-container PRIVATE snx_ctr_process)
             add_test(NAME 3ds_container COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/3ds_container.py"
                 "${SNX_CTR_PROGRAM}" $<TARGET_FILE:snx-test-3ds-container>)
+            # a cartridge image or a bare NCCH against its extraction, and the update partition played as the update
+            add_test(NAME 3ds_cci COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/3ds_cci.py"
+                "${SNX_CTR_PROGRAM}" $<TARGET_FILE:snx-test-3ds-container>)
             set(snx_ctr_extract_test_args "")
 
             set(snx_ctr_extract_test_args --aot)
@@ -417,6 +420,9 @@ endif()
 
 # Validate the direct writer against SPIRV-Tools when the system tools are installed.
 if(SNX_BUILD_NX)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME maxwell_reference COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/maxwell_reference_test.py")
+    endif()
     find_program(SNX_SPIRV_VAL spirv-val)
     find_program(SNX_SPIRV_DIS spirv-dis)
     if(SNX_SPIRV_VAL AND SNX_SPIRV_DIS AND Python3_Interpreter_FOUND)
@@ -778,19 +784,35 @@ add_executable(snx-test-overlay overlay.c "${PROJECT_SOURCE_DIR}/src/nx/runtime/
     "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/fatal_screen.c"
     "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/prepare_screen.c"
     "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/vpad.c" "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/ui.c"
-    "${PROJECT_SOURCE_DIR}/src/nx/runtime/ini.c")
+    "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/stats.c" "${PROJECT_SOURCE_DIR}/src/nx/runtime/ini.c")
 snx_test_target(snx-test-overlay 11)
 target_link_libraries(snx-test-overlay PRIVATE scarletnx-common snx_splash m)
 include("${PROJECT_SOURCE_DIR}/cmake/gui_themes.cmake")
-target_include_directories(snx-test-overlay PRIVATE "${CMAKE_BINARY_DIR}/generated")
+target_include_directories(snx-test-overlay PRIVATE "${PROJECT_BINARY_DIR}/generated")
 add_test(NAME overlay COMMAND snx-test-overlay)
 
 add_executable(snx-test-vpad vpad.c "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/vpad.c"
-    "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/ui.c" "${PROJECT_SOURCE_DIR}/src/nx/runtime/ini.c")
+    "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/ui.c" "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/stats.c"
+    "${PROJECT_SOURCE_DIR}/src/nx/runtime/ini.c")
 snx_test_target(snx-test-vpad 11)
 target_link_libraries(snx-test-vpad PRIVATE scarletnx-common snx_splash m)
-target_include_directories(snx-test-vpad PRIVATE "${CMAKE_BINARY_DIR}/generated") # ui.c's theme
+target_include_directories(snx-test-vpad PRIVATE "${PROJECT_BINARY_DIR}/generated") # ui.c's theme
 add_test(NAME vpad COMMAND snx-test-vpad)
+
+add_executable(snx-test-hud hud.c "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/hud.c"
+    "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/ui.c")
+snx_test_target(snx-test-hud 11)
+target_link_libraries(snx-test-hud PRIVATE scarletnx-common snx_splash m)
+target_include_directories(snx-test-hud PRIVATE "${PROJECT_BINARY_DIR}/generated") # the theme's colours
+add_test(NAME hud COMMAND snx-test-hud)
+
+add_executable(snx-test-stats stats.c "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/stats.c"
+    "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/vpad.c" "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/ui.c"
+    "${PROJECT_SOURCE_DIR}/src/nx/runtime/ini.c")
+snx_test_target(snx-test-stats 11)
+target_link_libraries(snx-test-stats PRIVATE scarletnx-common snx_splash m)
+target_include_directories(snx-test-stats PRIVATE "${PROJECT_BINARY_DIR}/generated") # the theme's colours
+add_test(NAME stats COMMAND snx-test-stats)
 
 add_executable(snx-test-ini-deprecated ini_deprecated.c "${PROJECT_SOURCE_DIR}/src/nx/runtime/ini.c")
 snx_test_target(snx-test-ini-deprecated 11)
@@ -810,7 +832,7 @@ add_executable(snx-test-gamepad gamepad.c "${PROJECT_SOURCE_DIR}/src/nx/runtime/
     "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/ui.c" "${PROJECT_SOURCE_DIR}/src/nx/runtime/ini.c")
 snx_test_target(snx-test-gamepad 11)
 target_link_libraries(snx-test-gamepad PRIVATE scarletnx-common snx_pad_sdl snx_splash m)
-target_include_directories(snx-test-gamepad PRIVATE "${CMAKE_BINARY_DIR}/generated") # ui.c's theme
+target_include_directories(snx-test-gamepad PRIVATE "${PROJECT_BINARY_DIR}/generated") # ui.c's theme
 add_test(NAME gamepad COMMAND snx-test-gamepad)
 
 add_executable(snx-test-fatal-screen fatal_screen.c "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/fatal_screen.c")
@@ -1304,6 +1326,14 @@ endif()
 add_executable(snx-llvm-bench llvm_bench.c)
 snx_test_target(snx-llvm-bench 11)
 target_link_libraries(snx-llvm-bench PRIVATE snx_driver ${CMAKE_DL_LIBS})
+# not a test: a game's functions recompiled on their own (llvm_pieces DUMP ADDR...), for the recompile's time and output
+add_executable(snx-llvm-pieces llvm_pieces.c)
+snx_test_target(snx-llvm-pieces 11)
+target_link_libraries(snx-llvm-pieces PRIVATE scarletnx-recompiler)
+# the backend's own switches (ir.h), in the library's objects: its headers, not its target, whose objects the library
+# holds already
+target_include_directories(snx-llvm-pieces PRIVATE "$<TARGET_PROPERTY:snx_llvm,INTERFACE_INCLUDE_DIRECTORIES>")
+target_include_directories(snx-llvm-pieces SYSTEM PRIVATE "${SNX_LLVM_INCLUDE_DIR}")
 # A32 emits self-contained host objects, without the A64 interpreter or RtAPI.
 add_executable(snx-test-arm-emit arm_emit.c)
 snx_test_target(snx-test-arm-emit 11)
@@ -1315,27 +1345,43 @@ target_link_libraries(snx-test-thumb-emit PRIVATE snx_arm_llvm)
 option(SNX_TEST_ARM_DIFF "Compare A32 LLVM execution with Python unicorn 2.1.4" OFF)
 if(UNIX AND NOT CMAKE_CROSSCOMPILING)
     if(Python3_Interpreter_FOUND)
-        add_test(NAME arm_llvm_witnesses COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/arm_test.py"
+        # the ARM tests run emitted code and Unicorn in Python: -X faulthandler names where a crash in either was
+        add_test(NAME arm_llvm_witnesses COMMAND "${Python3_EXECUTABLE}" -X faulthandler
+            "${CMAKE_CURRENT_SOURCE_DIR}/arm_test.py"
             --emitter $<TARGET_FILE:snx-test-arm-emit> --runtime $<TARGET_FILE:snx_arm_rt> --cc "${CMAKE_C_COMPILER}")
-        add_test(NAME arm7tdmi_witnesses COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/arm7tdmi_test.py"
+        add_test(NAME arm7tdmi_witnesses COMMAND "${Python3_EXECUTABLE}" -X faulthandler
+            "${CMAKE_CURRENT_SOURCE_DIR}/arm7tdmi_test.py"
             --arm-emitter $<TARGET_FILE:snx-test-arm-emit> --thumb-emitter $<TARGET_FILE:snx-test-thumb-emit>
             --runtime $<TARGET_FILE:snx_arm_rt> --cc "${CMAKE_C_COMPILER}")
         if(SNX_TEST_ARM_DIFF)
-            add_test(NAME arm_llvm_differential COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/arm_test.py"
+            add_test(NAME arm_llvm_differential COMMAND "${Python3_EXECUTABLE}" -X faulthandler
+                "${CMAKE_CURRENT_SOURCE_DIR}/arm_test.py"
                 --emitter $<TARGET_FILE:snx-test-arm-emit> --runtime $<TARGET_FILE:snx_arm_rt> --cc "${CMAKE_C_COMPILER}" --unicorn)
             set_tests_properties(arm_llvm_differential PROPERTIES TIMEOUT 900)
             # VFP/NEON uses the same emitter plus the raw-bit FP and crypto runtime library.
             get_filename_component(snx_llvm_bin "${SNX_LLVM_CONFIG}" DIRECTORY)
             find_program(SNX_LLVM_MC llvm-mc HINTS "${snx_llvm_bin}" NO_DEFAULT_PATH)
             if(SNX_LLVM_MC)
-                add_test(NAME arm_llvm_vector COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/arm_vector_test.py"
+                add_test(NAME arm_llvm_vector COMMAND "${Python3_EXECUTABLE}" -X faulthandler
+                    "${CMAKE_CURRENT_SOURCE_DIR}/arm_vector_test.py"
                     --emitter $<TARGET_FILE:snx-test-arm-emit> --runtime $<TARGET_FILE:snx_arm_rt>
                     --mc "${SNX_LLVM_MC}" --cc "${CMAKE_C_COMPILER}")
                 set_tests_properties(arm_llvm_vector PROPERTIES TIMEOUT 1800)
-                add_test(NAME thumb_llvm COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/thumb_test.py"
+                add_test(NAME thumb_llvm COMMAND "${Python3_EXECUTABLE}" -X faulthandler
+                    "${CMAKE_CURRENT_SOURCE_DIR}/thumb_test.py"
                     --emitter $<TARGET_FILE:snx-test-thumb-emit> --runtime $<TARGET_FILE:snx_arm_rt> --mc "${SNX_LLVM_MC}"
                     --cc "${CMAKE_C_COMPILER}")
                 set_tests_properties(thumb_llvm PROPERTIES TIMEOUT 900)
+                # random encodings of every class, llvm-objdump keeping the A57's, from random FP and flag state
+                find_program(SNX_LLVM_OBJDUMP llvm-objdump HINTS "${snx_llvm_bin}" NO_DEFAULT_PATH)
+                if(SNX_LLVM_OBJDUMP)
+                    add_test(NAME arm_llvm_fuzz COMMAND "${Python3_EXECUTABLE}" -X faulthandler
+                        "${CMAKE_CURRENT_SOURCE_DIR}/arm_fuzz.py"
+                        --arm-emitter $<TARGET_FILE:snx-test-arm-emit> --thumb-emitter $<TARGET_FILE:snx-test-thumb-emit>
+                        --runtime $<TARGET_FILE:snx_arm_rt> --mc "${SNX_LLVM_MC}" --objdump "${SNX_LLVM_OBJDUMP}"
+                        --cc "${CMAKE_C_COMPILER}" --count 1500)
+                    set_tests_properties(arm_llvm_fuzz PROPERTIES TIMEOUT 1800)
+                endif()
             endif()
         endif()
     endif()
@@ -1497,7 +1543,7 @@ add_test(NAME nvn_control COMMAND snx-test-nvn-control)
 
 # the shared fonts pl.c hands out when a game folder has none: the stand-ins compiled in (cmake/shared_fonts.cmake)
 if(NOT SNX_TOOLS_ONLY)
-    add_executable(snx-test-pl-fonts pl_fonts.c "${CMAKE_BINARY_DIR}/generated/shared_fonts.c")
+    add_executable(snx-test-pl-fonts pl_fonts.c "${PROJECT_SOURCE_DIR}/src/nx/hle/services/pl_font.c" "${PROJECT_BINARY_DIR}/generated/shared_fonts.c")
     snx_test_target(snx-test-pl-fonts 23)
     snx_service_swipc(snx-test-pl-fonts hle/services/pl.swipc)
     add_test(NAME pl_fonts COMMAND snx-test-pl-fonts)
@@ -1596,6 +1642,8 @@ add_test(NAME shipped_shaders COMMAND snx-test-shipped-shaders)
 add_executable(snx-test-shipped-pass shipped_pass.c "${PROJECT_SOURCE_DIR}/src/nx/gpu/shipped_pass.c"
                "${PROJECT_SOURCE_DIR}/src/nx/gpu/shader/shipped.c")
 snx_test_target(snx-test-shipped-pass 99)
+include("${PROJECT_SOURCE_DIR}/cmake/ship_walk.cmake")
+snx_ship_walk("${PROJECT_SOURCE_DIR}/src/nx/gpu/shipped_pass.c")
 add_test(NAME shipped_pass COMMAND snx-test-shipped-pass)
 
 add_executable(snx-test-etc2 etc2_decode.c support/etc2.c)
@@ -1620,12 +1668,30 @@ if(UNIX)
     add_executable(snx-test-kernel-cores kernel_cores.c)
     snx_test_target(snx-test-kernel-cores 11)
         add_test(NAME kernel_cores COMMAND snx-test-kernel-cores)
+    # g_hle holds no pointer and nothing of the host's, so a save state writes it as it is (hle_flat.c)
+    add_executable(snx-test-hle-flat hle_flat.c)
+    snx_test_target(snx-test-hle-flat 11)
+        add_test(NAME hle_flat COMMAND snx-test-hle-flat)
+    if(NOT WIN32)
+        # a save state's file: sections read back, damage refused, a failed save leaves the old state (state_file.c)
+        add_executable(snx-test-state-file state_file.c "${PROJECT_SOURCE_DIR}/src/nx/runtime/state_file.c")
+        snx_test_target(snx-test-state-file 11)
+        target_link_libraries(snx-test-state-file PRIVATE snx_zstd scarletnx-common)
+        add_test(NAME state_file COMMAND snx-test-state-file "${CMAKE_CURRENT_BINARY_DIR}")
+    endif()
 endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(snx-test-plat-cpus plat_cpus.c)
     snx_test_target(snx-test-plat-cpus 11)
+    target_link_libraries(snx-test-plat-cpus PRIVATE SDL3::SDL3) # plat_posix.c's threads end SDL's per-thread state
     add_test(NAME plat_cpus COMMAND snx-test-plat-cpus)
 endif()
+
+# the process's memory as common.c reads it, which memory_fit takes (process_memory.c)
+add_executable(snx-test-process-memory process_memory.c)
+snx_test_target(snx-test-process-memory 11)
+target_link_libraries(snx-test-process-memory PRIVATE scarletnx-common)
+add_test(NAME process_memory COMMAND snx-test-process-memory)
 
 # EAC worked examples and edenprobe's blocks from rEden's decode_eac test (eac_blocks.c)
 add_executable(snx-test-eac-blocks eac_blocks.c support/etc2.c)
@@ -1644,18 +1710,18 @@ if(UNIX)
         "${PROJECT_SOURCE_DIR}/src/nx/memory/mem.c" "${PROJECT_SOURCE_DIR}/src/nx/memory/own.c"
         "${PROJECT_SOURCE_DIR}/src/nx/hle/svc/svc_mem.c"
         "${PROJECT_SOURCE_DIR}/src/nx/hle/hle.c" "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/plat_posix.c"
-        "${PROJECT_SOURCE_DIR}/src/common/filesystem/host.c")
+        "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/plat_sdl.c" "${PROJECT_SOURCE_DIR}/src/common/filesystem/host.c")
     snx_test_target(snx-test-memory-alias 11)
-    target_link_libraries(snx-test-memory-alias PRIVATE ${CMAKE_DL_LIBS})
+    target_link_libraries(snx-test-memory-alias PRIVATE SDL3::SDL3 ${CMAKE_DL_LIBS})
     add_test(NAME memory_alias COMMAND snx-test-memory-alias)
     set_tests_properties(memory_alias PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
     # GPU-owned memory over the real pool and traps, owners whose GPU copy is host memory (77 without traps)
     add_executable(snx-test-memory-own memory_own.c
         "${PROJECT_SOURCE_DIR}/src/nx/memory/mem.c" "${PROJECT_SOURCE_DIR}/src/nx/memory/own.c"
         "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/plat_posix.c"
-        "${PROJECT_SOURCE_DIR}/src/common/filesystem/host.c")
+        "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/plat_sdl.c" "${PROJECT_SOURCE_DIR}/src/common/filesystem/host.c")
     snx_test_target(snx-test-memory-own 11)
-    target_link_libraries(snx-test-memory-own PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+    target_link_libraries(snx-test-memory-own PRIVATE Threads::Threads SDL3::SDL3 ${CMAKE_DL_LIBS})
     add_test(NAME memory_own COMMAND snx-test-memory-own)
     set_tests_properties(memory_own PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
 endif()
@@ -1692,10 +1758,12 @@ add_executable(snx-test-platform-log platform_log.c "${PROJECT_SOURCE_DIR}/src/c
 snx_test_target(snx-test-platform-log 11)
 add_test(NAME platform_log COMMAND snx-test-platform-log "${CMAKE_CURRENT_BINARY_DIR}")
 if(NOT WIN32)
-    # written-page tracking, decommit, pread, file maps, replace, folders, waits and threads (platform/plat_posix.c)
-    add_executable(snx-test-platform-posix platform_posix.c "${PROJECT_SOURCE_DIR}/src/common/filesystem/host.c")
+    # written-page tracking, decommit, pread, file maps, replace, folders, waits and threads (platform/plat_posix.c and
+    # plat_sdl.c)
+    add_executable(snx-test-platform-posix platform_posix.c "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/plat_sdl.c"
+        "${PROJECT_SOURCE_DIR}/src/common/filesystem/host.c")
     snx_test_target(snx-test-platform-posix 11)
-    target_link_libraries(snx-test-platform-posix PRIVATE ${CMAKE_DL_LIBS})
+    target_link_libraries(snx-test-platform-posix PRIVATE SDL3::SDL3 ${CMAKE_DL_LIBS})
     add_test(NAME platform_posix COMMAND snx-test-platform-posix "${CMAKE_CURRENT_BINARY_DIR}")
 endif()
 if(SNX_BUILD_NX AND NOT SNX_TOOLS_ONLY)

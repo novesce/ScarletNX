@@ -24,7 +24,9 @@ typedef struct {
     uint32_t next; /* the next instruction's address */
     int thumb;     /* a Thumb block: an A32 emitter running a Thumb32 instruction's A32 twin reads Thumb's PC */
     int in_it;     /* the Thumb instruction being emitted is in an IT block: its 16-bit data processing sets no flags */
-    unsigned pair; /* a Thumb32 doubleword exclusive's second register + 1 (TH_A32's .ra); 0: A32's first + 1 */
+    unsigned it_next; /* ITSTATE after it: an SVC or BKPT that ends the block inside one leaves it in CPSR */
+    unsigned pair;   /* a Thumb32 doubleword exclusive's second register + 1 (TH_A32's .ra); 0: A32's first + 1 */
+    uint32_t offset; /* what a Thumb32 LDREX or STREX adds to its base (TH_A32's .rd); A32's add nothing */
     SnxArmProfile profile;
     SnxArmMemoryMode memory;
     LLVMValueRef transfer_base, transfer_buffer;
@@ -359,9 +361,9 @@ static LLVMValueRef memptr(ArmIR* a, LLVMValueRef addr) {
    bus rules a plain access cannot follow (the BIOS's open bus, mirrors finer than a page, byte write
    widths). The runtime registers a hook the way the A64 side registers a fetch callback; without one every
    access is direct. The regions are the AGB board's: 0x00 to 0x01 the BIOS, 0x04 to 0x07 the I/O
-   window and video memory, 0x0E and 0x0F the save memory. */
-#define SNX_ARM_IO_REGIONS (1u << 0x00 | 1u << 0x01 | 1u << 0x04 | 1u << 0x05 | 1u << 0x06 | 1u << 0x07 | \
-                            1u << 0x0E | 1u << 0x0F)
+   window and video memory, 0x0D the EEPROM a cartridge may have there, 0x0E and 0x0F the save memory. */
+#define SNX_ARM_IO_REGIONS                                                                                             \
+    (1u << 0x00 | 1u << 0x01 | 1u << 0x04 | 1u << 0x05 | 1u << 0x06 | 1u << 0x07 | 1u << 0x0D | 1u << 0x0E | 1u << 0x0F)
 static LLVMValueRef io_route(ArmIR* a, LLVMValueRef addr, LLVMValueRef fn) {
     LLVMValueRef top = lsr(a, addr, 24);
     LLVMValueRef route = band(a, LLVMBuildLShr(a->b, c32(a, SNX_ARM_IO_REGIONS), band(a, top, c32(a, 31)), ""),
@@ -372,6 +374,25 @@ static LLVMValueRef io_route(ArmIR* a, LLVMValueRef addr, LLVMValueRef fn) {
 static LLVMTypeRef io_type(ArmIR* a) {
     LLVMTypeRef params[4] = {a->ptr, a->i32, a->i32, a->i32};
     return LLVMFunctionType(a->i32, params, 4, 0);
+}
+/* What a read of an I/O register with nothing to read gives on the GBA: the opcode the ARM7TDMI fetched last, as mGBA's
+   GBALoadBad makes it. ARM: [$+8]. Thumb: [$+4] in both halves, but [$+4] above [$+2] from the BIOS and OAM, and from
+   IWRAM [$+4] above [$+2] or below it by $+4's place in its word. Read from the code as it is, the hook gets it as the
+   value of a read */
+static LLVMValueRef code_at(ArmIR* a, uint32_t addr, unsigned bytes) {
+    LLVMValueRef value = LLVMBuildLoad2(a->b, LLVMIntTypeInContext(a->ctx, bytes * 8), memptr(a, c32(a, addr)), "");
+    LLVMSetAlignment(value, 1);
+    value = host_order(a, value, bytes);
+    return bytes < 4 ? z32(a, value) : value;
+}
+static LLVMValueRef open_bus(ArmIR* a) {
+    uint32_t region = (a->pc + 4) >> 24;
+    LLVMValueRef h2, h4;
+    if (!a->thumb) return code_at(a, a->pc + 8, 4);
+    h2 = code_at(a, a->pc + 2, 2);
+    h4 = code_at(a, a->pc + 4, 2);
+    if (region == 0x00 || region == 0x07 || (region == 0x03 && ((a->pc + 4) & 2))) return bor(a, shl(a, h4, 16), h2);
+    return bor(a, h4, shl(a, region == 0x03 ? h2 : h4, 16));
 }
 /* The GBA's ARM7TDMI rotates a misaligned load's aligned data into place in the 32 bit register instead
    of reading across the boundary (ARMv8-A would read the unaligned bytes directly). The zero
@@ -419,7 +440,7 @@ static LLVMValueRef readmem(ArmIR* a, LLVMValueRef addr, unsigned bytes, int sig
     LLVMBuildBr(a->b, done);
     LLVMPositionBuilderAtEnd(a->b, io);
     {
-        LLVMValueRef args[4] = {a->cpu, aligned, c32(a, (sign && bytes == 2 ? 0x200 : 0) | bytes), c32(a, 0)};
+        LLVMValueRef args[4] = {a->cpu, aligned, c32(a, (sign && bytes == 2 ? 0x200 : 0) | bytes), open_bus(a)};
         incoming[1] = LLVMBuildCall2(a->b, io_type(a), fn, args, 4, "");
         from[1] = io;
     }
@@ -486,7 +507,7 @@ static LLVMValueRef readmem_list(ArmIR* a, LLVMValueRef addr, unsigned bytes) {
     LLVMBuildBr(a->b, done);
     LLVMPositionBuilderAtEnd(a->b, io);
     {
-        LLVMValueRef args[4] = {a->cpu, addr, c32(a, bytes), c32(a, 0)};
+        LLVMValueRef args[4] = {a->cpu, addr, c32(a, bytes), open_bus(a)};
         incoming[1] = LLVMBuildCall2(a->b, io_type(a), fn, args, 4, "");
         from[1] = io;
     }
@@ -681,7 +702,7 @@ static void exclusive(ArmIR* a) {
     static const unsigned widths[] = {4, 8, 1, 2};
     unsigned bytes = widths[op >> 1];
     LLVMTypeRef type = LLVMIntTypeInContext(a->ctx, bytes * 8);
-    LLVMValueRef addr = reg(a, n), p, value;
+    LLVMValueRef addr = add(a, reg(a, n), c32(a, a->offset)), p, value;
     bounds(a, addr, bytes, bytes);
     p = memptr(a, addr);
     if (op & 1) {

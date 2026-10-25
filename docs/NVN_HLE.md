@@ -61,6 +61,81 @@ reached byte-exact intermediate targets in all four titles, but the approach cou
 
 ## What remains in the tree
 
+### Mesh input bindings
+
+Vertex streams retain their inclusive start/limit range when bound to Vulkan. The
+bound size is supplied independently of the backing allocation, so a vertex or
+instance outside the range cannot fetch a neighboring staged object. Attribute
+tails that cross a record stride remain inside the guest binding's limit.
+
+An empty binding keeps its actual vertex format over a zero-filled record. This
+distinguishes an empty RGBA fetch (all four stored components are zero) from an
+empty RGB fetch (the absent fourth component takes its format default of one).
+Large relative offsets that lie beyond a binding also use the zero record,
+without constructing a Vulkan offset past the allocation. Disabled attributes
+retain their separate constant-attribute path. When pipeline robustness and
+robustness2 are supported, graphics pipelines request strict vertex bounds;
+storage/uniform buffers and compute pipelines keep their device defaults.
+
+Synthetic GPU draws cover these limits, format defaults, noncontiguous position
+pages, CPU updates, physical remapping and rebased relative offsets. These are
+memory-fetch checks; they do not certify that a game's mesh data was correct
+before binding it.
+
+### Formatted surface stores
+
+Formatted `SUST` image stores follow the descriptor's format for 2D images, 2D arrays and 3D textures. Float,
+unsigned integer and signed integer stores declare an unknown SPIR-V image format with the matching scalar type.
+Signed stores preserve register bits as signed values, with a separate key for both graphics and compute pipelines.
+The renderer checks both the device's `shaderStorageImageWriteWithoutFormat` feature and the view format's
+storage-write support. This permits unsigned
+formats such as RGBA8, R16 and RG32 rather than requiring every unsigned store to use R32_UINT. Loads and atomics
+that require R32ui retain their explicit shader format. Vulkan's requirements are described in the
+[storage image guide](https://docs.vulkan.org/guide/latest/storage_image_and_texel_buffers.html).
+
+Storage views of mipmapped textures expose only the first level selected by the descriptor. Sampled views retain
+the complete chain; the two view types have distinct cache keys and share their existing image. Writeback changes
+only the selected level of each layer and preserves the other mip levels and padding. GPU swizzles merge partial
+16-byte runs with the destination instead of overwriting bytes beyond the row width.
+
+A storage descriptor smaller than a render target at the same address resolves to a writable texture with its own
+guest layout, rather than a sampling-only crop snapshot. Its initial contents include the target's GPU writes.
+Tests cover normalized RGBA8 and packed R11G11B10 float stores over wider targets, including surrounding bytes.
+Bindless handles remain traceable when a local predicate is saved with `PSET` and restored with `ISETP`, or when an
+equal integer compare is recomputed with unchanged operands. Changed guards and operands remain rejected.
+
+`tests/vulkan_storage_formats.inc`, run by `vulkan_headless`, dispatches synthetic Maxwell programs against seven
+signed and unsigned formats and five float formats in each of the three dimensions, through bound and bindless
+handles, single-level images and selected mip levels. It compares exact guest bytes including neighboring texels,
+layers, slices, mip data and padding, and checks that the complete sampled chain sees a selected-level write.
+Type mismatches and the unformatted-write feature guard are checked too. `shader_direct_regressions` checks
+declarations for fragment and compute stores and atomics, with nine signed store modules across vertex, fragment
+and compute stages validated by `spirv-val`.
+No game data is needed. Unsupported formats are skipped when the device cannot store to them.
+
+Formatted and raw 32-bit `SULD` reads also support 2D array and 3D images. Their sampled image declarations retain
+the array flag and dimension instead of treating every surface as 2D. `SUATOM` and `SURED` support 32-bit operations
+on 3D R32_UINT images, including signed MIN/MAX comparisons. `tests/vulkan_storage_atomics.inc` checks 136 cases
+with contending invocations, returned values, bound/bindless handles and selected mip levels. The additional 56
+round-trips in `tests/vulkan_surface_loads.inc` check typed and raw reads, exact output and unchanged source bytes.
+The shader regression suite also validates four volume atomic modules and eight array/volume load modules.
+
+This does not provide complete NVN support. Atomic access through non-R32_UINT image formats remains outside this
+path. A storage view selects one mip level; it does not expose all levels at once. The Maxwell decoder and
+shader translator still execute the commands and programs NVN produces.
+
+Known gaps in this path (not an exhaustive inventory of NVN):
+
+| Operation | Current limit |
+| --- | --- |
+| Surface compare-and-swap, wrapping INC/DEC and 64-bit atomics | Not translated |
+| Raw surface loads wider than 32 bits and raw surface stores | Not translated |
+| One-dimensional non-buffer surface operations | Not translated |
+| Multisample textures in compute | Dispatch is skipped |
+| Texture handles the shader tracker cannot resolve | Shader is rejected; affected draws or dispatches are skipped |
+
+Passing image-operation tests does not verify all games' geometry, lighting, synchronization or presentation.
+
 ### GPU compatibility coverage
 
 Shader instruction invalidation reaches the Vulkan shader address caches from the 3D engine's `0x87` and `0x369`

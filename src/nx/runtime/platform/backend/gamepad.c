@@ -9,6 +9,9 @@
 #include "common/utilities/common.h"
 #include "common/utilities/pad_sdl.h"
 #include <SDL3/SDL.h>
+#if (defined(__FreeBSD__) || defined(__linux__)) && !defined(__ANDROID__)
+#include <dirent.h>
+#endif
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -214,6 +217,35 @@ static void load_mappings(void) {
 done:
     free(folder);
 }
+/* the device nodes SDL's joystick backends read on this system, and the one a kernel driver made instead: said when
+   SDL sees no joystick at all. On FreeBSD and Linux SDL reads the pads itself, an Xbox pad's own protocol over HIDAPI
+   and libusb: a pad a kernel driver claimed (xb360gp, hgame, webcamd) is left only as /dev/input/event*, which on
+   FreeBSD those backends do not open */
+static void say_hosts(void) {
+#if (defined(__FreeBSD__) || defined(__linux__)) && !defined(__ANDROID__)
+    struct dirent* d;
+    DIR* dir;
+    int uhid = 0, event = 0, stick = 0;
+    dir = opendir("/dev");
+    while (dir && (d = readdir(dir))) uhid += !SDL_strncmp(d->d_name, "uhid", 4);
+    if (dir) closedir(dir);
+    dir = opendir("/dev/input");
+    while (dir && (d = readdir(dir))) {
+        event += !SDL_strncmp(d->d_name, "event", 5);
+        stick += !SDL_strncmp(d->d_name, "js", 2);
+    }
+    if (dir) closedir(dir);
+    LOG("input: /dev has %d uhid node(s); /dev/input has %d event and %d joystick node(s)\n", uhid, event, stick);
+#ifdef __FreeBSD__
+    if (event && !uhid)
+        LOG("input: the pads sit behind a kernel driver (/dev/input/event*), which SDL cannot read: unload it "
+            "(xb360gp, hgame or webcamd) and leave the pad to SDL's HIDAPI over libusb\n");
+    else if (!event && !uhid)
+        LOG("input: no /dev/uhid and no /dev/input/event node: the pad's driver has not attached, and an Xbox pad is "
+            "read over HIDAPI and libusb (devel/libusb installed, /dev/usb readable)\n");
+#endif
+#endif
+}
 void gamepad_detect(u32 id) {
     const char* name = SDL_GetJoystickNameForID(id);
     char guid[33];
@@ -221,8 +253,9 @@ void gamepad_detect(u32 id) {
     if (SDL_IsGamepad(id)) {
         gamepad_open(id);
     } else {
-        LOG("input: joystick %s (id %lu, GUID %s) has no SDL gamepad mapping; add one to gamecontrollerdb.txt\n",
-            name ? name : "Unknown", (unsigned long)id, guid);
+        const char* path = SDL_GetJoystickPathForID(id);
+        LOG("input: joystick %s (id %lu, GUID %s, at %s) has no SDL gamepad mapping; add one to gamecontrollerdb.txt\n",
+            name ? name : "Unknown", (unsigned long)id, guid, path && *path ? path : "an unknown path");
     }
 }
 void gamepad_scan(void) {
@@ -230,8 +263,10 @@ void gamepad_scan(void) {
     int i, n = 0;
     load_mappings();
     ids = SDL_GetJoysticks(&n);
-    if (!ids) {
+    if (!ids || !n) { /* SDL answers with an empty list, not NULL, when it sees no joystick */
         LOG("input: no SDL joysticks detected\n");
+        say_hosts();
+        SDL_free(ids);
         return;
     }
     for (i = 0; i < n; i++) gamepad_detect(ids[i]);

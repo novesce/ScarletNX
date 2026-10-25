@@ -21,9 +21,9 @@ def main():
         assert 'ScarletNX - ' not in output, output  # no false launch/completion banner
         return output
 
-    help_text = run(['--help'], 0, 'recompile if needed, then play')
+    help_text = run(['--help'], 0, 'recompiled if needed,\n                  then played')
     assert '--recomp' in help_text and '--extract' in help_text and 'scarletnx-3ds-aot' not in help_text
-    assert '--extract-container' in help_text and 'CIA where it lies' in help_text
+    assert '--extract-container' in help_text and 'read where it lies' in help_text
     run(['--board-info', '--extract-container'], 2, 'Usage:')
     run(['-x', '-r', 'game.cia'], 2, 'Usage:')
     run(['-r', '--max-blocks', '5', 'game.cia'], 2, 'Usage:')
@@ -41,13 +41,14 @@ def main():
     run(['--backend=gcc'], 2, 'unknown setting: --backend=gcc')  # --key=value is the 3DS debug table's
     with tempfile.TemporaryDirectory(prefix='snx-3ds-') as temp:
         root = pathlib.Path(temp)
-        for name in ['game with spaces;literal.CIA', 'game.nsp', '--game.cia']:
+        for name in ['game with spaces;literal.CIA', 'game.nsp', '--game.cia', 'game.cci']:
             (root / name).write_bytes(b'not a real CIA')
         run([str(root / 'game with spaces;literal.CIA')], 1, 'archive section')
         run(['--model', 'new', '--', '--game.cia'], 1, 'archive section', cwd=root)
-        run([str(root / 'game.nsp')], 2, f'{root / "game.nsp"} is not a .cia file')
+        run([str(root / 'game.cci')], 1, 'truncated or out-of-range archive section')
+        run([str(root / 'game.nsp')], 2, f'{root / "game.nsp"} is not a game of this system')
         run([str(root / 'missing.cia')], 2, f'{root / "missing.cia"} does not exist')
-        run([str(root)], 2, f'{root} is not a .cia file')
+        run([str(root)], 2, f'{root} is not a game of this system')
         (root / 'folder.cia').mkdir()
         run([str(root / 'folder.cia')], 2, f'{root / "folder.cia"} is not a file')
         (root / 'folder.cia').rmdir()
@@ -75,7 +76,7 @@ def main():
             banner_path.write_bytes(b'not a CIA')
             run([str(banner_path)], 2, 'control characters')
             banner_path.unlink()
-        assert sorted(p.name for p in root.iterdir()) == ['--game.cia', 'game with spaces;literal.CIA', 'game.nsp']
+        assert sorted(p.name for p in root.iterdir()) == ['--game.cia', 'game with spaces;literal.CIA', 'game.cci', 'game.nsp']
     print('3DS driver CLI, malformed-input diagnostics and no output side effects passed')
 
 

@@ -9,7 +9,7 @@
 # BSDs).
 # This file is included into the top-level scope: its variables carry the snx_openssl_ prefix.
 set(snx_openssl_src "${OpenSSL_SOURCE_DIR}")
-set(snx_openssl_prefix "${CMAKE_BINARY_DIR}/openssl")
+set(snx_openssl_prefix "${PROJECT_BINARY_DIR}/openssl")
 find_package(Perl)
 find_program(SNX_OPENSSL_MAKE NAMES gmake make)
 if(NOT PERL_FOUND OR NOT SNX_OPENSSL_MAKE)
@@ -139,7 +139,7 @@ else()
     include(ExternalProject)
     ExternalProject_Add(openssl_build
         SOURCE_DIR "${snx_openssl_src}"
-        BINARY_DIR "${CMAKE_BINARY_DIR}/openssl-build"
+        BINARY_DIR "${PROJECT_BINARY_DIR}/openssl-build"
         INSTALL_DIR "${snx_openssl_prefix}"
         CONFIGURE_COMMAND ${snx_openssl_env} "${PERL_EXECUTABLE}" "${snx_openssl_src}/Configure"
                           --prefix=${snx_openssl_prefix} ${snx_openssl_args}

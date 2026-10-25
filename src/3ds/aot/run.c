@@ -125,7 +125,7 @@ static bool deploy_runtime(const char* directory, const char* runtime, char* err
     free(copy);
     return placed >= 0;
 }
-int snx_ctr_aot_run(const char* directory, const SnxCtrCia* cia, SnxCtrModel model, uint64_t limit, double seconds,
+int snx_ctr_aot_run(const char* directory, const SnxCtrSource* game, SnxCtrModel model, uint64_t limit, double seconds,
                     unsigned flags, uint32_t ipc_stubs, const char* runtime, char* error, size_t error_size) {
     SnxCtrImage image = {0};
     SnxCtrProcess* process = NULL;
@@ -133,7 +133,7 @@ int snx_ctr_aot_run(const char* directory, const SnxCtrCia* cia, SnxCtrModel mod
     SnxCtrNative native = {0};
     char *module_path = NULL, *frames = NULL, *wav = NULL;
     int result = 1;
-    if (!(cia ? snx_ctr_image_from_cia(cia, &image, error, error_size)
+    if (!(game ? snx_ctr_image_from_source(game, &image, error, error_size)
               : snx_ctr_image_load(directory, &image, error, error_size)))
         goto done;
     module_path = snx_ctr_game_file(directory, SNX_CTR_MODULE_SUFFIX);
@@ -155,7 +155,7 @@ int snx_ctr_aot_run(const char* directory, const SnxCtrCia* cia, SnxCtrModel mod
     if ((flags & SNX_CTR_RECOMPILE) || !snx_ctr_native_open(module_path, &image, &native, error, error_size)) {
         snx_ctr_native_close(&native);
         printf("Recompiling ARM11 (offline static AOT)\n");
-        int status = snx_ctr_aot_compile(directory, cia, error, error_size);
+        int status = snx_ctr_aot_compile(directory, game, error, error_size);
         if (status) {
             result = status == 3 ? 3 : 1;
             goto done;
@@ -177,8 +177,8 @@ int snx_ctr_aot_run(const char* directory, const SnxCtrCia* cia, SnxCtrModel mod
     char why[256];
     if (!(jit = snx_ctr_jit_new(process, why, sizeof why)))
         printf("No run-time compiler (%s): only the static blocks run\n", why);
-    if (!(cia ? snx_ctr_process_mount_cia(process, directory, cia) : snx_ctr_process_mount_fs(process, directory))) {
-        snprintf(error, error_size, cia ? "cannot mount the CIA's filesystem" : "cannot index extracted title filesystem");
+    if (!(game ? snx_ctr_process_mount_source(process, directory, game) : snx_ctr_process_mount_fs(process, directory))) {
+        snprintf(error, error_size, game ? "cannot mount the game's filesystem" : "cannot index extracted title filesystem");
         goto done;
     }
     /* Vulkan-only presentation: real frames land in <output>/frames as PPM.

@@ -326,6 +326,24 @@ int main(void) {
         block = agb_recomp_lookup(&recomp, &board, 0x03000100, 0, error, sizeof error);
         CHECK(block && run_block(&cpu, block) == 0xFFFFFFE8);
     }
+    {
+        /* the ARM7TDMI's BL is two halves: the code walk pairs them, so the callee is a block before it runs; a low half
+           alone calls through LR, which only the run knows: the walk adds the block after it and no other */
+        int callee = 0, after = 0;
+        size_t before;
+        agb_write16(&board, 0x03000200, 0xF000); /* bl 0x03000300: the high half, LR = 0x03000204 */
+        agb_write16(&board, 0x03000202, 0xF87E); /* the low half: LR + 0xFC */
+        agb_write16(&board, 0x03000300, 0x4770); /* bx lr */
+        agb_write16(&board, 0x03000400, 0xF810); /* a low half alone */
+        CHECK(agb_recomp_lookup(&recomp, &board, 0x03000200, 1, error, sizeof error));
+        before = recomp.count;
+        CHECK(agb_recomp_lookup(&recomp, &board, 0x03000400, 1, error, sizeof error) && recomp.count == before + 2);
+        for (size_t i = 1; i <= recomp.count; ++i) {
+            callee |= recomp.blocks[i].pc == 0x03000300 && recomp.blocks[i].thumb;
+            after |= recomp.blocks[i].pc == 0x03000402 && recomp.blocks[i].thumb;
+        }
+        CHECK(callee && after);
+    }
 #ifdef SNX_AGB_JIT
     {
         /* finding a block costs the same however many the map names: one named after 32768 others, as a run that once

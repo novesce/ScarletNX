@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
    Copyright 2026 the ScarletNX contributors */
-/* The POSIX platform layer (platform/plat_posix.c): written-page tracking, decommit zeroing, pread, file maps,
-   replace, folders, timed waits and threads. Written-page tracking needs Linux 6.7; without it the scan must say -1 */
+/* The POSIX platform layer (platform/plat_posix.c, with plat_sdl.c): written-page tracking, decommit zeroing, pread,
+   file maps, replace, folders, timed waits and threads. Written-page tracking needs Linux 6.7; without it the scan must say -1 */
 #include "nx/runtime/platform/plat_posix.c"
 #include <stdarg.h>
 #include <stdio.h>
@@ -101,10 +101,10 @@ int main(int argc, char** argv) {
     u8 buf[64];
     FILE* f;
     PFileMap m;
-    PDir d;
+    struct stat st;
     PCond c;
     PMutex mu = PMUTEX_INIT;
-    int i, seen, arg = 7;
+    int i, arg = 7;
     u64 t;
 
     setvbuf(stdout, NULL, _IONBF, 0); /* each section says it started, so a crash shows where it happened */
@@ -138,31 +138,15 @@ int main(int argc, char** argv) {
 
     printf("replace\n");
     /* replace: dst gets tmp's contents; a failing replace removes tmp */
-    CHECK(!plat_replace_file(tmp, path) && plat_file_size(path) == 0 && !fopen(tmp, "rb"), "replace");
+    CHECK(!plat_replace_file(tmp, path) && !stat(path, &st) && st.st_size == 0 && !fopen(tmp, "rb"), "replace");
     fclose(fopen(tmp, "wb"));
     snprintf(sub, sizeof sub, "%s/platform_posix.none/x", dir);
     CHECK(plat_replace_file(tmp, sub) == -1 && !fopen(tmp, "rb"), "a failed replace kept tmp");
 
     printf("folders\n");
-    /* folders: a path too long for the iteration's buffer is refused */
     snprintf(sub, sizeof sub, "%s/platform_posix.dir", dir);
     plat_mkdir(sub);
-    snprintf(tmp, sizeof tmp, "%s/inner", sub);
-    plat_mkdir(tmp);
     CHECK(plat_is_dir(sub) && !plat_is_dir(path), "plat_is_dir");
-    seen = 0;
-    if (!plat_dir_open(&d, sub)) {
-        while (plat_dir_next(&d)) seen += !strcmp(d.name, "inner") && d.is_dir;
-        plat_dir_close(&d);
-    }
-    CHECK(seen == 1, "the folder's entry not listed once");
-    {
-        char longpath[1100];
-        memset(longpath, 'a', sizeof longpath - 1);
-        longpath[sizeof longpath - 1] = 0;
-        longpath[0] = '/';
-        CHECK(plat_dir_open(&d, longpath) == -1 && !d.h, "a path too long was opened");
-    }
 
     printf("timed waits and threads\n");
     /* a timed wait times out, roughly on time */

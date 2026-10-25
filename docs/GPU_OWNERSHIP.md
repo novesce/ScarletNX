@@ -7,6 +7,11 @@ the ownership map and copies it on the GPU. Only when the guest CPU (recompiled 
 touches an owned range is the data written back into guest memory, the one readback the rules allow, and the range
 is the CPU's again.
 
+Render targets stay the renderer's: their pixels reach guest memory only when a consumer asks. Pitch-linear color
+targets are the exception, as a game draws into those to read the result on the CPU: each release publishes the ones
+drawn since the last (`vk_rt_publish_linear` in `vk/surface.c`), and storage images are published the same way
+(`vk_surf_publish`). A block linear target the CPU reads gets no write-back yet.
+
 The trap model is Skyline's (read for the design only: its source is MPL-2.0 and was withdrawn at the console maker's
 request, so nothing is copied from it). The fault is taken differently on each host (below).
 
@@ -88,11 +93,40 @@ rather than landing in the signal handler.
   without `own_acquire`): fatal, with the range, when that thread is waiting in the fault. A late fault message, from a
   thread that has taken `vk_lock` since, lands as any other. Its fault on a page no entry is on any more (landed, not
   let go yet) goes on.
+- Before that fatal, `ownership-fault:` lines record the read/write direction, guest page and host page, whether
+  the wait was confirmed, and up to sixteen overlapping owners (guest ranges, pool offsets, resource identities,
+  resource offsets and landing state). The address is page-granular, not the exact byte accessed.
+  On Linux the report reads the **blocked thread's** PC and SP from `/proc/self/task/TID/syscall`, then records its
+  executable mapping and file offset. It scans at most 128 native stack words for executable addresses, explicitly
+  labeled `stack-candidate`: these may be saved callers or unrelated values, **not an unwound backtrace**. It never
+  reads shared guest pool pages for this scan or resumes the thread. Missing procfs/register/stack access is logged.
+  Use the build revision printed at startup and that build's unstripped binary/debug symbols to resolve addresses;
+  a file offset must be translated through the ELF load segments before using it as an addr2line address.
+  See https://man7.org/linux/man-pages/man5/proc_pid_syscall.5.html for the blocked-thread register format.
 - Landing is a memcpy into the mirror. A producer's GPU copy keeps the range's layout (block linear surfaces are
   swizzled on the GPU), and covers the range's padding: it is filled from guest memory when the producer takes the
   range.
+- Ownership readback uses its own reusable graphics command pool, fence and host-cached buffer. It flushes an open
+  frame without running completed-frame callbacks. Those callbacks can acquire an adjacent range on the same trapped
+  page, and would wait for the landing already running on their own thread. Frame recycling and result reconciliation
+  remain on the normal frame path, after the ownership map has removed the landing marks.
 
 ## Phases
+
+The Maxwell syncpoint's `CLEAN_L2` bit publishes pending render targets before its
+CPU-visible release. Each supported target is packed into a GPU-owned buffer in
+guest layout, oldest write first across physical aliases. The release waits for
+that publication's submission even when no shader storage result is pending.
+A later CPU access lands the owner before proceeding, so CPU reuse or a partial
+edit cannot be overwritten by a delayed render-target flush. A second clean with
+no new target writes records no additional image copies. Targets the existing
+publication path cannot pack use its synchronous writeback fallback.
+
+`vulkan_headless` checks full CPU reuse, a partial edit spanning pages, overlapping
+physical aliases in both draw orders, and a tiled image mapped to separate RAM
+pages through real clean-and-syncpoint commands. `vulkan_release` checks that a
+clean gates its release and that completing an older clean preserves a newer gate.
+Packed depth/stencil formats excluded by `flush_bytes` remain outside this path.
 
 1. Done. The trap layer and the map, Linux first, with `tests/memory_own.c` (synthetic owners, no Vulkan): read and write
    faults return the owner's bytes, a neighbor's writes on an edge page are not lost, the write-tracking markers
@@ -110,8 +144,11 @@ rather than landing in the signal handler.
 4. Done, inline-to-memory aside. DMA, 2D, inline-to-memory: every copy, layout change, remap and fill as a GPU copy or dispatch from the source's
    owner (or its guest bytes, staged whole) into a GPU-owned destination. `f2d_blit_memory`, the DMA engine's CPU
    loops and the render target flush and reload around them go. The clear before the renderer starts is kept for
-   the renderer. Inline-to-memory stays a CPU write: its data is born on the CPU (the pushbuffer), and the runtime's
-   own readers of what it writes (the shader translator, MME macros) would land every GPU-owned copy of it again.
+   the renderer. Inline-to-memory stays a CPU write: the runtime's own readers of its output (the shader translator,
+   MME macros) would land every GPU-owned copy of it again. Compute-inline payloads may themselves be produced by
+   earlier GPU work. Following Citron's Peach fix (`acfb1dcc1`), they use safe reads in stream order, resolving
+   pending results before the inline engine consumes them. The non-increasing payload is fetched once per entry,
+   including continuations and noncontiguous mappings; headers and other methods retain their submission snapshots.
    `vulkan_headless` holds the DMA engine and the 2D blit to `dma_ref.c` and `fermi2d_ref.c` on lavapipe.
 5. Windows and the other hosts. Until then their `plat_trap_*` fail, and a published result lands at once (a readback
    per result, correct and slow).

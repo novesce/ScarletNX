@@ -1,15 +1,15 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
    Copyright 2026 the ScarletNX contributors */
-/* The platform layer on Linux, Android, FreeBSD and Apple systems: threads, time, the guest's address space with
-   written-page tracking, files, libraries, the text entry dialog and the crash handler */
+/* The platform layer on Linux, Android, FreeBSD and Apple systems: threads, condition variables, the guest's address
+   space with written-page tracking, file reads and maps, the environment, the text entry dialog and the crash handler
+   (plat_sdl.c has the clocks, sleeping, libraries and path queries) */
 #if defined(__linux__) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE /* REG_RIP, pipe2 */
 #endif
 #include "nx/runtime/platform/plat.h"
 #include "nx/runtime/main.h"
 #include "nx/runtime/platform/log.h"
-#include <dirent.h>
-#include <dlfcn.h>
+#include <SDL3/SDL_thread.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -39,10 +39,13 @@
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #endif
 #if defined(__ANDROID__)
-#include <SDL3/SDL_system.h>
 #include <sys/system_properties.h>
+#endif
+#if defined(__APPLE__)
+#include <mach/mach.h>
 #endif
 #if defined(__APPLE__) || defined(__FreeBSD__)
 #include <sys/sysctl.h>
@@ -149,6 +152,7 @@ static void* thread_start(void* p) {
         run_with_alt_stack(s.fn, s.arg);
     else
         s.fn(s.arg);
+    SDL_CleanupTLS(); /* SDL's per-thread state (plat_sdl.c's calls set its error text) */
     return NULL;
 }
 
@@ -194,6 +198,7 @@ int plat_thread(PThreadFn fn, void* arg, size_t stack) {
 void plat_thread_exit(void) {
     /* pthread_exit leaves run_with_alt_stack's frame without returning through it */
     alt_stack_off();
+    SDL_CleanupTLS();
     pthread_exit(NULL);
 }
 /* Linux only: Android's CPUs differ in speed, so a fixed share of them would make a core slow */
@@ -308,34 +313,9 @@ void plat_system_info(char* out, size_t cap) {
              (ram + (512ull << 20)) >> 30);
 }
 void plat_yield(void) { sched_yield(); }
-void plat_sleep_ns(i64 ns) {
-    struct timespec ts;
-    if (ns <= 0) {
-        sched_yield();
-        return;
-    }
-    ts.tv_sec = (time_t)(ns / 1000000000);
-    ts.tv_nsec = (long)(ns % 1000000000);
-    while (nanosleep(&ts, &ts) && errno == EINTR) {
-    }
-}
 void plat_exit_now(int code) {
     fflush(NULL);
     _exit(code);
-}
-
-/* ================================================================ time */
-u64 plat_ns(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (u64)ts.tv_sec * 1000000000u + (u64)ts.tv_nsec;
-}
-i64 plat_unix_time(void) { return (i64)time(NULL); }
-i64 plat_tz_offset(void) {
-    time_t now = time(NULL);
-    struct tm t;
-    if (!localtime_r(&now, &t)) return 0;
-    return (i64)t.tm_gmtoff;
 }
 
 /* ================================================================ the guest's address space */
@@ -476,6 +456,44 @@ u64 plat_vm_page(void) {
 }
 /* mmap aligns to the host's own page: a larger plat_vm_page (SNX_HOST_PAGE) takes a page more and trims the rest, so
    guest addresses sit at the same place in a page as their host addresses */
+int plat_address_space(u64* mapped, u64* largest_free) {
+    u64 total = 0, hole = 0, last = 0;
+#if defined(__linux__)
+    /* each mapping's range, in address order, a line each */
+    char line[PATH_MAX + 128];
+    unsigned long long lo, hi;
+    FILE* f = fopen("/proc/self/maps", "r");
+    if (!f) return 0;
+    while (fgets(line, sizeof line, f)) {
+        if (sscanf(line, "%llx-%llx ", &lo, &hi) != 2 || hi <= lo) continue;
+        total += hi - lo;
+        if (last && lo > last && lo - last > hole) hole = lo - last;
+        last = hi;
+    }
+    fclose(f);
+#elif defined(__APPLE__)
+    vm_address_t at = 0;
+    for (;;) {
+        vm_size_t size = 0;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t object = MACH_PORT_NULL;
+        if (vm_region_64(mach_task_self(), &at, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &count,
+                         &object) != KERN_SUCCESS)
+            break;
+        total += size;
+        if (last && at > last && at - last > hole) hole = at - last;
+        last = at + size;
+        at = last;
+    }
+#else
+    (void)last;
+#endif
+    if (!total) return 0;
+    *mapped = total;
+    *largest_free = hole;
+    return 1;
+}
 u8* plat_vm_reserve(u64 size) {
     u64 page = plat_vm_page(), extra = page - (u64)sysconf(_SC_PAGESIZE), head;
     u8* p = (u8*)mmap(NULL, (size_t)(size + extra), PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
@@ -618,6 +636,135 @@ int plat_thread_in_fault(u32 tid) {
 #else
     (void)tid;
     return -1; /* traps are userfaultfd's, Linux's */
+#endif
+}
+
+#if defined(__linux__)
+/* Read proc metadata, never the stopped thread's guest memory. A blocked user-space fault has syscall=-1,
+   followed by SP and PC; a blocked syscall has six arguments before them. */
+static int fault_proc_line(u32 tid, const char* file, char* buf, size_t cap) {
+    char path[96];
+    ssize_t n;
+    int fd, error;
+    snprintf(path, sizeof path, "/proc/self/task/%u/%s", tid, file);
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        WARN("ownership-fault: %s unavailable (errno=%d)\n", file, errno);
+        return 0;
+    }
+    n = read(fd, buf, cap - 1);
+    error = errno;
+    close(fd);
+    if (n <= 0) {
+        WARN("ownership-fault: %s unavailable (read=%ld errno=%d)\n", file, (long)n, n < 0 ? error : 0);
+        return 0;
+    }
+    buf[n] = 0;
+    buf[strcspn(buf, "\n")] = 0;
+    return 1;
+}
+
+/* Report mapping-relative and file offsets even in stripped builds, without dladdr's dynamic-loader lock.
+   Stack words are only candidates, not unwound frames. */
+static void fault_code_mapping(uintptr_t pc, const char* kind, size_t slot) {
+    FILE* f = fopen("/proc/self/maps", "r");
+    char line[1024], perms[5];
+    unsigned long long lo, hi, off;
+    int found = 0;
+    if (!f) {
+        WARN("ownership-fault: maps unavailable (errno=%d)\n", errno);
+        return;
+    }
+    while (fgets(line, sizeof line, f)) {
+        if (sscanf(line, "%llx-%llx %4s %llx", &lo, &hi, perms, &off) != 4 || pc < lo || pc >= hi || perms[2] != 'x')
+            continue;
+        line[strcspn(line, "\n")] = 0;
+        WARN("ownership-fault: %s[%zu] host=%llx mapping+%llx file-offset=%llx map=%s\n", kind, slot,
+             (unsigned long long)pc, (unsigned long long)pc - lo, off + (unsigned long long)pc - lo, line);
+        found = 1;
+        break;
+    }
+    fclose(f);
+    if (!found && !strcmp(kind, "pc"))
+        WARN("ownership-fault: pc=%llx has no executable mapping (possibly changed)\n", (unsigned long long)pc);
+}
+
+static void fault_stack_candidates(uintptr_t sp) {
+    uintptr_t words[128];
+    FILE* f = fopen("/proc/self/maps", "r");
+    char line[1024], perms[5];
+    unsigned long long lo, hi;
+    size_t bytes = 0, i;
+    ssize_t n;
+    struct iovec local, remote;
+    if (!f) {
+        WARN("ownership-fault: stack candidates unavailable (maps errno=%d)\n", errno);
+        return;
+    }
+    while (fgets(line, sizeof line, f)) {
+        int name = 0;
+        if (sscanf(line, "%llx-%llx %4s %*s %*s %*s %n", &lo, &hi, perms, &name) != 3 || !name || sp < lo || sp >= hi)
+            continue;
+        /* Native stacks only: anonymous private RW or [stack]. Owned guest pool pages are shared mappings.
+           Excluding them prevents the diagnostic itself blocking on a userfaultfd page. */
+        if (!strcmp(perms, "rw-p") && (!line[name] || !strncmp(line + name, "[stack]", 7)))
+            bytes = hi - sp < sizeof words ? (size_t)(hi - sp) : sizeof words;
+        break;
+    }
+    fclose(f);
+    if (!bytes) {
+        WARN("ownership-fault: stack candidates unavailable (SP is not in a private native stack mapping)\n");
+        return;
+    }
+    local.iov_base = words;
+    local.iov_len = bytes;
+    remote.iov_base = (void*)sp;
+    remote.iov_len = bytes;
+    /* Android API 21 has no libc declaration for process_vm_readv. Use the kernel interface, as the
+       userfaultfd paths do, and keep the diagnostic optional if the syscall is unavailable or denied. */
+    n = syscall(SYS_process_vm_readv, getpid(), &local, 1ul, &remote, 1ul, 0ul);
+    if (n <= 0) {
+        WARN("ownership-fault: stack candidates unavailable (read=%ld errno=%d)\n", (long)n, n < 0 ? errno : 0);
+        return;
+    }
+    WARN("ownership-fault: scanning %ld native stack bytes for possible callers; candidates are NOT a backtrace\n",
+         (long)n);
+    for (i = 0; i < (size_t)n / sizeof words[0]; i++)
+        fault_code_mapping(words[i], "stack-candidate", i * sizeof words[0]);
+}
+#endif
+
+void plat_dump_fault_thread(u32 tid) {
+#if defined(__linux__)
+    char buf[512], *p, *end;
+    unsigned long long regs[8];
+    long call;
+    unsigned n = 0, expected;
+    if (fault_proc_line(tid, "comm", buf, sizeof buf)) WARN("ownership-fault: thread-name=%s\n", buf);
+    if (fault_proc_line(tid, "wchan", buf, sizeof buf)) WARN("ownership-fault: wait-channel=%s\n", buf);
+    if (!fault_proc_line(tid, "syscall", buf, sizeof buf)) return;
+    call = strtol(buf, &p, 10);
+    if (p == buf) {
+        WARN("ownership-fault: host registers unavailable (%s)\n", buf);
+        return;
+    }
+    while (n < 8) {
+        regs[n] = strtoull(p, &end, 0);
+        if (end == p) break;
+        n++;
+        p = end;
+    }
+    expected = call == -1 ? 2 : 8;
+    if (n != expected) {
+        WARN("ownership-fault: host registers unavailable (unexpected syscall record)\n");
+        return;
+    }
+    WARN("ownership-fault: blocked-thread=%u syscall=%ld host-pc=%llx host-sp=%llx\n", tid, call, regs[n - 1],
+         regs[n - 2]);
+    fault_code_mapping((uintptr_t)regs[n - 1], "pc", 0);
+    fault_stack_candidates((uintptr_t)regs[n - 2]);
+#else
+    WARN("ownership-fault: host context unavailable for thread %u on this platform\n", tid);
 #endif
 }
 u8* plat_alias_mirror(void) {
@@ -870,110 +1017,10 @@ static int frozen_wait(void* a, int access) {
     return 1;
 }
 
-/* ================================================================ libraries */
-#if defined(__ANDROID__)
-/* Shared storage (/sdcard) is mounted noexec: a module there loads from a copy in the app's cache folder */
-static void* dl_open_from_cache(const char* path) {
-    const char* cache = SDL_GetAndroidCachePath();
-    const char* base = strrchr(path, '/');
-    char copy[1400], buf[65536];
-    FILE *in, *out;
-    size_t n;
-    int ok = 1;
-    if (!cache) return NULL;
-    base = base ? base + 1 : path;
-    if ((size_t)snprintf(copy, sizeof copy, "%s/%s", cache, base) >= sizeof copy) return NULL;
-    in = fopen(path, "rb");
-    if (!in) return NULL;
-    out = fopen(copy, "wb");
-    if (!out) {
-        fclose(in);
-        return NULL;
-    }
-    while (ok && (n = fread(buf, 1, sizeof buf, in)) > 0) ok = fwrite(buf, 1, n, out) == n;
-    ok = ok && !ferror(in);
-    fclose(in);
-    if (fclose(out) || !ok) return NULL;
-    return dlopen(copy, RTLD_NOW | RTLD_LOCAL);
-}
-#endif
-void* plat_dl_open(const char* path) {
-    void* h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
-#if defined(__ANDROID__)
-    if (!h) h = dl_open_from_cache(path);
-#endif
-    return h;
-}
-void* plat_dl_sym(void* h, const char* name) { return dlsym(h, name); }
-const char* plat_dl_error(void) {
-    const char* e = dlerror();
-    return e ? e : "no error reported";
-}
+/* ================================================================ environment */
 int plat_setenv(const char* name, const char* value) { return setenv(name, value, 1); }
 
-/* ================================================================ files and folders */
-int plat_is_dir(const char* path) {
-    struct stat st;
-    return !stat(path, &st) && S_ISDIR(st.st_mode);
-}
-u64 plat_file_size(const char* path) {
-    struct stat st;
-    return stat(path, &st) || st.st_size < 0 ? 0 : (u64)st.st_size;
-}
-
-typedef struct {
-    DIR* dir;
-    char path[1024]; /* the folder, to stat its entries */
-} DirState;
-int plat_dir_open(PDir* d, const char* path) {
-    size_t len = strlen(path);
-    DirState* s;
-    memset(d, 0, sizeof *d);
-    /* a longer path would be cut, and the entries stat'ed in some other folder */
-    if (len >= sizeof s->path) return -1;
-    s = malloc(sizeof *s);
-    if (!s) return -1;
-    memcpy(s->path, path, len + 1);
-    s->dir = opendir(path);
-    if (!s->dir) {
-        free(s);
-        return -1;
-    }
-    d->h = s;
-    d->first = 1;
-    return 0;
-}
-int plat_dir_next(PDir* d) {
-    DirState* s = (DirState*)d->h;
-    struct dirent* e;
-    if (!s) return 0;
-    d->first = 0;
-    while ((e = readdir(s->dir)) != NULL) {
-        char full[1600];
-        struct stat st;
-        size_t n = strlen(e->d_name);
-        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..") || n >= sizeof d->name) continue;
-        memcpy(d->name, e->d_name, n + 1);
-        snprintf(full, sizeof full, "%s/%s", s->path, e->d_name);
-        d->is_dir = 0;
-        d->size = 0;
-        if (!stat(full, &st)) {
-            d->is_dir = S_ISDIR(st.st_mode) != 0;
-            d->size = st.st_size > 0 ? (u64)st.st_size : 0;
-        }
-        return 1;
-    }
-    return 0;
-}
-void plat_dir_close(PDir* d) {
-    DirState* s = (DirState*)d->h;
-    if (s) {
-        closedir(s->dir);
-        free(s);
-    }
-    d->h = NULL;
-}
-
+/* ================================================================ files */
 i64 plat_pread(FILE* f, void* buf, u64 size, u64 off) {
     int fd = fileno(f);
     u64 got = 0;
@@ -1036,12 +1083,6 @@ void plat_file_unmap(PFileMap* m) {
     else if (m->data && !m->borrowed) munmap((void*)m->data, (size_t)m->size);
     file_map_clear(m);
 }
-int plat_replace_file(const char* tmp, const char* dst) {
-    if (!rename(tmp, dst)) return 0;
-    remove(tmp);
-    return -1;
-}
-
 /* ================================================================ text entry */
 #if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
 int plat_text_input(char* out, size_t cap, const char* initial) {

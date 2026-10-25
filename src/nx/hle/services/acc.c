@@ -168,7 +168,7 @@ static void acc_picture_write(void* closure, void* data, int size) {
 /* the picture's size, drawing it the first time; 0, said once, when it cannot be drawn */
 static u32 acc_picture(void) {
     u32 size;
-    pm_lock(&g_hle.acc.pic.lk);
+    pm_lock(&g_host.acc.pic_lk);
     if (!g_hle.acc.pic.made) {
         g_hle.acc.pic.made = 1;
         if (snx_splash_jpeg("wimsy-fuddles", SNX_ACC_PICTURE_SIDE, SNX_ACC_PICTURE_QUALITY, acc_picture_write, NULL) ||
@@ -178,7 +178,7 @@ static u32 acc_picture(void) {
         }
     }
     size = g_hle.acc.pic.size;
-    pm_unlock(&g_hle.acc.pic.lk);
+    pm_unlock(&g_host.acc.pic_lk);
     return size;
 }
 /* GetImageSize tells the size LoadImage writes, so a game reserves what it gets: the user's own picture
@@ -203,6 +203,16 @@ static int nn_account_baas_IManagerForApplication_GetAccountId(SvcObj* self, nn_
     const AccUser* u = (const AccUser*)self->data;
     *id = u->uid[0] ^ u->uid[1];
     R_SUCCEED();
+}
+static int nn_account_baas_IManagerForApplication_GetNintendoAccountUserResourceCacheForApplication(SvcObj* self,
+                                                                                                   IpcBuf base,
+                                                                                                   IpcBuf extra,
+                                                                                                   u64* id) {
+    memset(GP(base.addr), 0, (size_t)base.size);
+    memset(GP(extra.addr), 0, (size_t)extra.size);
+    /* the online account's id (`NintendoAccountId`), which a console keeps apart from the network service account's:
+       the same one here, as there is no account behind either */
+    return nn_account_baas_IManagerForApplication_GetAccountId(self, id);
 }
 static int nn_account_baas_IManagerForApplication_EnsureIdTokenCacheAsync(SvcObj* self, SvcObj** context) {
     (void)self;

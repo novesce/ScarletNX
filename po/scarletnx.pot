@@ -450,6 +450,12 @@ msgstr ""
 msgid "B: AOT pack."
 msgstr ""
 
+#. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
+#: src/gui/main.c
+#, snx-keys
+msgid "S: save states."
+msgstr ""
+
 #: src/gui/main.c
 msgid "click the box (or Enter) to open the file picker"
 msgstr ""
@@ -630,6 +636,12 @@ msgstr ""
 #: src/gui/main.c
 #, snx-keys
 msgid "R3: AOT pack."
+msgstr ""
+
+#. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
+#: src/gui/main.c
+#, snx-keys
+msgid "X: save states."
 msgstr ""
 
 #. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
@@ -1108,6 +1120,10 @@ msgid "Move"
 msgstr ""
 
 #: src/gui/main.c
+msgid "Delete"
+msgstr ""
+
+#: src/gui/main.c
 msgid "Play"
 msgstr ""
 
@@ -1204,6 +1220,10 @@ msgstr ""
 
 #: src/gui/main.c
 msgid "Open Cheats Folder"
+msgstr ""
+
+#: src/gui/main.c
+msgid "  (Debug on)"
 msgstr ""
 
 #: src/gui/main.c
@@ -1363,7 +1383,50 @@ msgid "%s: its updates, DLCs, mods and cheats kept"
 msgstr ""
 
 #: src/gui/main.c
+msgid "Icon size is the grid's: View is List"
+msgstr ""
+
+#: src/gui/main.c
 msgid "Side panel"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "%s: save states"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "Slot %s  %s  %u:%02u:%02u"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "Auto  %s  %u:%02u:%02u"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "%s has no save states: F7 saves one while it plays, the menu's Save states page too."
+msgstr ""
+
+#: src/gui/main.c
+msgid "S lists the save states of a recompiled Switch game in focus."
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "It can't be played from that state: %s."
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "Delete the save state %s?"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "Not deleted: %s could not be removed"
 msgstr ""
 
 #: src/gui/main.c
@@ -1477,7 +1540,7 @@ msgid "Runs a Linux ARM program, 64 or 32-bit"
 msgstr ""
 
 #: src/gui/main.c
-msgid "Recompiles a 3DS .cia, then runs it"
+msgid "Recompiles a 3DS game, then runs it"
 msgstr ""
 
 #: src/gui/main.c
@@ -1535,7 +1598,7 @@ msgid "Ready to run, with %zu update(s), DLC(s), mod(s) or cheat(s) to pick from
 msgstr ""
 
 #: src/gui/main.c
-msgid "3DS CIA, opened with scarletnx-3ds"
+msgid "3DS game, opened with scarletnx-3ds"
 msgstr ""
 
 #: src/gui/main.c
@@ -1598,6 +1661,11 @@ msgstr ""
 
 #: src/gui/main.c
 msgid "R on another game: it joins the queue"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "Debug on: %s"
 msgstr ""
 
 #: src/gui/main.c
@@ -1984,11 +2052,11 @@ msgid "App Folders"
 msgstr ""
 
 #: src/gui/main.c
-msgid "Recompiled Library"
+msgid "Dumps Library"
 msgstr ""
 
 #: src/gui/main.c
-msgid "Dumps Library"
+msgid "Recompiled Library"
 msgstr ""
 
 #: src/gui/main.c
@@ -2365,13 +2433,13 @@ msgstr ""
 #. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
 #: src/gui/main.c
 #, snx-keys
-msgid "Up/Down: row. Enter: open. ESC: back."
+msgid "Up/Down: row. Left/Right: change. Enter: open. ESC: back."
 msgstr ""
 
 #. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
 #: src/gui/main.c
 #, snx-keys
-msgid "Up/Down: row. Enter: open. ESC: exit."
+msgid "Up/Down: row. Left/Right: change. Enter: open. ESC: exit."
 msgstr ""
 
 #. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
@@ -3320,6 +3388,12 @@ msgstr ""
 #. A key of the foot's sentences, which a click finds by this word
 #: src/gui/main.c
 #, snx-key
+msgid "S"
+msgstr ""
+
+#. A key of the foot's sentences, which a click finds by this word
+#: src/gui/main.c
+#, snx-key
 msgid "Ctrl+S"
 msgstr ""
 
@@ -3894,7 +3968,7 @@ msgid "Load Linux ARM ELF"
 msgstr ""
 
 #: src/gui/ui.txt
-msgid "Load 3DS CIA"
+msgid "Load 3DS game"
 msgstr ""
 
 #: src/gui/ui.txt
@@ -4110,7 +4184,7 @@ msgid "Tracy capture"
 msgstr ""
 
 #: src/nx/runtime/settings.txt
-msgid "Records Switch runs to captures/ beside the game, and opens the trace in the profiler when the run ends. Off, the client does not start; F7 starts a 60-second capture. tracy-capture must be on PATH, and the runtime must be built with SNX_TRACY"
+msgid "Records Switch runs to captures/ beside the game, and opens the trace in the profiler when the run ends. Off, the client does not start; F10 starts a 60-second capture. tracy-capture must be on PATH, and the runtime must be built with SNX_TRACY"
 msgstr ""
 
 #: src/nx/runtime/settings.txt
@@ -4127,6 +4201,14 @@ msgstr ""
 
 #: src/nx/runtime/settings.txt
 msgid "The threads compiling the game's code when it is recompiled: 0 = one for each of the computer's cores"
+msgstr ""
+
+#: src/nx/runtime/settings.txt
+msgid "Unit size"
+msgstr ""
+
+#: src/nx/runtime/settings.txt
+msgid "The instructions a code unit takes, whole functions at a time, when the game is recompiled: each is compiled on its own, and a smaller one takes less memory at once, which a phone needs (Android's allocator ran out at 90000 on several threads, and iOS ends an app at its limit). A game made already keeps its units until it is recompiled"
 msgstr ""
 
 #: src/nx/runtime/settings.txt

@@ -116,11 +116,15 @@ sudo pacman -Syu --needed base-devel git cmake ninja clang llvm nasm perl pkgcon
 
 ### FreeBSD
 
-FreeBSD provides Clang in the base system. Install the remaining tools and the SDL3 package:
+FreeBSD provides Clang in the base system. Install the remaining tools, the SDL3 package, and libusb, which SDL's
+HIDAPI loads at run time to read controllers (an Xbox pad is only read that way):
 
 ```sh
-sudo pkg install git cmake ninja gmake nasm perl5 pkgconf python3 sdl3 llvm
+sudo pkg install git cmake ninja gmake nasm perl5 pkgconf python3 sdl3 llvm libusb
 ```
+
+The build uses that `sdl3` package by default (`SNX_SYSTEM_SDL3`, see [SDL3 troubleshooting](#sdl3-troubleshooting));
+pass `-DSNX_SYSTEM_SDL3=OFF` for CPM's pinned SDL3 source build instead.
 
 ### Configure and build
 
@@ -135,6 +139,11 @@ cmake --preset default -B build && cmake --build build
 On all platforms, CPM first looks for a compatible SDL3 development package (3.4.18 or newer) through
 `SDL3Config.cmake`. If none is found, CPM downloads and builds the SHA-256-pinned SDL3. The fallback is static, so no separate SDL3 runtime
 installation is needed. It still needs your platform's window-system development libraries.
+
+- `SNX_SYSTEM_SDL3=ON` (the default on FreeBSD) takes the system's package from `find_package` whatever its version,
+  needing only 3.4.16, the version every SDL call in the tree is in, and never downloads. FreeBSD's ports `sdl3`
+  (3.4.16) is older than the pin, so without it CPM's version check builds SDL3 from source. `SNX_SYSTEM_SDL3=OFF`
+  keeps the pinned build everywhere.
 
 - An old checkout showing `Could not find a package configuration file provided by SDL3` needs either
   the SDL3 **development** package or this updated fallback. Pull the latest checkout and configure again.
@@ -155,7 +164,9 @@ installation is needed. It still needs your platform's window-system development
   an SDL mapping in `gamecontrollerdb.txt`, as described in [USAGE](USAGE.md). If no joystick appears on Linux,
   check whether `/dev/input/event*` is readable and whether udev marks its event node `ID_INPUT_JOYSTICK=1`.
   The supplied `dist/72-scarletnx-input.rules` grants seat access to recognized joystick event nodes and to the
-  hidraw nodes of the console's controllers. Other HIDAPI controllers may need their vendor's own udev rule. If
+  hidraw nodes of the console's controllers. Other HIDAPI controllers may need their vendor's own udev rule. On
+  FreeBSD the gamepad comes from HIDAPI over libusb or `/dev/uhid*`, never from `/dev/input/event*`: a pad `xb360gp(4)`,
+  `hgame(4)` or `webcamd` claimed is invisible to SDL. See [USAGE](USAGE.md) for the access rules and the packages. If
   the gamepad opens but sends no input, compare the log's controller name and GUID with its mapping and test its
   event node with `evtest`.
 
@@ -188,12 +199,11 @@ brew install cmake ninja
    Homebrew's LLVM also works (`brew install llvm`). Pass `-DSNX_LLVM_CONFIG="$(brew --prefix llvm)/bin/llvm-config"`
    to the configure step below in place of `-DLLVM_DIR`.
 
-2. **Configure, build and install:**
+2. **Configure and build:**
 
    ```sh
    cmake --preset macos -DLLVM_DIR=$HOME/apple-llvm/macos/lib/cmake/llvm
    cmake --build --preset macos
-   cmake --install build/macos --prefix stage
    # -> build/macos/{scarletnx,snx-shaderc}
    ```
 
@@ -203,7 +213,8 @@ brew install cmake ninja
 3. **The app** (optional), for a double-clickable `ScarletNX.app` that carries its own MoltenVK:
 
    ```sh
-   scripts/apple-app.sh macos stage out <moltenvk>   # out/ScarletNX.app
+   cmake build/macos -DSNX_MOLTENVK=<moltenvk>
+   cpack --config build/macos/CPackConfig.cmake -B out   # out/ScarletNX-macos-arm64.zip
    ```
 
    `<moltenvk>` is the extracted `MoltenVK-macos.tar` of the
@@ -312,6 +323,7 @@ matching `Game_code.so/.dll`, in the data folder's `recompiled/` ([USAGE](USAGE.
 CPM uses [pinned sources](../cmake/dependencies.cmake) and a shared `.cache/cpm` cache. Archive downloads are
 checked by SHA-256. Offline configuration needs the matching sources already in the cache. Cached sources stay unmodified: FFmpeg's patch goes on a copy in the build tree.
 With tests on (`BUILD_TESTING`, the default) and the runtime, libvpx's VP9 test vectors download there too ([tests](../tests/CMakeLists.txt)).
+The Switch runtime's shared font stand-ins download only when it is built ([SHARED_FONTS.md](SHARED_FONTS.md)).
 Override via CMake/env `CPM_SOURCE_CACHE`. SDL3 uses CPM's system-package discovery with a pinned static
 source fallback. Use `-DCPM_DOWNLOAD_SDL3=ON` to request the bundled source build.
 
@@ -351,6 +363,8 @@ cmake --preset default -B build -DSNX_FFMPEG_ASM=OFF && cmake --build build
 - `-DSNX_TOOLS_ONLY=ON`: build the extraction/recompilation driver without the runtime, see below (default OFF).
 - `-DSNX_RECOMPILER_SHARED=ON`, `-DSNX_RECOMPILER_INSTALL=ON`: also build the recompiler as a shared library, and
   install the library, see [LIBRARY.md](LIBRARY.md) (defaults OFF and the value of `SNX_TOOLS_ONLY`).
+- `-DSNX_BUILD_TESTING=OFF`: leave the tests out whatever `BUILD_TESTING` says. ON by default when ScarletNX is the
+  top-level project, OFF when another project adds it with CPM or `add_subdirectory` ([LIBRARY.md](LIBRARY.md)).
 
 Test options, read when `BUILD_TESTING` is on (CTest's default), all OFF by default:
 

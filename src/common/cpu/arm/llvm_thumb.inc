@@ -299,6 +299,12 @@ static uint32_t thumb_branch_offset(const SnxThumb* t, uint32_t pc, unsigned* th
     }
 }
 
+/* ITSTATE (firstcond:mask, advanced as the instructions run) in CPSR's IT bits: [1:0] in 26:25, [7:2] in 15:10 */
+#define IT_BITS 0x0600FC00u
+static void it_leave(ArmIR* a, unsigned itstate) {
+    PUT(a, cpsr, bor(a, GET(a, cpsr), c32(a, (itstate & 3u) << 25 | (itstate >> 2) << 10)));
+}
+
 /* Returns 1 when the instruction ends the block (control transfer). */
 static int thumb_instruction(ArmIR* a, const SnxThumb* t) {
     if (a->memory == SNX_ARM_MEMORY_CHECKED && t->shape == TH_TABLE) {
@@ -388,9 +394,11 @@ static int thumb_instruction(ArmIR* a, const SnxThumb* t) {
             int stop;
             a->word = t->imm;
             a->pair = t->ra;
+            a->offset = t->rd;
             stop = instruction(a, (SnxA32Kind)t->op);
             a->word = word;
             a->pair = 0;
+            a->offset = 0;
             return stop;
         }
         case TH_DUAL: thumb_dual(a, t); return 0;
@@ -400,6 +408,7 @@ static int thumb_instruction(ArmIR* a, const SnxThumb* t) {
             switch (t->op) {
                 case BR_SVC: case BR_BKPT:
                     setreg(a, 15, c32(a, a->pc + 2));
+                    if (a->it_next) it_leave(a, a->it_next);
                     trap(a, t->op == BR_SVC ? SNX_ARM_SVC : SNX_ARM_BREAKPOINT, c32(a, t->imm));
                     return 1;
                 case BR_BX: case BR_BLX_REG:
@@ -445,17 +454,11 @@ static int thumb_instruction(ArmIR* a, const SnxThumb* t) {
     }
 }
 
-static unsigned thumb_ctz(unsigned v) {
-    unsigned n = 0;
-    while (!(v & 1)) {
-        v >>= 1;
-        ++n;
-    }
-    return n;
-}
-
 /* Emits one Thumb block: 16-bit and 32-bit instructions from the halfword
-   stream, honouring IT conditions, ending at a control transfer or the end. */
+   stream, honouring IT conditions, ending at a control transfer or the end. An IT block's conditions are the
+   block's, decided when it compiles: an instruction that traps under one that fails lets the block go on, a block
+   the code ends inside one (callers give the rest of the code) or an SVC or BKPT inside one leaves ITSTATE in
+   CPSR, and a block entered with ITSTATE there stops (SNX_ARM_IT_ENTRY, the ITSTATE its syndrome) */
 LLVMValueRef snx_thumb_llvm_block(LLVMModuleRef module, const char* name, const uint16_t* halfwords,
                                   size_t count, uint32_t pc, size_t* consumed) {
     return snx_thumb_llvm_block_ex(module, name, halfwords, count, pc, consumed, NULL);
@@ -465,7 +468,7 @@ LLVMValueRef snx_thumb_llvm_block_ex(LLVMModuleRef module, const char* name, con
     ArmIR a = {0};
     LLVMTypeRef ft;
     size_t used = 0;
-    unsigned it_len = 0, it_idx = 0, it_conds[4];
+    unsigned itstate = 0; /* ITSTATE before the instruction being emitted */
     if (consumed) *consumed = 0;
     if (!options_valid(options) || !module || !name || !*name || !halfwords || !count || count > 65536 || (pc & 1) ||
         LLVMGetNamedFunction(module, name) || LLVMGetNamedGlobal(module, name))
@@ -491,6 +494,11 @@ LLVMValueRef snx_thumb_llvm_block_ex(LLVMModuleRef module, const char* name, con
             c32(&a, pc));
     require(&a, cmp(&a, LLVMIntNE, band(&a, GET(&a, cpsr), c32(&a, SNX_ARM_T)), c32(&a, 0)), SNX_ARM_BAD_ENTRY,
             c32(&a, halfwords[0]));
+    {
+        LLVMValueRef cpsr = GET(&a, cpsr), itstate;
+        itstate = bor(&a, band(&a, lsr(&a, cpsr, 25), c32(&a, 3)), band(&a, lsr(&a, cpsr, 8), c32(&a, 0xFC)));
+        require(&a, cmp(&a, LLVMIntEQ, itstate, c32(&a, 0)), SNX_ARM_IT_ENTRY, itstate);
+    }
     require(&a, cmp(&a, LLVMIntEQ, band(&a, GET(&a, cpsr), c32(&a, SNX_ARM_E)), c32(&a, 0)), SNX_ARM_ENDIAN_UNSUPPORTED,
             c32(&a, halfwords[0]));
     memory_entry(&a);
@@ -514,19 +522,22 @@ LLVMValueRef snx_thumb_llvm_block_ex(LLVMModuleRef module, const char* name, con
             break;
         }
         a.pc = pc + (uint32_t)used * 2;
-        a.word = hw1;
+        a.word = len == TH_F32 ? (uint32_t)hw1 | ((uint32_t)hw2 << 16) : hw1; /* what an undefined one reports */
         next_pc = a.pc + len * 2;
         a.next = next_pc;
         setreg(&a, 15, c32(&a, a.pc));
-        instruction_fetch(&a, len == TH_F32 ? (uint32_t)hw1 | ((uint32_t)hw2 << 16) : hw1, len * 2);
-        a.in_it = it_idx < it_len;
-        if (it_idx < it_len) cond = it_conds[it_idx++];
+        instruction_fetch(&a, a.word, len * 2);
+        a.in_it = itstate != 0;
+        if (itstate) { /* ITAdvance */
+            cond = itstate >> 4;
+            itstate = itstate & 7 ? (itstate & 0xE0) | ((itstate << 1) & 0x1F) : 0;
+        }
+        a.it_next = itstate;
         if (cond != 14) {
             LLVMBasicBlockRef execute = block(&a, "execute"), skip = block(&a, "skip"), next = block(&a, "next");
             LLVMBuildCondBr(a.b, condition(&a, cond), execute, skip);
             LLVMPositionBuilderAtEnd(a.b, execute);
-            stop = thumb_instruction(&a, &t);
-            if (LLVMGetBasicBlockTerminator(LLVMGetInsertBlock(a.b))) stop = 1; /* trapped */
+            stop = thumb_instruction(&a, &t); /* one that traps here goes on when its condition fails */
             if (!LLVMGetBasicBlockTerminator(LLVMGetInsertBlock(a.b))) {
                 if (!stop) setreg(&a, 15, c32(&a, next_pc));
                 LLVMBuildBr(a.b, next);
@@ -541,16 +552,13 @@ LLVMValueRef snx_thumb_llvm_block_ex(LLVMModuleRef module, const char* name, con
             if (!stop) setreg(&a, 15, c32(&a, next_pc));
         }
         used += len;
-        if (t.shape == TH_IT) {
-            unsigned mask = t.imm & 15, firstcond = (t.imm >> 4) & 15, i;
-            it_len = 4 - thumb_ctz(mask);
-            it_idx = 0;
-            for (i = 0; i < it_len; ++i)
-                it_conds[i] = i == 0 ? firstcond : ((firstcond & 0xE) | ((mask >> (4 - i)) & 1));
-        }
+        if (t.shape == TH_IT) itstate = t.imm & 0xFF;
         if (stop) break;
     }
-    if (!LLVMGetBasicBlockTerminator(LLVMGetInsertBlock(a.b))) LLVMBuildRetVoid(a.b);
+    if (!LLVMGetBasicBlockTerminator(LLVMGetInsertBlock(a.b))) {
+        if (itstate) it_leave(&a, itstate); /* the code given ends inside an IT block */
+        LLVMBuildRetVoid(a.b);
+    }
     LLVMDisposeBuilder(a.b);
     if (consumed) *consumed = used;
     return a.fn;

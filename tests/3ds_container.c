@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
    Copyright 2026 the ScarletNX contributors */
-/* A CIA read where it lies against its extraction (tests/3ds_container.py): snx_ctr_cia_open accepts what the
+/* A game read where it lies against its extraction (tests/3ds_container.py): snx_ctr_source_open accepts what the
    extraction accepts, and its ExeFS files, its image identity and every RomFS file read through the guest's view of
    the mapped CIA's level 3 are the extraction's bytes. Usage: probe CIA [EXTRACTED]. Exit 0, or 20 + the open's
    SnxCtrExtractResult when it refused the CIA */
@@ -100,10 +100,10 @@ static SnxCtrTimeResult stamp(SnxCtrRomfs* view, const char* ascii, uint64_t* da
     for (size_t i = 0; i < n; ++i) path16[i * 2] = (unsigned char)ascii[i];
     return snx_ctr_romfs_time(view, path16, n * 2 + 2, datetime);
 }
-static void compare(const SnxCtrCia* cia, const char* extracted) {
+static void compare(const SnxCtrSource* game, const char* extracted) {
     char error[256];
     SnxCtrImage from_cia, from_files;
-    assert(snx_ctr_image_from_cia(cia, &from_cia, error, sizeof error));
+    assert(snx_ctr_image_from_source(game, &from_cia, error, sizeof error));
     assert(snx_ctr_image_load(extracted, &from_files, error, sizeof error));
     assert(!memcmp(from_cia.identity, from_files.identity, 32) && from_cia.code_size == from_files.code_size);
     assert(!memcmp(from_cia.code, from_files.code, from_cia.code_size));
@@ -118,24 +118,24 @@ static void compare(const SnxCtrCia* cia, const char* extracted) {
         unsigned char* expected = snx_read_file(path, &length);
         uint64_t size;
         size_t code_size;
-        const unsigned char* got = !strcmp(names[i], ".code") ? snx_ctr_cia_code(cia, &code_size) : NULL;
+        const unsigned char* got = !strcmp(names[i], ".code") ? snx_ctr_source_code(game, &code_size) : NULL;
         if (got)
             size = code_size;
         else
-            got = snx_ctr_cia_exefs(cia, names[i], &size);
+            got = snx_ctr_source_exefs(game, names[i], &size);
         assert(expected && got && size == length && !memcmp(got, expected, length));
         free(expected);
         free(path);
     }
     uint64_t none;
-    assert(!snx_ctr_cia_exefs(cia, "missing", &none) && !none);
+    assert(!snx_ctr_source_exefs(game, "missing", &none) && !none);
     snx_free_strings(names, n);
     free(exefs);
-    /* the RomFS: the CIA's level 3 as the guest reads it, and the extraction's files */
+    /* the RomFS: the game's level 3 as the guest reads it, and the extraction's files */
     uint64_t level3_size, size;
-    const unsigned char* level3 = snx_ctr_cia_romfs(cia, &level3_size);
+    const unsigned char* level3 = snx_ctr_source_romfs(game, &level3_size);
     SnxCtrRomfs *direct, *indexed;
-    assert(snx_ctr_romfs_open_image(level3, level3_size, snx_ctr_cia_mtime(cia), &direct) && direct);
+    assert(snx_ctr_romfs_open_image(level3, level3_size, snx_ctr_source_mtime(game), &direct) && direct);
     FsTree tree;
     assert(fs_tree_init(&tree, extracted) == FS_TREE_OK && snx_ctr_romfs_open(&tree, &indexed) && indexed);
     char* romfs = snx_path_join(extracted, "romfs");
@@ -155,7 +155,7 @@ static void compare(const SnxCtrCia* cia, const char* extracted) {
     if (seen) assert(stamp(direct, "/dir", &datetime) == SNX_CTR_TIME_OK);
     assert(stamp(direct, "/missing.txt", &datetime) == SNX_CTR_TIME_NOTFOUND);
     assert(stamp(direct, "/hello.txt/x", &datetime) == SNX_CTR_TIME_NOTFOUND);
-    printf("%u RomFS files and the ExeFS read from the CIA match its extraction\n", seen);
+    printf("%u RomFS files and the ExeFS read from the game match its extraction\n", seen);
     free(image);
     free(romfs);
     snx_ctr_romfs_free(direct);
@@ -166,15 +166,15 @@ static void compare(const SnxCtrCia* cia, const char* extracted) {
 int main(int argc, char** argv) {
     if (argc < 2 || argc > 3) return 2;
     char error[512];
-    SnxCtrCia* cia = NULL;
-    SnxCtrExtractResult result = snx_ctr_cia_open(argv[1], &cia, error, sizeof error);
+    SnxCtrSource* game = NULL;
+    SnxCtrExtractResult result = snx_ctr_source_open(argv[1], &game, error, sizeof error);
     if (result != SNX_CTR_EXTRACT_OK) {
-        assert(!cia && error[0]);
+        assert(!game && error[0]);
         printf("refused: %s\n", error);
         return 20 + (int)result;
     }
-    assert(snx_ctr_cia_title(cia) == 0x0004000001234500ull);
-    if (argc == 3) compare(cia, argv[2]);
-    snx_ctr_cia_close(cia);
+    assert(snx_ctr_source_title(game) == 0x0004000001234500ull);
+    if (argc == 3) compare(game, argv[2]);
+    snx_ctr_source_close(game);
     return 0;
 }

@@ -55,6 +55,12 @@ setting Both
     int 0 1
     default 1
     recompile
+setting Two hosts
+    key two_hosts
+    int 0 9
+    default 1
+    default-if HOST_A 2
+    default-if HOST_B 3
 setting ${long_name}
     key long
     text 4
@@ -89,6 +95,25 @@ if(NOT errors MATCHES "^[^\n]*settings.txt:[0-9]+: @NoSuchOption is no pass of t
 endif()
 file(READ "${WORK}/out/settings_llvm.c" llvm)
 file(READ "${WORK}/out/snx_settings.h" header)
+# a setting with two default-ifs: the first that holds, else its default, for g_settings and the table's row
+file(READ "${WORK}/out/settings.c" values)
+foreach(what INIT DEF)
+    if(what STREQUAL INIT)
+        set(text "${values}")
+        set(a 2)
+        set(b 3)
+        set(c 1)
+    else()
+        file(READ "${WORK}/out/settings_test.c" text)
+        set(a "\"2\"")
+        set(b "\"3\"")
+        set(c "\"1\"")
+    endif()
+    string(FIND "${text}" "#if defined(HOST_A)\n#define SETTING_${what}_two_hosts ${a}\n#elif defined(HOST_B)\n#define SETTING_${what}_two_hosts ${b}\n#else\n#define SETTING_${what}_two_hosts ${c}\n#endif" at)
+    if(at LESS 0)
+        message(FATAL_ERROR "SETTING_${what}_two_hosts is not HOST_A's, else HOST_B's, else the default:\n${text}")
+    endif()
+endforeach()
 # each setter found, with its argument cast to the type the header declares, and the setting its @ID names
 foreach(line "LLVMPassBuilderOptionsSetLoopVectorization(options, (LLVMBool)s->loop_vectorization)"
              "LLVMPassBuilderOptionsSetSLPVectorization(options, (LLVMBool)s->llvm_slp_vectorization)"

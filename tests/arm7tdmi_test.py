@@ -5,7 +5,7 @@
 
 Each witness runs under both profiles, at O0 and O2: the ARM7TDMI's rules (misaligned loads rotate and stores
 align, PC + 12 stores, STM's written back base, an unaligned LDM base, Thumb's POP {pc} without interworking and
-the bus hook) must hold there, and none of them may reach A57's blocks.
+the bus hook, BL's halves apart) must hold there, and none of them may reach A57's blocks.
 """
 
 import argparse
@@ -34,6 +34,8 @@ ARM = {
 }
 THUMB = {
     'pop_pc': (0xBD01,),  # POP {r0, pc}
+    # BL's second half alone (a GBA game's call through LR); with the halfword after it A57's STRB.W r0, [r0, r0]
+    'bl_suffix': (0xF810, 0x0000),
 }
 
 
@@ -130,6 +132,12 @@ def check(arm, thumb, profile):
     cpu = run()
     assert (cpu.exit, cpu.r[0], cpu.r[13], cpu.r[15]) == (0, 42, 0x02008008, 0x2000)
     assert bool(cpu.cpsr & 32) == seven
+    # a BL suffix: to LR plus its offset, LR the next instruction in Thumb; A57 has no 16-bit BL halves
+    cpu = Run(thumb['bl_suffix'], thumb=True, r14=0x02000100)()
+    if seven:
+        assert (cpu.exit, cpu.r[15], cpu.r[14]) == (0, 0x02000120, (PC + 2) | 1), (cpu.exit, hex(cpu.r[15]))
+    else:
+        assert (cpu.exit, cpu.r[15], cpu.r[14]) == (0, PC + 4, 0x02000100), (cpu.exit, hex(cpu.r[15]))
 
 
 def main():

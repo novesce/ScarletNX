@@ -27,7 +27,8 @@ enum {
     BARRIER_DATA_CACHE = 2,
     BARRIER_DESCRIPTOR_CACHE = 3,
     BARRIER_WAIT_FOR_IDLE = 4,
-    BARRIER_SHADER_INSTRUCTIONS = 5
+    BARRIER_SHADER_INSTRUCTIONS = 5,
+    BARRIER_CPU_VISIBILITY = 6
 };
 /* The draw held while the next ones may be more instances of it, as Eden's DrawManager holds an instanced draw
    (DrawMode::Instance) until a method that isn't one of its draws ends it (DrawDeferred). Unlike Eden it is one for
@@ -566,6 +567,7 @@ static void method_acts(GpuChannel* ch, u32 m, u32 v, int last) {
         case MAXWELL3D_LAUNCH_DMA: i2m_launch(ch, r, MAXWELL3D_UPLOAD); break;
         case MAXWELL3D_INLINE_DATA: i2m_data(ch, v); break;
         case MAXWELL3D_SYNC_INFO: /* the syncpoint once the work before it is done, when the condition is ROP writes */
+            if (sync_info_clean_l2(v)) barrier(BARRIER_CPU_VISIBILITY);
             if (!sync_info_rop_writes_done(v))
                 LOG_LIMIT(4, "gpu: SyncInfo %08x without bit 20 doesn't increment\n", v);
             else if (g_renderer->stream_incr)

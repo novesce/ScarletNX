@@ -149,6 +149,10 @@ static void memory_effects(SnxIr* ir, LLVMValueRef function, unsigned value) {
 }
 void ir_pure(SnxIr* ir, LLVMValueRef function) { memory_effects(ir, function, 0); }
 void ir_argmem(SnxIr* ir, LLVMValueRef function) { memory_effects(ir, function, 3); }
+void ir_noregs(SnxIr* ir, LLVMValueRef function) {
+    LLVMAddAttributeAtIndex(function, LLVMAttributeFunctionIndex,
+                            LLVMCreateStringAttribute(ir->ctx, "snx-noregs", 10, "", 0));
+}
 
 LLVMBasicBlockRef ir_block(SnxIr* ir, const char* name) { return LLVMAppendBasicBlockInContext(ir->ctx, ir->fn, name); }
 

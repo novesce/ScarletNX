@@ -4,11 +4,12 @@
    any host: every AArch64 relocation type and veneer against encodings worked out by hand from the Arm ARM, PowerPC64's
    instruction fields and veneer from the ELF V2 ABI, then
    AArch64 objects from the LLVM backend (when its LLVM has the AArch64 target) linked into a module and loaded into a
-   code arena whose code is only read, never run: calls out of reach must land on stubs that reach their targets, and
-   GOT slots must hold their symbols' addresses. */
+   code arena whose code is only read, never run: calls out of reach must land on stubs that reach their targets (in a
+   load larger than B's reach, on the veneers after each object's code), and GOT slots must hold their symbols'
+   addresses. An arena sized by snx_code_need must hold what it counted. */
 #include "common/utilities/common.h"
 #include "common/cpu/recompiler/llvm/elf_object.h"
-#include "common/cpu/recompiler/llvm/code_loader.h"
+#include "common/cpu/recompiler/llvm/code_loader_int.h" /* the regions' use, against snx_code_need's */
 #include "common/cpu/recompiler/llvm/ir.h"
 #include <llvm-c/Target.h>
 #include <stdio.h>
@@ -411,6 +412,7 @@ static int object(const char* callee_name, const char* data_name, const char* ca
                   size_t* size) {
     return object_for("aarch64-unknown-linux-gnu", callee_name, data_name, caller_name, data, size);
 }
+#endif
 
 /* the definitions object() calls into */
 static int definitions_for(const char* triple, unsigned char** data, size_t* size) {
@@ -429,6 +431,7 @@ static int definitions_for(const char* triple, unsigned char** data, size_t* siz
     snx_ir_free(ir);
     return 0;
 }
+#ifndef __APPLE__
 static int definitions(unsigned char** data, size_t* size) {
     return definitions_for("aarch64-unknown-linux-gnu", data, size);
 }
@@ -523,12 +526,235 @@ static int jit_objects(const char* triple) {
     return 0;
 }
 
+/* an object of nothing but bytes of code, which makes a load's code as large as bytes say. Module assembly: LLVM gives
+   a global's section the global's flags, so a global in a section named .text would be data */
+static int filler_object(const char* triple, size_t bytes, unsigned char** data, size_t* size) {
+    char error[1024], text[128];
+    SnxIr* ir = snx_ir_new_target("filler", '2', triple, error, sizeof(error));
+    if (!ir) return snx_error("%s", error);
+    snprintf(text, sizeof text, ".section .text.filler,\"ax\",%%progbits\n.space %zu\n", bytes);
+    LLVMSetModuleInlineAsm2(ir->mod, text, strlen(text));
+    if (snx_ir_object(ir, '2', data, size, error, sizeof(error))) return snx_error("%s", error);
+    snx_ir_free(ir);
+    return 0;
+}
+
+/* JIT: a game's whole code is one load of more than B and BL reach (128 MiB). A call from its first object to a
+   definition in its third goes through a veneer in the island after the caller's code, which the call reaches, and
+   the veneer to the definition, which the call does not; a call from its last object to this executable, outside the
+   arena, through that object's own veneer and a GOT slot of its own, beside the one of the data it reads */
+static int large_load(const char* triple) {
+    static const char* const objects[4] = {"caller", "filler", "definitions", "outward"};
+    const char* names[4] = {"caller", "ext_fn", "outward", "ext_data"};
+    char error[1024];
+    unsigned char* data[4];
+    size_t size[4], i;
+    SnxLinkInput inputs[4];
+    SnxU64 address[4], veneer, slot, data_slot;
+    SnxCodeLoader* loader;
+    size_t need[3];
+    char what[160];
+    int indirect = -1;
+    if (object_for(triple, "ext_fn", "ext_data", "caller", &data[0], &size[0]) ||
+        filler_object(triple, (size_t)140 << 20, &data[1], &size[1]) || definitions_for(triple, &data[2], &size[2]) ||
+        object_for(triple, "probe_far", "ext_data", "outward", &data[3], &size[3]))
+        return 1;
+    for (i = 0; i < 4; ++i) {
+        inputs[i].data = data[i];
+        inputs[i].size = size[i];
+        inputs[i].name = objects[i];
+    }
+    /* the arena snx_code_need sizes, which must hold the islands too */
+    if (snx_code_need(inputs, 4, need, error, sizeof(error))) return snx_error("need (%s): %s", triple, error);
+    loader = snx_code_loader_new_regions_machine(need, EM_AARCH64, error, sizeof(error));
+    if (!loader) return snx_error("loader: %s", error);
+    if (snx_code_define(loader, "probe_far", (SnxU64)(size_t)&probe_fn)) return snx_error("loader: defined twice");
+    if (snx_code_load(loader, inputs, 4, names, 4, address, error, sizeof(error)))
+        return snx_error("large load (%s): %s", triple, error);
+    veneer = first_branch(address[0]);
+    check(veneer > address[0] && veneer - address[0] < ((SnxU64)128 << 20),
+          "a large load's call reaches the veneer after its object's code");
+    check(stub_target(veneer, &indirect) == address[1] && indirect == 0, "the veneer jumps to the definition directly");
+    check(address[1] - address[0] >= ((SnxU64)128 << 20), "the definition is beyond B's reach");
+    veneer = first_branch(address[2]);
+    if (veneer == (SnxU64)(size_t)&probe_fn)
+        printf("the arena is within 128 MiB of this executable: no far call from a large load to check\n");
+    else {
+        slot = stub_target(veneer, &indirect);
+        check(veneer > address[2] && veneer - address[2] < ((SnxU64)128 << 20) && indirect == 1 && slot &&
+                  get64((const unsigned char*)(size_t)slot) == (SnxU64)(size_t)&probe_fn,
+              "a large load's far call through its object's veneer and GOT slot");
+    }
+    data_slot = first_got_load(address[2]);
+    check(data_slot && get64((const unsigned char*)(size_t)data_slot) == address[3],
+          "a large load's data GOT slot, beside its far call's");
+    for (i = 0; i < 3; ++i) {
+        snprintf(what, sizeof what,
+                 "%s: a large load's region %zu holds what snx_code_need counted (%zu bytes used of %zu)", triple, i,
+                 loader->region[i].used, need[i]);
+        check(loader->region[i].used <= need[i], what);
+    }
+    snx_code_loader_free(loader);
+    for (i = 0; i < 4; ++i) free(data[i]);
+    return 0;
+}
+
+/* An object of two functions, the first reading data1 (volatile, through the GOT) and calling call1 with it, the
+   second the same with data2 and call2: each function's code is its own, the same size whether the two of a pair are
+   one name or two */
+static int need_object(const char* triple, const char* call1, const char* call2, const char* data1, const char* data2,
+                       SnxLinkInput* input) {
+    const char* calls[2] = {call1, call2};
+    const char* reads[2] = {data1, data2};
+    char error[1024], name[8];
+    SnxIr* ir = snx_ir_new_target("need", '2', triple, error, sizeof(error));
+    LLVMValueRef callee, datum, fn, v, args[1];
+    LLVMTypeRef params[1];
+    unsigned char* data;
+    size_t size;
+    int i;
+    if (!ir) return snx_error("%s", error);
+    params[0] = ir->t_i64;
+    for (i = 0; i < 2; ++i) {
+        callee = LLVMGetNamedFunction(ir->mod, calls[i]);
+        if (!callee) callee = ir_extern(ir, calls[i], ir->t_i64, params, 1);
+        datum = LLVMGetNamedGlobal(ir->mod, reads[i]);
+        if (!datum) datum = LLVMAddGlobal(ir->mod, ir->t_i64, reads[i]);
+        snprintf(name, sizeof name, "need%d", i);
+        fn = LLVMAddFunction(ir->mod, name, LLVMFunctionType(ir->t_i64, params, 1, 0));
+        LLVMPositionBuilderAtEnd(ir->b, LLVMAppendBasicBlockInContext(ir->ctx, fn, "entry"));
+        v = LLVMBuildLoad2(ir->b, ir->t_i64, datum, "v");
+        LLVMSetVolatile(v, 1);
+        args[0] = LLVMBuildAdd(ir->b, LLVMGetParam(fn, 0), v, "a");
+        args[0] = LLVMBuildCall2(ir->b, LLVMGlobalGetValueType(callee), callee, args, 1, "c");
+        LLVMBuildRet(ir->b, LLVMBuildAdd(ir->b, args[0], LLVMConstInt(ir->t_i64, 1, 0), "r"));
+    }
+    if (snx_ir_object(ir, '2', &data, &size, error, sizeof(error))) return snx_error("%s", error);
+    snx_ir_free(ir);
+    input->data = data;
+    input->size = size;
+    input->name = "need";
+    return 0;
+}
+
+/* snx_code_need's counts: a stub (stub bytes on this machine) and a GOT slot for each symbol an object calls, a GOT
+   slot for each it reads through the GOT, two references to one symbol counted once */
+static int need_counts(const char* triple, uint64_t stub) {
+    SnxLinkInput one, calls, reads;
+    size_t need_one[3], need_calls[3], need_reads[3];
+    char error[1024], what[160];
+    if (need_object(triple, "f", "f", "a", "a", &one) || need_object(triple, "f", "g", "a", "a", &calls) ||
+        need_object(triple, "f", "f", "a", "b", &reads))
+        return 1;
+    if (snx_code_need(&one, 1, need_one, error, sizeof(error)) ||
+        snx_code_need(&calls, 1, need_calls, error, sizeof(error)) ||
+        snx_code_need(&reads, 1, need_reads, error, sizeof(error)))
+        return snx_error("need (%s): %s", triple, error);
+    snprintf(what, sizeof what,
+             "%s: a second callee needs a stub of %llu bytes and a GOT slot (code %zu to %zu, "
+             "read-only data %zu to %zu)",
+             triple, (unsigned long long)stub, need_one[0], need_calls[0], need_one[1], need_calls[1]);
+    check(need_calls[0] == need_one[0] + stub && need_calls[1] == need_one[1] + 8 && need_calls[2] == need_one[2],
+          what);
+    snprintf(what, sizeof what, "%s: a second datum needs a GOT slot (code %zu to %zu, read-only data %zu to %zu)",
+             triple, need_one[0], need_reads[0], need_one[1], need_reads[1]);
+    check(need_reads[0] == need_one[0] && need_reads[1] == need_one[1] + 8 && need_reads[2] == need_one[2], what);
+    free((void*)one.data);
+    free((void*)calls.data);
+    free((void*)reads.data);
+    return 0;
+}
+
+/* An object of data only: other_data (data), a table of constants (read-only data) and 4 KiB of zeros (bss) */
+static int held_object(const char* triple, SnxLinkInput* input) {
+    char error[1024];
+    SnxIr* ir = snx_ir_new_target("held", '2', triple, error, sizeof(error));
+    LLVMValueRef value, table[64];
+    LLVMTypeRef zeros;
+    unsigned char* data;
+    size_t size;
+    int i;
+    if (!ir) return snx_error("%s", error);
+    value = LLVMAddGlobal(ir->mod, ir->t_i64, "other_data");
+    LLVMSetInitializer(value, LLVMConstInt(ir->t_i64, 7, 0));
+    for (i = 0; i < 64; ++i) table[i] = LLVMConstInt(ir->t_i64, (unsigned long long)i * 3 + 1, 0);
+    value = LLVMAddGlobal(ir->mod, LLVMArrayType(ir->t_i64, 64), "held_table");
+    LLVMSetInitializer(value, LLVMConstArray(ir->t_i64, table, 64));
+    LLVMSetGlobalConstant(value, 1);
+    zeros = LLVMArrayType(ir->t_i8, 4096);
+    value = LLVMAddGlobal(ir->mod, zeros, "held_zeros");
+    LLVMSetInitializer(value, LLVMConstNull(zeros));
+    if (snx_ir_object(ir, '2', &data, &size, error, sizeof(error))) return snx_error("%s", error);
+    snx_ir_free(ir);
+    input->data = data;
+    input->size = size;
+    input->name = "held";
+    return 0;
+}
+
+/* Two loads into an arena of the regions snx_code_need gives them, as a game's runtime library and pack: each region
+   holds them, a call out of the arena and one to the first load through stubs and GOT slots included, and the second
+   load's data, read-only data and bss */
+static int need_holds(const char* triple) {
+    SnxLinkInput first, second[3];
+    const char* names[1] = {"caller"};
+    size_t need_first[3], need_second[3], need[3], i;
+    SnxU64 caller;
+    SnxCodeLoader* loader;
+    char error[1024], what[160];
+    unsigned char* data;
+    size_t size;
+    if (object_for(triple, "ext_fn", "ext_data", "caller", &data, &size)) return 1;
+    first.data = data;
+    first.size = size;
+    first.name = "caller";
+    if (object_for(triple, "caller", "ext_data", "second", &data, &size) ||
+        need_object(triple, "caller", "ext_fn", "ext_data", "other_data", &second[1]) ||
+        held_object(triple, &second[2]))
+        return 1;
+    second[0].data = data;
+    second[0].size = size;
+    second[0].name = "second";
+    if (snx_code_need(&first, 1, need_first, error, sizeof(error)) ||
+        snx_code_need(second, 3, need_second, error, sizeof(error)))
+        return snx_error("need (%s): %s", triple, error);
+    for (i = 0; i < 3; ++i) need[i] = need_first[i] + need_second[i];
+    loader = snx_code_loader_new_regions_machine(need, EM_AARCH64, error, sizeof(error));
+    if (!loader) return snx_error("loader: %s", error);
+    if (snx_code_define(loader, "ext_fn", (SnxU64)(size_t)&probe_fn) ||
+        snx_code_define(loader, "ext_data", (SnxU64)(size_t)&probe_data))
+        return snx_error("loader: defined twice");
+    if (snx_code_load(loader, &first, 1, names, 1, &caller, error, sizeof(error)) ||
+        snx_code_load(loader, second, 3, NULL, 0, NULL, error, sizeof(error)))
+        return snx_error("loads into the arena snx_code_need sized (%s): %s", triple, error);
+    for (i = 0; i < 3; ++i) {
+        snprintf(what, sizeof what, "%s: region %zu holds what snx_code_need counted (%zu bytes used of %zu)", triple,
+                 i, loader->region[i].used, need[i]);
+        check(loader->region[i].used <= need[i], what);
+    }
+    snx_code_loader_free(loader);
+    free((void*)first.data);
+    for (i = 0; i < 3; ++i) free((void*)second[i].data);
+    return 0;
+}
+
+/* an arena past 2 GiB refused, with the sizes asked */
+static void need_too_large(void) {
+    size_t size[3] = {(size_t)3 << 30, (size_t)1 << 20, (size_t)1 << 20};
+    char error[1024];
+    SnxCodeLoader* loader = snx_code_loader_new_regions_machine(size, EM_AARCH64, error, sizeof(error));
+    check(!loader && strstr(error, "3072.0 MiB of code, 1.0 MiB of read-only data and 1.0 MiB of data"),
+          "an arena of more than 2 GiB refused, saying the sizes asked");
+    snx_code_loader_free(loader);
+}
+
 static int llvm_objects(void) {
     char error[1024];
     LLVMInitializeAllTargetInfos();
     LLVMInitializeAllTargets();
     LLVMInitializeAllTargetMCs();
     LLVMInitializeAllAsmPrinters();
+    LLVMInitializeAllAsmParsers(); /* large_load's filler is module assembly */
     if (snx_ir_init(error, sizeof(error))) return snx_error("%s", error);
     {
         SnxIr* probe = snx_ir_new_target("probe", '2', "aarch64-unknown-linux-gnu", error, sizeof(error));
@@ -578,7 +804,19 @@ static int llvm_objects(void) {
 #endif
     /* the JIT's objects on Linux and on macOS, where they are ELF with Darwin's calling convention (ir.c): both are
        what elf_object.c reads, with the same relocations, and Darwin's names have no leading underscore in ELF */
-    return jit_objects("aarch64-unknown-linux-gnu") || jit_objects("arm64-apple-macosx11.0.0-elf");
+    if (jit_objects("aarch64-unknown-linux-gnu") || jit_objects("arm64-apple-macosx11.0.0-elf") ||
+        need_counts("aarch64-unknown-linux-gnu", SNX_ELF_VENEER_SIZE) || need_holds("aarch64-unknown-linux-gnu") ||
+        large_load("aarch64-unknown-linux-gnu"))
+        return 1;
+    {
+        SnxIr* probe = snx_ir_new_target("probe", '2', "x86_64-unknown-linux-gnu", error, sizeof(error));
+        if (!probe) {
+            printf("skipped snx_code_need's x86-64 counts: %s\n", error);
+            return 0;
+        }
+        snx_ir_free(probe);
+    }
+    return need_counts("x86_64-unknown-linux-gnu", 8); /* jmp *slot(%rip) and two int3 */
 }
 
 #ifndef __APPLE__ /* AOT modules */
@@ -815,6 +1053,7 @@ int main(void) {
     ppc_relocations();
     riscv_relocations();
     loongarch_relocations();
+    need_too_large();
     if (llvm_objects()) ++failures;
 #ifndef __APPLE__ /* AOT modules, which macOS doesn't link as ELF (link_elf.c) */
     if (ppc64le_objects() || ppc64le_tail_call()) ++failures;

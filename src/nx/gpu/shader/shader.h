@@ -79,14 +79,14 @@ typedef struct {
     u32 gbuf_wmask; /* global buffers the program writes */
     struct {
         u32 cbuf_off;
-        u8 type, bindless, bl_cbuf, kind; /* kind: 0 float store, 1 unsigned atomic, 2 unsigned store */
+        u8 type, bindless, bl_cbuf, kind; /* kind: 0 float store, 1 R32ui load/atomic, 2 unsigned store, 3 signed store */
     } img[8];
     int nimg; /* storage images stored to or used atomically */
     /* FS key: textures of integer formats and their signed ones. rt_int_mask and rt_sint_mask are FS's integer
        render targets; for TES rt_int_mask holds the tessellation parameters (register 0xC8), for GS the input
        primitive's vertex count */
     u64 tex_int_mask, tex_sint_mask;
-    u32 rt_int_mask, rt_sint_mask;
+    u32 rt_int_mask, rt_sint_mask; /* FS/CS bits 8-15 also key storage image stores' integer and signed types */
     u32 gp_skip_mask[8]; /* GS key: POST_VTG_SHADER_ATTRIB_SKIP_MASK, a bit per scalar attribute */
     /* FS key: color textures sampled with a depth compare (TEX.DC compares their first component, which a Vulkan
        compare sampler can't do on a color format): the slots, and their compare functions, 3 bits each in slot
@@ -110,7 +110,7 @@ typedef struct {
 #define SNX_VKB_CB       0                         /* 18 constant buffers */
 #define SNX_VKB_SSBO     18                        /* 16 global memory buffers */
 #define SNX_VKB_TEX      34                        /* SH_MAXTEX combined image samplers */
-#define SNX_VKB_IMG      (SNX_VKB_TEX + SH_MAXTEX) /* 8 storage images (compute) */
+#define SNX_VKB_IMG      (SNX_VKB_TEX + SH_MAXTEX) /* 8 storage images (compute, vertex, fragment) */
 #define SNX_VKB_RS       (SNX_VKB_IMG + 8)         /* fragment: 1 / the resolution scale (SNX_RS) */
 #define SNX_VKB_FMT      (SNX_VKB_RS + 1)          /* compute: the images' format classes (SNX_FMT) */
 #define SNX_VKB_SMAP     (SNX_VKB_FMT + 1)         /* graphics: storage buffer page indices for aliased bindings */

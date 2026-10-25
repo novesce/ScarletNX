@@ -122,8 +122,8 @@ msgid "Load Linux ARM ELF"
 msgstr "Abrir Linux ARM ELF"
 
 #: src/gui/main.c
-msgid "Load 3DS CIA"
-msgstr "Abrir 3DS CIA"
+msgid "Load 3DS game"
+msgstr "Abrir jogo de 3DS"
 
 #: src/gui/main.c
 msgid "Setup device keys"
@@ -847,8 +847,8 @@ msgid "The recent games not shown"
 msgstr "Os jogos recentes não mostrados"
 
 #: src/gui/main.c
-msgid "3DS CIA, opened with scarletnx-3ds"
-msgstr "CIA de 3DS, aberto com o scarletnx-3ds"
+msgid "3DS game, opened with scarletnx-3ds"
+msgstr "Jogo de 3DS, aberto com o scarletnx-3ds"
 
 #: src/gui/main.c
 msgid "A dump, prepared when it runs"

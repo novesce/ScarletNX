@@ -550,9 +550,6 @@ static int alias_map_nl(u64 dst, u64 src, u64 size, u32 state, u32 perm) {
     return 0;
 }
 
-#ifdef SNX_IOS
-#include <mach/mach.h>
-#include <mach/vm_map.h>
 /* The layout in size bytes of address space, smaller than the console's: the alias and heap regions shrink, in the
    same order and below the stack, with the kernel's pages in the last GiB. The game finds the sizes it asks of
    GetInfo (the alias region 4 GiB to 32 GiB, the heap region 4 GiB to 8 GiB) */
@@ -589,6 +586,9 @@ static void layout_for(u64 size) {
     }
     g_layout.kern_end = size;
 }
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/vm_map.h>
 /* The largest run of address space in the task that nothing maps, from its range (TASK_VM_INFO) and its regions
    (vm_region): what a reservation can be at most, whatever the system would say to a bigger one */
 static u64 largest_hole(void) {
@@ -609,54 +609,62 @@ static u64 largest_hole(void) {
         if (vm_region_64(mach_task_self(), &at, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&region, &n,
                          &object) != KERN_SUCCESS)
             break;
-        if (at > end && at - end > best) best = at - end, best_at = end;
+        {
+            /* a run ends where the task's range does, not at a region past it */
+            u64 stop = (u64)at < hi ? (u64)at : hi;
+            if (stop > end && stop - end > best) best = stop - end, best_at = end;
+        }
         end = (u64)at + size;
         at += size;
         if (end >= hi) break;
     }
     if (hi > end && hi - end > best) best = hi - end, best_at = end;
-    fprintf(stderr, "memory: the task's address space is %#llx to %#llx, its largest free run %llu MiB at %#llx\n",
-            (unsigned long long)lo, (unsigned long long)hi, (unsigned long long)(best >> 20),
-            (unsigned long long)best_at);
+    LOG("memory: the task's address space is %#llx to %#llx, its largest free run %llu MiB at %#llx\n",
+        (unsigned long long)lo, (unsigned long long)hi, (unsigned long long)(best >> 20), (unsigned long long)best_at);
     return best;
 }
-/* An app without the paid extended-virtual-addressing entitlement may reserve less than the console's layout wants:
-   the largest of these that the system gives is the guest's address space */
-static u8* reserve_ios(void) {
-    static const u64 tiers[] = {128 * GIB, 64 * GIB, 48 * GIB, 32 * GIB, 24 * GIB, 16 * GIB, 12 * GIB, 8 * GIB, 7 * GIB, 6 * GIB, 5 * GIB};
-    const char* cap = getenv("SNX_ADDRESS_SPACE_GIB"); /* a smaller layout on purpose, to try one on a host with room */
-    u64 hole = largest_hole(), most = cap ? (u64)strtoull(cap, NULL, 10) * GIB : AS_MAX;
+#else
+/* elsewhere the reservation's own answer says whether a run that large is free */
+static u64 largest_hole(void) { return UINT64_MAX; }
+#endif
+/* The largest of these the system gives is the guest's address space: the console's 128 GiB where it can, else a
+   smaller layout (an iOS app without the extended virtual addressing entitlement, a process RLIMIT_AS holds to less) */
+static u8* reserve_tiers(void) {
+    static const u64 tiers[] = {128 * GIB, 64 * GIB, 48 * GIB, 32 * GIB, 24 * GIB, 16 * GIB,
+                                12 * GIB,  8 * GIB,  7 * GIB,  6 * GIB,  5 * GIB};
+    u64 hole = largest_hole();
     size_t i;
     for (i = 0; i < sizeof tiers / sizeof *tiers; ++i) {
-        int skipped = tiers[i] > most || tiers[i] > hole;
-        u8* p = skipped ? NULL : plat_vm_reserve(tiers[i]);
-        fprintf(stderr, "memory: %llu GiB of address space: %s%s\n", (unsigned long long)(tiers[i] >> 30),
-                tiers[i] > most ? "skipped (SNX_ADDRESS_SPACE_GIB)"
-                : tiers[i] > hole ? "skipped (no free run that large)"
-                : p ? "reserved" : "refused: ",
-                !p && !skipped ? strerror(errno) : "");
-        if (!p) continue;
+        u8* p = tiers[i] > hole ? NULL : plat_vm_reserve(tiers[i]);
+        if (!p) {
+            if (tiers[i] > hole)
+                LOG("memory: %llu GiB of address space skipped: no free run that large\n",
+                    (unsigned long long)(tiers[i] >> 30));
+            else
+                LOG("memory: %llu GiB of address space refused: %s\n", (unsigned long long)(tiers[i] >> 30),
+                    strerror(errno));
+            continue;
+        }
         g_as_size = tiers[i];
         if (tiers[i] < AS_MAX) layout_for(tiers[i]);
         return p;
     }
     return NULL;
 }
-#endif
+
+void mem_reserve(void) {
+    if (g_mem) return;
+    g_mem = reserve_tiers();
+    if (!g_mem) fatal("Could not reserve even 5 GiB of address space for the game's memory");
+    if (g_as_size < AS_MAX)
+        LOG("memory: %llu GiB of address space reserved, a smaller layout than the console's %llu\n",
+            (unsigned long long)(g_as_size >> 30), (unsigned long long)(AS_MAX >> 30));
+}
 
 void mem_init(void) {
     pm_lock_announce(&g_mem_lk, "guest memory"); /* every thread's reads and writes of the game's memory */
     g_host_page = plat_vm_page();
-#ifdef SNX_IOS
-    g_mem = reserve_ios();
-    if (!g_mem) fatal("Could not reserve even 5 GiB of address space for the game's memory");
-    LOG("memory: %llu GiB of address space reserved%s\n", (unsigned long long)(g_as_size >> 30),
-        g_as_size < AS_MAX ? " (a smaller layout: this app has no extended virtual addressing)" : "");
-#else
-    g_mem = plat_vm_reserve(AS_SIZE);
-    if (!g_mem) fatal("Could not reserve %llu GiB of address space for the game's memory",
-                      (unsigned long long)(AS_SIZE >> 30));
-#endif
+    mem_reserve();
     mem_lock();
     blk_reserve_nl(1);
     memset(&g_blk[0], 0, sizeof *g_blk);
@@ -1322,4 +1330,140 @@ int mem_unmap_code(const MemCodeMap* m) {
         if (m->bss_size) gpu_mem_changed(m->bss, m->bss_size);
     }
     return r;
+}
+
+/* ============================================================ save states */
+u32 mem_blocks(MemBlock* out, u32 max) {
+    u32 n;
+    mem_lock();
+    n = g_nblk;
+    if (out) memcpy(out, g_blk, sizeof *out * (size_t)(n < max ? n : max));
+    mem_unlock();
+    return n;
+}
+/* each run of g_run cut where a host view begins or ends inside it, under g_mem_lk: the count, out filled up to max */
+static u32 spans_nl(MemSpan* out, u32 max) {
+    u32 i, k, n = 0;
+    for (i = 0; i < g_nrun; i++) {
+        u64 at = g_run[i].off, end = at + g_run[i].size;
+        while (at < end) {
+            u64 cut = end;
+            int host = 0;
+            for (k = 0; k < g_nhostrun; k++) {
+                u64 lo = g_hostrun[k].off, hi = lo + g_hostrun[k].size;
+                if (lo <= at && at < hi) {
+                    host = 1;
+                    cut = hi < cut ? hi : cut;
+                } else if (lo > at && lo < cut)
+                    cut = lo;
+            }
+            if (out && n < max) {
+                out[n].off = at;
+                out[n].size = cut - at;
+                out[n].host = host;
+            }
+            n++;
+            at = cut;
+        }
+    }
+    return n;
+}
+u32 mem_spans(MemSpan* out, u32 max) {
+    u32 n;
+    mem_lock();
+    n = spans_nl(out, max);
+    mem_unlock();
+    return n;
+}
+int mem_pool_read(u64 off, void* dst, u64 size) { return g_pool_on ? plat_alias_read(off, dst, size) : -1; }
+
+int mem_restore_begin(void) {
+    u32 i, n;
+    MemSpan* s;
+    OwnRange own[64];
+    mapping_begin();
+    /* without landing: the state's bytes replace it all. Range by range: own_drop over the whole address space would
+       let go of the traps on all of it, page by page */
+    while ((n = own_lookup(AS_BASE, AS_END - AS_BASE, own, 64)) != 0)
+        for (i = 0; i < n && i < 64; i++) own_drop(own[i].addr, own[i].size);
+    mem_lock();
+    if (!g_pool_on) return -1;
+    /* everything mapped goes but the modules' code, from the top so the indices below stay put */
+    for (i = g_nblk; i-- > 0;)
+        if (g_blk[i].state != MS_FREE && g_blk[i].state != MS_CODE) unmap_nl(g_blk[i].addr, g_blk[i].size);
+    /* and the pool's pages but the services' host views */
+    n = spans_nl(NULL, 0);
+    s = (MemSpan*)malloc(sizeof *s * (size_t)(n ? n : 1));
+    if (!s) return -1;
+    spans_nl(s, n);
+    for (i = 0; i < n; i++)
+        if (!s[i].host) pool_free_nl(s[i].off, s[i].size);
+    free(s);
+    return 0;
+}
+u64 mem_restore_alloc(u64 size) {
+    u64 off;
+    return pool_alloc_nl(size, &off) ? ~0ull : off;
+}
+int mem_restore_write(u64 off, const void* p, u64 size) { return plat_alias_write(off, p, size) ? -1 : 0; }
+/* the state's list covers the address space in order, and its code is the code mapped now: 0, or -1. Under the lock */
+static int restore_check_nl(const MemBlock* blk, u32 n) {
+    u32 i, k;
+    u64 at = 0;
+    for (i = 0; i < n; i++) {
+        if (blk[i].addr != at || !blk[i].size || (blk[i].addr & (PAGE - 1)) || (blk[i].size & (PAGE - 1)) ||
+            blk[i].size > AS_END - at)
+            return -1;
+        at += blk[i].size;
+    }
+    if (at != AS_END) return -1;
+    for (i = 0, k = 0;;) {
+        while (i < g_nblk && g_blk[i].state != MS_CODE) i++;
+        while (k < n && blk[k].state != MS_CODE) k++;
+        if ((i < g_nblk) != (k < n)) return -1;
+        if (i == g_nblk) break;
+        if (g_blk[i].addr != blk[k].addr || g_blk[i].size != blk[k].size || g_blk[i].perm != blk[k].perm) return -1;
+        i++;
+        k++;
+    }
+    return 0;
+}
+int mem_restore_check(const MemBlock* blk, u32 n) {
+    int r;
+    mem_lock();
+    r = restore_check_nl(blk, n);
+    mem_unlock();
+    return r;
+}
+int mem_restore_blocks(const MemBlock* blk, u32 n) {
+    u32 i;
+    if (restore_check_nl(blk, n)) return -1;
+    for (i = 0; i < n; i++) {
+        const MemBlock* b = &blk[i];
+        if (b->state == MS_FREE || b->state == MS_CODE) continue;
+        if (b->pool ? plat_alias_map(GP(b->addr), b->pool - 1, b->size) != 0 : commit_nl(b->addr, b->size) != 0)
+            return -1;
+    }
+    if (n > g_nblk) blk_reserve_nl(n - g_nblk);
+    memcpy(g_blk, blk, sizeof *blk * (size_t)n);
+    g_nblk = n;
+    return 0;
+}
+void mem_restore_end(u64 heap_size, u64 phys_mapped) {
+    MemBlock* b;
+    u32 i, n;
+    __atomic_store_n(&g_heap_size, heap_size, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_phys_mapped, phys_mapped, __ATOMIC_RELEASE);
+    runs_stale_nl();
+    n = g_nblk;
+    b = (MemBlock*)malloc(sizeof *b * (size_t)n);
+    if (b) memcpy(b, g_blk, sizeof *b * (size_t)n);
+    mem_unlock();
+    mapping_end();
+    /* what the JIT compiled and the renderer keeps of every block is stale: not the modules' code, whose entries the
+       game module filled in once (dispatch_init) */
+    for (i = 0; b && i < n; i++)
+        if (b[i].state != MS_FREE && b[i].state != MS_CODE) code_invalidate(b[i].addr, b[i].size);
+    free(b);
+    gpu_mem_changed(AS_BASE, AS_END - AS_BASE);
 }

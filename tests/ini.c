@@ -140,6 +140,37 @@ int main(void) {
         assert(ini_step(&rumble, 0, 1) == 10 && ini_step(&rumble, 10, -1) == 0 && ini_step(&rumble, 5, 1) == 15);
         assert(ini_step(&plain, -5, -1) == -5 && ini_step(&plain, 3, 1) == 4);
     }
+    /* the settings not at their default: a number, a float, a text by its value or its key alone, with the defaults;
+       a row without a default never */
+    {
+        static int on = 1, level = 1;
+        static float speed = 1.0f;
+        static char folder[32] = "";
+        static const IniOpt changed[] = {
+            {"level", "1", NULL, INI_INT, 0, &level, 0, 2, NULL, NULL, NULL, 0, 0, 0},
+            {"speed", "1", NULL, INI_FLOAT, 0, &speed, 0.25, 4, NULL, NULL, NULL, 0, 0, 0},
+            {"folder", "", NULL, INI_TEXT, 0, folder, 0, 0, NULL, NULL, NULL, 0, 0, sizeof folder},
+            {"free", NULL, NULL, INI_INT, 0, &on, 0, 1, NULL, NULL, NULL, 0, 0, 0},
+            {NULL, NULL, NULL, 0, 0, NULL, 0, 0, NULL, NULL, NULL, 0, 0, 0}};
+        char list[128];
+        assert(ini_changed(changed, 0, list, sizeof list) == 0 && !strcmp(list, ""));
+        on = 0; /* no default: never listed */
+        assert(ini_changed(changed, 0, list, sizeof list) == 0);
+        level = 2;
+        speed = 1.5f;
+        snprintf(folder, sizeof folder, "/home/someone/corpus");
+        assert(ini_changed(changed, 0, list, sizeof list) == 3);
+        assert(!strcmp(list, "level=2, speed=1.5, folder=/home/someone/corpus"));
+        assert(ini_changed(changed, INI_CHANGED_NO_TEXT, list, sizeof list) == 3);
+        assert(!strcmp(list, "level=2, speed=1.5, folder"));
+        assert(ini_changed(changed, INI_CHANGED_DEFAULT | INI_CHANGED_NO_TEXT, list, sizeof list) == 3);
+        assert(!strcmp(list, "level=2 (default 1), speed=1.5 (default 1), folder (default \"\")"));
+        assert(ini_changed(changed, 0, list, 12) == 3 && !strcmp(list, "level=2, sp")); /* cut, every one counted */
+        level = 1;
+        speed = 1.0f;
+        folder[0] = 0;
+        assert(ini_changed(changed, INI_CHANGED_DEFAULT, list, sizeof list) == 0 && !strcmp(list, ""));
+    }
     puts("ini passed");
     return 0;
 }

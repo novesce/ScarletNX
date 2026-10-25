@@ -12,7 +12,7 @@
 		[button]"Load Switch" {
 			attr = callback
 		}
-		[button]"Load 3DS CIA" {
+		[button]"Load 3DS game" {
 			key = alt-f4
 		}
 		[button]"Open Data Folder" {

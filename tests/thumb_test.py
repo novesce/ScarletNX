@@ -225,12 +225,34 @@ def catalogue():
         'umlal r0, r1, r2, r3',
         'sdiv r0, r1, r2',
         'udiv r0, r1, r2',
+        # Thumb32 multiplies past MUL/MLA/MLS whose hw2 bits 7:4 are 0000 or 0001, as MUL's and MLS's are
+        'smlabb r0, r1, r2, r3',
+        'smlabt r0, r1, r2, r3',
+        'smulbb r0, r1, r2',
+        'smlad r0, r1, r2, r3',
+        'smuad r0, r1, r2',
+        'smlawb r0, r1, r2, r3',
+        'smlawt r0, r1, r2, r3',
+        'smlsd r0, r1, r2, r3',
+        'smmla r0, r1, r2, r3',
+        'smmul r0, r1, r2',
+        'smmls r0, r1, r2, r3',
+        'usad8 r0, r1, r2',
+        'usada8 r0, r1, r2, r3',
+        'pkhbt r0, r1, r2, lsl #20',
+        'pkhtb r0, r1, r2, asr #6',
         # Thumb32 exclusives and acquire/release (A32 twins, a doubleword one's pair any two registers)
         'ldrex r0, [r1]',
         'strex r2, r3, [r1]',
         'lda r0, [r1]',
         'stl r0, [r1]',
         'ldaexd r0, r1, [r12]',
+        'ldrex r0, [r1, #4]',
+        'ldrex r0, [r1, #1020]',
+        'strex r2, r3, [r1, #8]',
+        'hint #9',
+        'sevl',
+        'cpsid i',
         # Thumb32 coprocessor, VFP and Advanced SIMD (A32 twins)
         'vldr d0, [r1, #8]',
         'vldr d1, [pc, #8]',
@@ -279,6 +301,7 @@ def catalogue():
         'nop; vldr d1, [pc, #8]',
         # an exclusive pair, and the doubleword ones with any second register
         'ldrex r0, [r1]; strex r2, r3, [r1]',
+        'ldrex r0, [r1, #12]; strex r2, r3, [r1, #12]',
         'ldrexb r0, [r1]; strexb r2, r3, [r1]',
         'ldrexh r0, [r1]; strexh r2, r3, [r1]',
         'ldrexd r4, r5, [r1]; strexd r2, r6, r7, [r1]',
@@ -411,6 +434,43 @@ def compare(functions, entries, halfwords, states):
     print(f'  {total} exact comparisons passed ({len(entries)} sequences)')
 
 
+IT_BITS = 0x0600FC00
+# Blocks that start or end around an IT block, as halfwords: the conditions are a block's, decided when it compiles
+IT_WITNESSES = (
+    ('it-alone', [0xBF08]),  # IT EQ the block can't hold the instruction of: ITSTATE 0x08 left in CPSR
+    ('it-entry', [0x4688]),  # MOV r8, r1 entered with ITSTATE in CPSR: it stops, saying the ITSTATE
+    ('it-end', [0x2000, 0xBF08]),  # MOVS r0, #0; IT EQ, the code ending before its instruction
+    ('it-skip', [0xBF1C, 0xEE10, 0x0F10, 0x4688]),  # ITT NE; MRCNE p15 (undefined here); MOVNE r8, r1
+)
+
+
+def it_witnesses(lib, base):
+    def run(index, cpsr):
+        cpu, _ = initial(1, 4, False)
+        cpu.cpsr = cpsr
+        cpu.r[1], cpu.r[8] = 0x1111, 0x8888
+        fn = getattr(lib, f'block_{base + index}')
+        fn.argtypes = [C.POINTER(CPU)]
+        fn.restype = None
+        fn(C.byref(cpu))
+        return cpu
+
+    thumb = (1 << 5) | 0x10
+    cpu = run(0, thumb)
+    assert cpu.exit == 0 and cpu.r[15] == PC + 2 and cpu.cpsr & IT_BITS == 0x0800, f'it-alone: {cpu.cpsr:x}'
+    cpu = run(1, thumb | 0x0800)
+    assert cpu.exit == 13 and cpu.syndrome == 0x08 and cpu.r[8] == 0x8888, f'it-entry: exit {cpu.exit} {cpu.syndrome:x}'
+    cpu = run(1, thumb | 1 << 25 | 0x0C00)  # ITSTATE 0x0D: its bits 1:0 in 26:25, 7:2 in 15:10
+    assert cpu.exit == 13 and cpu.syndrome == 0x0D, f'it-entry 0d: exit {cpu.exit} {cpu.syndrome:x}'
+    cpu = run(2, thumb)
+    assert cpu.exit == 0 and cpu.r[15] == PC + 4 and cpu.cpsr & IT_BITS == 0x0800, f'it-end: {cpu.r[15]:x}'
+    cpu = run(3, thumb | 1 << 30)  # Z: NE fails, the MRC is skipped and so is the MOV after it
+    assert cpu.exit == 0 and cpu.r[15] == PC + 8 and cpu.r[8] == 0x8888, f'it-skip: {cpu.r[15]:x} {cpu.r[8]:x}'
+    cpu = run(3, thumb)  # NE holds: the MRC is undefined without a backend
+    assert cpu.exit == 1 and cpu.r[15] == PC + 2, f'it-skip taken: exit {cpu.exit}'
+    print(f'  {len(IT_WITNESSES)} IT block witnesses passed')
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--emitter', required=True)
@@ -425,7 +485,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix='snx-thumb-') as path:
         directory = pathlib.Path(path)
         source = directory / 'blocks.txt'
-        source.write_text(''.join(f'{PC:x} ' + ' '.join(f'{h:04x}' for h in hw) + '\n' for hw in halfwords))
+        blocks = list(halfwords) + [hw for _, hw in IT_WITNESSES]
+        source.write_text(''.join(f'{PC:x} ' + ' '.join(f'{h:04x}' for h in hw) + '\n' for hw in blocks))
         for opt in args.opt or ('0', '2'):
             print(f'Thumb16/32 LLVM O{opt}', flush=True)
             obj, dll = directory / f'test{opt}.o', directory / f'test{opt}.so'
@@ -436,6 +497,7 @@ def main():
             for fn in functions:
                 fn.argtypes = [C.POINTER(CPU)]
                 fn.restype = None
+            it_witnesses(lib, len(entries))
             compare(functions, entries, halfwords, args.states)
 
 

@@ -27,6 +27,7 @@
 #include <direct.h>
 #include <io.h>
 #include <wchar.h>
+#include <psapi.h>
 #else
 #include <dirent.h>
 #include <fcntl.h>
@@ -42,10 +43,16 @@
 #ifdef __FreeBSD__
 #include <sys/types.h>
 #include <sys/sysctl.h>
+#include <sys/user.h> /* struct kinfo_proc */
 #endif
 #ifdef __APPLE__
+#include <TargetConditionals.h>
 #include <libkern/OSCacheControl.h> /* sys_icache_invalidate */
 #include <mach-o/dyld.h>
+#include <mach/mach.h>
+#if TARGET_OS_IPHONE
+#include <os/proc.h>
+#endif
 #endif
 
 void* snx_alloc(size_t size) {
@@ -117,6 +124,7 @@ static struct {
     unsigned said_kinds;
     const char* renamed[16];
     size_t renamed_count;
+    volatile int abort_requested; /* snx_abort_request's, from another thread than the one that asks */
 } g_common;
 void snx_option_renamed(const char* old, const char* now) {
     size_t i;
@@ -1297,6 +1305,8 @@ unsigned snx_cpu_count(void) {
 }
 /* Code arenas (code_loader.c) reserve their address space once and give each page access only when it is used: the
    loader writes into read-write pages and makes them executable before anything jumps there */
+void snx_abort_request(int on) { g_common.abort_requested = on; }
+int snx_abort_requested(void) { return g_common.abort_requested; }
 size_t snx_vm_page_size(void) {
 #ifdef _WIN32
     SYSTEM_INFO info;
@@ -1305,6 +1315,83 @@ size_t snx_vm_page_size(void) {
 #else
     long size = sysconf(_SC_PAGESIZE);
     return size > 0 ? (size_t)size : 4096;
+#endif
+}
+SnxU64 snx_footprint(void) {
+#if defined(__APPLE__)
+    task_vm_info_data_t info;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) == KERN_SUCCESS)
+        return info.phys_footprint;
+    return 0;
+#elif defined(__linux__)
+    unsigned long long pages = 0, resident = 0;
+    FILE* f = fopen("/proc/self/statm", "r");
+    if (!f) return 0;
+    if (fscanf(f, "%llu %llu", &pages, &resident) != 2) resident = 0;
+    fclose(f);
+    return (SnxU64)resident * snx_vm_page_size();
+#elif defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS info;
+    return GetProcessMemoryInfo(GetCurrentProcess(), &info, sizeof info) ? (SnxU64)info.WorkingSetSize : 0;
+#elif defined(__FreeBSD__)
+    struct kinfo_proc proc;
+    size_t size = sizeof proc;
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, (int)getpid()};
+    if (sysctl(mib, 4, &proc, &size, NULL, 0) || size != sizeof proc) return 0;
+    return (SnxU64)proc.ki_rssize * snx_vm_page_size();
+#else
+    return 0;
+#endif
+}
+SnxU64 snx_process_cpu_ns(void) {
+#ifdef _WIN32
+    FILETIME created, exited, kernel, user;
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) return 0;
+    /* 100 ns ticks */
+    return (((SnxU64)kernel.dwHighDateTime << 32 | kernel.dwLowDateTime) +
+            ((SnxU64)user.dwHighDateTime << 32 | user.dwLowDateTime)) *
+           100;
+#else
+    struct timespec t;
+    if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &t)) return 0;
+    return (SnxU64)t.tv_sec * 1000000000u + (SnxU64)t.tv_nsec;
+#endif
+}
+int snx_memory_available(SnxU64* bytes) {
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    size_t left = os_proc_available_memory(); /* 0 in the simulator, which has no limit */
+    if (!left) return 0;
+    *bytes = left;
+    return 1;
+#elif defined(__APPLE__)
+    vm_statistics64_data_t vm;
+    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+    vm_size_t page = 0;
+    if (host_page_size(mach_host_self(), &page) != KERN_SUCCESS ||
+        host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&vm, &count) != KERN_SUCCESS)
+        return 0;
+    *bytes = ((SnxU64)vm.free_count + vm.inactive_count + vm.purgeable_count) * page;
+    return 1;
+#elif defined(__linux__)
+    char line[128];
+    unsigned long long kib = 0;
+    int found = 0;
+    FILE* f = fopen("/proc/meminfo", "r");
+    if (!f) return 0;
+    while (!found && fgets(line, sizeof line, f)) found = sscanf(line, "MemAvailable: %llu kB", &kib) == 1;
+    fclose(f);
+    if (found) *bytes = (SnxU64)kib << 10;
+    return found;
+#elif defined(_WIN32)
+    MEMORYSTATUSEX status;
+    status.dwLength = sizeof status;
+    if (!GlobalMemoryStatusEx(&status)) return 0;
+    *bytes = status.ullAvailPhys;
+    return 1;
+#else
+    (void)bytes;
+    return 0;
 #endif
 }
 void* snx_vm_reserve(size_t size) {

@@ -132,6 +132,7 @@ static const char* exit_name(u32 e) {
         case SNX_ARM_DATA_ABORT: return "an access outside its address space";
         case SNX_ARM_ALIGNMENT: return "a misaligned access";
         case SNX_ARM_BAD_ENTRY: return "a block entered in the wrong state";
+        case SNX_ARM_IT_ENTRY: return "a Thumb block entered inside an IT block, its ITSTATE";
         case SNX_ARM_ENDIAN_UNSUPPORTED: return "big-endian data (CPSR.E)";
         case SNX_ARM_BACKEND_UNSUPPORTED: return "an instruction the block compiler can't run";
         default: return "an exit the runtime doesn't know";

@@ -154,7 +154,7 @@ int vk_astc_upload(VkCommandBuffer cb, Surf* t, u32 w, u32 h, u32 depth, u32 lev
             u32 n = ny - y < 3 ? ny - y : 3;
             VkBuffer b;
             u64 off;
-            CHECK(rows(ctx, cb, z, 1, y, n, &b, &off) && mem_of(b));
+            CHECK(rows(ctx, &cb, z, 1, y, n, &b, &off) && mem_of(b));
             memcpy(astc_out + ((u64)z * ny + y) * nx * 16, mem_of(b) + off, (u64)n * nx * 16);
         }
     return 1;
@@ -258,8 +258,16 @@ VkFormat vk_srgb_as(VkFormat f, int srgb) {
 void vk_surf_add(Surf* s) { (void)s; }
 void vk_surf_touch(Surf* s) { (void)s; }
 void vk_surf_relist(Surf* s) { (void)s; }
+u32 vk_surf_gen(void) {
+    static u32 gen;
+    return ++gen;
+}
 u64 vk_surf_reclaim(int list, u32 before, u64 want, int lossy) {
     (void)list, (void)before, (void)want, (void)lossy;
+    return 0;
+}
+u64 vk_rt_reclaim_superseded(u32 before, u64 want) {
+    (void)before, (void)want;
     return 0;
 }
 u32 vk_present_before(u64 ago_ns, u32 presents) {
@@ -281,12 +289,16 @@ VkImage vk_unscaled_image(const Surf* s, u32 layers, VmaAllocation* mem) {
     return VK_NULL_HANDLE;
 }
 void vk_view_formats(VkImageCreateInfo* ii, VkViewFormats* vf) { (void)ii, (void)vf; }
+static struct {
+    int on;
+    u32 clock, stamp, epoch;
+} g_tracking;
 int vk_written_since(const u8* host, u64 len, u32 since) {
-    (void)host, (void)len, (void)since;
-    return -1;
+    (void)host, (void)len;
+    return g_tracking.on ? g_tracking.stamp > since : -1;
 }
-u32 vk_ww_now(void) { return 0; }
-u32 vk_ww_epoch(void) { return 0; }
+u32 vk_ww_now(void) { return g_tracking.clock; }
+u32 vk_ww_epoch(void) { return g_tracking.epoch; }
 int gpu_mem_dirty_since(u64 since, u64 a, u64 sz) {
     (void)since, (void)a, (void)sz;
     return 0;
@@ -475,6 +487,34 @@ int main(void) {
         CHECK(mem_hash(at, size) != owned);
         guest[0x20000 + 4096 + 100] ^= 0x5A;
         g_own_any = 0;
+    }
+    /* A clean scan does not advance the write clock. Its cached texture must
+       still notice the very next stamp, including after several clean epochs. */
+    {
+        Surf t = tex(8, 2, 1, 1, 4, 0, 0, 0);
+        t.size = t.pitch * t.h;
+        copy_bpp = 4;
+        stage_used = copied_used = nregs = 0;
+        CHECK(tex_upload(&t));
+        t.hash = mem_hash(t.gva, t.size);
+        g_tracking.on = 1;
+        g_tracking.clock = t.wseen = 10;
+        for (u32 round = 0; round < 3; round++) {
+            for (u32 clean = 0; clean < 2; clean++) {
+                g_vk_present++;
+                g_tracking.epoch++;
+                stage_used = copied_used = nregs = 0;
+                CHECK(tex_check(&t, t.gva) == &t && !nregs);
+            }
+            guest[0] ^= 0x5A;
+            g_tracking.stamp = ++g_tracking.clock;
+            g_vk_present++;
+            g_tracking.epoch++;
+            stage_used = copied_used = nregs = 0;
+            CHECK(tex_check(&t, t.gva) == &t);
+            CHECK(nregs == 1 && copied[regs[0].bufferOffset] == guest[0]);
+        }
+        g_tracking.on = 0;
     }
     printf("tex_upload_rows: %u checks passed\n", checks);
     return 0;

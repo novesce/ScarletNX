@@ -14,7 +14,7 @@ set(SNX_DEPS_CACHE "$ENV{SNX_DEPS_CACHE}" CACHE PATH
 
 # The system's C headers as this compiler reads them: a toolchain update that changes them changes every key
 function(snx_deps_headers_hash out)
-    set(probe "${CMAKE_BINARY_DIR}/snx-deps/headers.c")
+    set(probe "${PROJECT_BINARY_DIR}/snx-deps/headers.c")
     file(WRITE "${probe}" "#include <errno.h>\n#include <limits.h>\n#include <math.h>\n#include <stddef.h>\n"
                           "#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n"
                           "#include <time.h>\n#ifdef _WIN32\n#include <windows.h>\n#else\n#include <pthread.h>\n"
@@ -60,8 +60,8 @@ function(snx_deps_cached name out)
     string(SHA256 hash "${key}")
     string(SUBSTRING "${hash}" 0 16 hash)
     set(dir "${SNX_DEPS_CACHE}/${name}-${hash}")
-    file(WRITE "${CMAKE_BINARY_DIR}/snx-deps/${name}.key" "${key}\n")
-    file(WRITE "${CMAKE_BINARY_DIR}/snx-deps/${name}.dir" "${name}-${hash}\n")
+    file(WRITE "${PROJECT_BINARY_DIR}/snx-deps/${name}.key" "${key}\n")
+    file(WRITE "${PROJECT_BINARY_DIR}/snx-deps/${name}.dir" "${name}-${hash}\n")
     set(${out}_DIR "${dir}" PARENT_SCOPE)
     if(EXISTS "${dir}/snx-complete")
         message(STATUS "${name}: the build in ${dir}")
@@ -76,8 +76,8 @@ function(snx_deps_publish project name prefix dir)
         return()
     endif()
     ExternalProject_Add_Step(${project} publish
-        COMMAND "${CMAKE_COMMAND}" "-DFROM=${prefix}" "-DTO=${dir}" "-DKEY=${CMAKE_BINARY_DIR}/snx-deps/${name}.key"
-                -P "${CMAKE_SOURCE_DIR}/cmake/deps_publish.cmake"
+        COMMAND "${CMAKE_COMMAND}" "-DFROM=${prefix}" "-DTO=${dir}" "-DKEY=${PROJECT_BINARY_DIR}/snx-deps/${name}.key"
+                -P "${PROJECT_SOURCE_DIR}/cmake/deps_publish.cmake"
         COMMENT "Keeping ${name} in ${dir}"
         DEPENDEES install)
 endfunction()

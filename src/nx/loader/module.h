@@ -10,22 +10,13 @@
 
 typedef struct {
     const char* title;
-    size_t chunk_instrs; /* instructions per unit, 0 for SNX_CHUNK_INSTRUCTIONS */
+    size_t chunk_instrs; /* instructions per unit, 0 for the setting unit_instructions' */
     int interp_only, quiet, hook_direct_calls;
     const SnxU64* hints; /* guest addresses a run found code at (the game's .hints file) */
     size_t hint_count;
     const char* jit_cache; /* the profile run's .jitcache, linked into the module; NULL for none */
     unsigned abi;
 } SnxCodegenOptions;
-
-/* A unit (one LLVM module, compiled on its own) takes whole functions until it holds about this
-   many instructions. Android gets smaller units: its allocator keeps a region per allocation size, and several
-   threads' worth of large units at once exhausted it */
-#ifdef __ANDROID__
-#define SNX_CHUNK_INSTRUCTIONS 20000
-#else
-#define SNX_CHUNK_INSTRUCTIONS 90000
-#endif
 
 /* An address the runtime can enter: a leader of a function, and that function's index */
 typedef struct {
@@ -40,5 +31,9 @@ SnxModuleEntry* snx_module_entries(const SnxCodegen* codegen, size_t* count);
 char* snx_chunk_label(const SnxCodegen* codegen, size_t first, size_t last);
 /* Prints that unit `done` of `count` finished: "  compiled block 3/40: code_002, <label> (4.2 s)", or "(cached)" */
 void snx_report_unit(size_t done, size_t count, const char* name, const char* label, int cached, double seconds);
+/* snx_report_unit's line, into out: the unit's place, name and label, then cached, or its time and the memory the
+   process holds when used tells it (0: the system does not) */
+void snx_unit_line(char* out, size_t size, size_t done, size_t count, const char* name, const char* label, int cached,
+                   double seconds, SnxU64 used);
 
 #endif

@@ -9,9 +9,9 @@ add_library(snx_driver STATIC driver.c container.c extract.c game_name.c recompi
                               mcp_edenprobe.c mcp_gdb.c ../../loader/loader.c)
 set_target_properties(snx_driver PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
 target_compile_definitions(snx_driver PRIVATE
-    SNX_SOURCE_DIR="${CMAKE_SOURCE_DIR}" SNX_BUILD_DIR="${CMAKE_BINARY_DIR}" _CRT_SECURE_NO_WARNINGS
-    SNX_NX_ABI_INCLUDE="${CMAKE_SOURCE_DIR}/src/nx/loader"
-    SNX_COMMON_INCLUDE="${CMAKE_SOURCE_DIR}/src/common")
+    SNX_SOURCE_DIR="${PROJECT_SOURCE_DIR}" SNX_BUILD_DIR="${PROJECT_BINARY_DIR}" _CRT_SECURE_NO_WARNINGS
+    SNX_NX_ABI_INCLUDE="${PROJECT_SOURCE_DIR}/src/nx/loader"
+    SNX_COMMON_INCLUDE="${PROJECT_SOURCE_DIR}/src/common")
 target_compile_options(snx_driver PRIVATE -pedantic-errors -Wall -Wextra -Werror=missing-prototypes)
 # snx_build_info (the top CMakeLists, after CTest): the commit the games' stamps carry
 target_link_libraries(snx_driver PUBLIC scarletnx-common snx_setup snx_nx_module snx_lz4 OpenSSL::Crypto
@@ -27,8 +27,8 @@ endif()
 if(NOT SNX_TOOLS_ONLY)
     target_compile_definitions(snx_driver PRIVATE SNX_WITH_RUNTIME)
 endif()
-include("${CMAKE_SOURCE_DIR}/cmake/llvm.cmake")
-add_subdirectory("${CMAKE_SOURCE_DIR}/src/common/cpu/recompiler/llvm" llvm-backend)
+include("${PROJECT_SOURCE_DIR}/cmake/llvm.cmake")
+add_subdirectory("${PROJECT_SOURCE_DIR}/src/common/cpu/recompiler/llvm" llvm-backend)
 # the NX game module through the LLVM backend; C11 for the LLVM-C headers, the driver itself stays C99
 add_library(snx_driver_llvm STATIC ../../loader/module_llvm.c ../../loader/module_variants.c ../../loader/module_arm.c
                                    ../../loader/unit_cache.c llvm_tuning.c disasm.c "${SNX_SETTINGS_LLVM}")
@@ -37,7 +37,7 @@ target_compile_options(snx_driver_llvm PRIVATE -Wall -Wextra -Werror=missing-pro
 # OpenSSL: the unit cache's SHA-256 (unit_cache.c)
 target_link_libraries(snx_driver_llvm PUBLIC snx_llvm snx_arm_llvm snx_nx_module snx_settings OpenSSL::Crypto)
 # LLVM's revision in the unit cache's key, where its headers name one
-include("${CMAKE_SOURCE_DIR}/cmake/llvm_revision.cmake")
+include("${PROJECT_SOURCE_DIR}/cmake/llvm_revision.cmake")
 snx_llvm_revision(snx_llvm_revision "${SNX_LLVM_INCLUDE_DIR}")
 if(snx_llvm_revision)
     target_compile_definitions(snx_driver_llvm PRIVATE "SNX_LLVM_REVISION=\"${snx_llvm_revision}\"")
@@ -49,22 +49,22 @@ if(SNX_LLVM_A64_DISASM)
 endif()
 target_link_libraries(snx_driver PUBLIC snx_driver_llvm)
 # the recompiler as a library (snx_recompiler.h), over the backends configured above
-add_subdirectory("${CMAKE_SOURCE_DIR}/src/common/cpu/recompiler" recompiler-library)
+add_subdirectory("${PROJECT_SOURCE_DIR}/src/common/cpu/recompiler" recompiler-library)
 if(SNX_TOOLS_ONLY)
     add_executable(scarletnx main.c)
     # linked as C++: LLVM and the demangler (common/utilities/demangle.h) need the C++ runtime
     set_target_properties(scarletnx PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF
-        LINKER_LANGUAGE CXX RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+        LINKER_LANGUAGE CXX RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}")
     target_link_libraries(scarletnx PRIVATE snx_driver)
     if(WIN32)
         if(CMAKE_C_SIMULATE_ID STREQUAL "MSVC")
-            target_link_options(scarletnx PRIVATE "LINKER:/MANIFESTINPUT:${CMAKE_SOURCE_DIR}/src/common/platform/runtime.manifest")
+            target_link_options(scarletnx PRIVATE "LINKER:/MANIFESTINPUT:${PROJECT_SOURCE_DIR}/src/common/platform/runtime.manifest")
         else()
             enable_language(RC)
-            target_sources(scarletnx PRIVATE "${CMAKE_SOURCE_DIR}/src/common/platform/runtime.rc")
+            target_sources(scarletnx PRIVATE "${PROJECT_SOURCE_DIR}/src/common/platform/runtime.rc")
             # where the resource compiler finds the manifest and the icon; C includes from src/ alone
             target_include_directories(scarletnx PRIVATE
-                                       "$<$<COMPILE_LANGUAGE:RC>:${CMAKE_SOURCE_DIR}/src/common/platform>")
+                                       "$<$<COMPILE_LANGUAGE:RC>:${PROJECT_SOURCE_DIR}/src/common/platform>")
         endif()
     endif()
 endif()

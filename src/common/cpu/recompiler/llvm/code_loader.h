@@ -77,6 +77,18 @@ SnxCodeLoader* snx_code_loader_new_toc(size_t reserve, SnxU64 toc, char* error, 
 /* The same for objects of another machine (an ELF e_machine: 62 x86-64, 183 AArch64; or SNX_CODE_COFF_X64), for tests
    of the loader on a host that cannot run them: their code is placed and relocated, and must never run */
 SnxCodeLoader* snx_code_loader_new_machine(size_t reserve, unsigned machine, char* error, size_t error_size);
+/* An arena of the regions' own sizes in bytes (code, read-only data, data), each rounded up to whole pages and to
+   64 KiB (Windows' allocation granularity, where views of a section go), at most 2 GiB in all: for a game's code
+   loaded whole, which snx_code_need sizes, rather than a total in fixed shares. NULL with the reason in error */
+SnxCodeLoader* snx_code_loader_new_regions(const size_t size[3], char* error, size_t error_size);
+/* The same for objects of another machine, as snx_code_loader_new_machine */
+SnxCodeLoader* snx_code_loader_new_regions_machine(const size_t size[3], unsigned machine, char* error,
+                                                   size_t error_size);
+/* What snx_code_load of count ELF objects (of any one machine) takes at most of each region (code, read-only data,
+   data, in that order), from their section headers and relocations: their sections with every alignment, a stub or
+   veneer for each symbol an object calls, and a GOT slot for each it calls or reaches through the GOT. 0, or -1 with
+   the reason in error */
+int snx_code_need(const SnxLinkInput* inputs, size_t count, size_t need[3], char* error, size_t error_size);
 /* Gives the arena back: nothing may run the loaded code any more */
 void snx_code_loader_free(SnxCodeLoader* loader);
 /* Defines name at address for the loads that follow. 0, or -1 when the table has the name already */

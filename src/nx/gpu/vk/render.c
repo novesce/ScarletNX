@@ -823,22 +823,21 @@ int vk_image_key(const ShaderInfo* si, int i, const u32* tic) {
 }
 
 VkImageView vk_storage_image_view(Surf* t, const ShaderInfo* si, int i, u64* bytes) {
-    VkComponentMapping identity = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                                   VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
     int volume = si->img[i].type == 5;
+    int kind = si->img[i].kind;
     *bytes = vk_surf_guest_size(t);
     /* a 3D surface is a block linear 3D texture at its own size, written back as one volume (vk_surf_flush) */
-    if (!t || !t->storage_capable || !vk_surf_can_writeback(t) || t->levels != 1 ||
+    if (!t || !t->storage_capable || !vk_surf_can_writeback(t) || !t->levels ||
         (volume ? t->type != VK_IMAGE_VIEW_TYPE_3D || !t->bl || t->sw != t->w || t->sh != t->h
                 : t->depth3d != 1 || (si->img[i].type != 3 && si->img[i].type != 4)) ||
-        !*bytes || *bytes > UINT32_MAX || (si->img[i].kind ? t->f.vk != VK_FORMAT_R32_UINT : t->f.is_int))
+        !*bytes || *bytes > UINT32_MAX)
+        return VK_NULL_HANDLE;
+    if (kind == 1 ? t->f.vk != VK_FORMAT_R32_UINT
+                  : !vk_format_storage_write(t->f.vk) || kind != (t->f.is_int ? t->f.sint ? 3 : 2 : 0))
         return VK_NULL_HANDLE;
     /* a 2D array surface sees every layer of the image, a single layer one too */
-    return vk_tex_view(t,
-                       volume                    ? VK_IMAGE_VIEW_TYPE_3D
-                       : si->img[i].type == 4    ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
-                                                 : VK_IMAGE_VIEW_TYPE_2D,
-                       0, &identity, 0);
+    return vk_tex_storage_view(t, volume ? VK_IMAGE_VIEW_TYPE_3D
+                                   : si->img[i].type == 4 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D);
 }
 
 u32 vk_gbuf_desc(int stage, u32 off, const u32* v, u64* addr) {
@@ -853,6 +852,25 @@ u32 vk_gbuf_desc(int stage, u32 off, const u32* v, u64* addr) {
     if (!size) size = 16;
     if (size > (16u << 20)) size = 16u << 20;
     return (size + 3) & ~3u;
+}
+
+/* the images of s, stage's program, whose bound texture is integer where the program's handle form stores floats, or
+   the other way (vk_image_key): a bit each, which bits 8 on of the program's rt_int_mask take to pick its variant */
+static u32 image_variant(const GpuChannel* ch, int stage, const VkSh* s, u32* signed_images) {
+    const u32* r = ch->r3d;
+    u64 tic_base = ((u64)r[0x55D] << 32) | r[0x55E];
+    u32 bits = 0;
+    *signed_images = 0;
+    for (int i = 0; i < s->si.nimg; i++) {
+        if (!vk_image_keyable(&s->si, i)) continue;
+        ShTex handle_info = {
+            .cbuf_off = s->si.img[i].cbuf_off, .bindless = s->si.img[i].bindless, .bl_cbuf = s->si.img[i].bl_cbuf};
+        u32 handle = tex_handle(ch, stage, r[0x982], &handle_info), tic[8];
+        vk_gmem_words(tic_base + (handle & 0xFFFFF) * 32ull, tic, 8);
+        if (vk_image_key(&s->si, i, tic)) bits |= 1u << i;
+        if (vk_tex_num(tic, NULL) == 2) *signed_images |= 1u << i;
+    }
+    return bits;
 }
 
 /* What picks the fragment shader's variant: which of its textures and outputs are integer (signed), its color textures
@@ -907,19 +925,14 @@ static void fs_key(GpuChannel* ch, const VkSh* s0, TexRes* res, u32 last_out, u3
         if (num == 2) fk->ts |= 1ull << i;
     }
     fk->rm &= s0->si.sph[18] ? 0xFF : 0;
-    u64 tic_base = ((u64)r[0x55D] << 32) | r[0x55E];
-    for (int i = 0; i < s0->si.nimg; i++) {
-        if (!vk_image_keyable(&s0->si, i)) continue;
-        ShTex handle_info = {
-            .cbuf_off = s0->si.img[i].cbuf_off, .bindless = s0->si.img[i].bindless, .bl_cbuf = s0->si.img[i].bl_cbuf};
-        u32 handle = tex_handle(ch, 4, r[0x982], &handle_info), tic[8];
-        vk_gmem_words(tic_base + (handle & 0xFFFFF) * 32ull, tic, 8);
-        if (vk_image_key(&s0->si, i, tic)) fk->rm |= 1u << (8 + i);
-    }
+    fk->rs &= fk->rm;
+    u32 signed_images;
+    fk->rm |= image_variant(ch, 4, s0, &signed_images) << 8;
+    fk->rs |= signed_images << 8;
 }
 /* the fragment shader at addr in the variant fk names, s0 when it names none */
 static VkSh* fs_variant(GpuChannel* ch, u64 addr, VkSh* s0, const FsKey* fk) {
-    if (!fk->tm && !fk->rm && !fk->dm && !fk->unfed) return s0;
+    if (!fk->tm && !fk->rm && !fk->rs && !fk->dm && !fk->unfed) return s0;
     return vk_shader_get(ch, addr, 0, ST_FS, fk->tm, fk->ts, fk->rm, fk->rs, 0, fk->dm, fk->df, fk->unfed, NULL);
 }
 
@@ -1057,6 +1070,7 @@ static int frame_consts(VkBuffer* buf, u64* off) {
         memcpy(p, rs, 16);
         memcpy(p + 16, fa, 16);
         memcpy(p + 32, ia, 16);
+        memset(p + 48, 0, 16); /* empty vertex bindings retain their original format */
         snx_le32_array(p, 12); /* the device reads them little-endian */
         frame = vk_submit_number();
     }
@@ -1265,10 +1279,10 @@ void vk_gfx_image_frame_done(u64 sub) {
     g_img_landing = landing;
 }
 
-typedef struct {
-    Surf* surf[8];
-    u8* original[8];
-    u32 size[8];
+typedef struct { /* the vertex and fragment programs' images, 8 each */
+    Surf* surf[16];
+    u8* original[16];
+    u32 size[16];
     int n;
 } DrawImages;
 static void draw_images_discard(DrawImages* images) {
@@ -1675,7 +1689,7 @@ static VkDescriptorSet stage_set_(GpuChannel* ch, int stage, VkSh* s, Surf** rt,
         u64 tic_base = ((u64)r[0x55D] << 32) | r[0x55E];
         u32 tic[8];
         vk_gmem_words(tic_base + (handle & 0xFFFFF) * 32ull, tic, 8);
-        Surf* surf = vk_tex_from_tic(tic);
+        Surf* surf = vk_tex_from_tic_storage(tic);
         u64 size = vk_surf_guest_size(surf);
         int kind = s->si.img[i].kind;
         /* a draw can't also write one of its own attachments through a storage image */
@@ -1683,12 +1697,15 @@ static VkDescriptorSet stage_set_(GpuChannel* ch, int stage, VkSh* s, Surf** rt,
             surf && is_target(surf, rt, zt, n) ? VK_NULL_HANDLE : vk_storage_image_view(surf, &s->si, i, &size);
         if (!view) {
             LOG_LIMIT(4,
-                      "vulkan: unsupported fragment storage image (draw skipped): %s handle %08x image %p format %u "
-                      "raw %d integer %d storage %d levels %u depth %u size %llu target %d\n",
+                      "vulkan: unsupported storage image (draw skipped): %s handle %08x image %p format %u "
+                      "raw %d integer %d storage %d levels %u depth %u size %llu target %d view type %d block "
+                      "linear %d %ux%u at %ux%u, the program's surface type %d\n",
                       kind == 1 ? "atomic" : "store", handle, (void*)surf, surf ? surf->f.vk : 0,
                       surf ? surf->f.raw : 0, surf ? surf->f.is_int : 0, surf ? surf->storage_capable : 0,
                       surf ? surf->levels : 0, surf ? surf->depth3d : 0, (unsigned long long)size,
-                      surf ? is_target(surf, rt, zt, n) : 0);
+                      surf ? is_target(surf, rt, zt, n) : 0, surf ? (int)surf->type : -1, surf ? (int)surf->bl : -1,
+                      surf ? surf->w : 0, surf ? surf->h : 0, surf ? surf->sw : 0, surf ? surf->sh : 0,
+                      s->si.img[i].type);
             return VK_NULL_HANDLE;
         }
         int seen = 0;
@@ -1708,7 +1725,8 @@ static VkDescriptorSet stage_set_(GpuChannel* ch, int stage, VkSh* s, Surf** rt,
         images->surf[images->n] = surf;
         images->size[images->n] = (u32)size;
         images->n++;
-        vk_surf_use(vk_cmd(), surf, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        vk_surf_use(vk_cmd(), surf, VK_IMAGE_LAYOUT_GENERAL,
+                    stage ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
                     VK_STORAGE_IMAGE_ACCESS);
         u32 binding = SNX_VKB_IMG + (u32)i;
         d.ii[binding] = (VkDescriptorImageInfo){VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL};
@@ -1857,13 +1875,13 @@ typedef struct {
     int xfb_on;                /* transform feedback captures */
 } DrawShaders;
 /* the vertex bindings a pipeline key describes, for finding their buffers each draw: binding b reads guest stream
-   key[b] & 31 from its base offset key[b] >> 5 on, with pad bytes past the stream's limit (an attribute reaching past
-   the stride of its last vertex), or the constants of the attributes without data when key[b] is ~0u */
+   key[b] & 31 from its base offset key[b] >> 5 on, with pad bytes past its last stride when still inside the stream's
+   limit, or the constants of the attributes without data when key[b] is ~0u */
 typedef struct {
     u32 key[33], pad[33];
     VkDeviceSize stride[33];
     u32 used;  /* the streams whose limits the bindings were planned with */
-    u32 empty; /* those of them that were empty, so their attributes read the constants */
+    u32 empty; /* attributes whose relative offsets are outside their guest bindings */
 } VertexPlan;
 /* what a pipeline key takes from the surfaces drawn to: the color slots up to the last bound one, those drawn to,
    which of them are integer, their formats, and the depth target's */
@@ -2016,6 +2034,13 @@ static int draw_shaders(GpuChannel* ch, u32 topology, DrawShaders* o) {
     o->vs = vk_shader_get(ch, code + r[0x811], (r[0x800] & 1) ? code + r[0x801] : 0, ST_VS, attr_int, attr_sint, 0, 0,
                           tes_on || gs_on ? SNX_SH_NOT_LAST : clip, 0, 0, 0,
                           xfb_on && !tes_on && !gs_on ? &xfb : NULL);
+    /* a vertex program's images pick its variant as a fragment program's do (fs_key) */
+    u32 vs_signed_images = 0;
+    u32 vs_images = o->vs && !o->vs->failed && o->vs->si.nimg ? image_variant(ch, 0, o->vs, &vs_signed_images) : 0;
+    if (vs_images || vs_signed_images)
+        o->vs = vk_shader_get(ch, code + r[0x811], (r[0x800] & 1) ? code + r[0x801] : 0, ST_VS, attr_int, attr_sint,
+                              vs_images << 8, vs_signed_images << 8, tes_on || gs_on ? SNX_SH_NOT_LAST : clip, 0, 0, 0,
+                              xfb_on && !tes_on && !gs_on ? &xfb : NULL);
     o->tcs =
         tcs_on ? vk_shader_get(ch, code + r[0x821], 0, ST_TCS, 0, 0, 0, 0, SNX_SH_NOT_LAST, 0, 0, 0, NULL) : NULL;
     o->tes = tes_on ? vk_shader_get(ch, code + r[0x831], 0, ST_TES, 0, 0, r[0xC8] & 0x333, 0,
@@ -2037,13 +2062,13 @@ static u64 stream_len(const u32* r, u32 s) {
     u64 start = stream_start(r, s), end = ((u64)r[0x7C0 + s * 2] << 32) | r[0x7C1 + s * 2];
     return end >= start ? end - start + 1 : 0;
 }
-/* those of the streams that are empty */
-static u32 streams_empty(const u32* r, u32 streams) {
+/* Attributes whose relative offsets start outside their bindings. */
+static u32 attributes_empty(const u32* r, u32 inputs) {
     u32 e = 0;
-    while (streams) {
-        u32 s = (u32)__builtin_ctz(streams);
-        streams &= streams - 1;
-        if (!stream_len(r, s)) e |= 1u << s;
+    while (inputs) {
+        u32 i = (u32)__builtin_ctz(inputs), attribute = r[0x458 + i];
+        inputs &= inputs - 1;
+        if (stream_len(r, attribute & 31) <= ((attribute >> 7) & 0x3fff)) e |= 1u << i;
     }
     return e;
 }
@@ -2109,7 +2134,7 @@ static int draw_key(const GpuChannel* ch, const DrawShaders* sh, const VkSh* fs,
 
     /* vertex streams: each used guest stream is a binding, and so is an attribute at an offset past the device's
        limit or reaching past its stream's stride (it is read from its own offset there); one more holds the 0,0,0,1
-       of attributes without data (an attribute marked constant, a stream disabled or empty, or a format the device
+       of attributes without data (an attribute marked constant, a stream disabled, or a format the device
        can't read) */
     const VkPhysicalDeviceLimits* lim = &g_vk.props.limits;
     u32 maxoff = lim->maxVertexInputAttributeOffset;
@@ -2119,7 +2144,8 @@ static int draw_key(const GpuChannel* ch, const DrawShaders* sh, const VkSh* fs,
         LOG_LIMIT(1, "vulkan: a vertex shader reads attributes past the %u this GPU has (draw skipped)\n", nloc);
         return 0;
     }
-    int cbind = -1, over = 0;
+    int cbind = -1, zbind = -1, over = 0;
+    pl->empty = attributes_empty(r, vs->si.in_mask);
     for (u32 i = 0; i < nloc && !over; i++) {
         if (!(vs->si.in_mask & (1u << i))) continue;
         u32 a = r[0x458 + i];
@@ -2129,10 +2155,21 @@ static int draw_key(const GpuChannel* ch, const DrawShaders* sh, const VkSh* fs,
         int is_int = ty == 3 || ty == 4, data = !((a >> 6) & 1) && (va[0] & 0x1000) && vertex_format_ok(fmt);
         if (data) {
             pl->used |= 1u << sbuf;
-            if (!stream_len(r, sbuf)) {
-                pl->empty |= 1u << sbuf;
-                data = 0;
+        }
+        if (data && (pl->empty & (1u << i))) {
+            if (zbind < 0) {
+                if (k->nbind == maxbind) {
+                    over = 1;
+                    continue;
+                }
+                pl->key[k->nbind] = ~1u;
+                zbind = (int)k->nbind++;
             }
+            k->attr[k->nattr].loc = i;
+            k->attr[k->nattr].binding = (u32)zbind;
+            k->attr[k->nattr].format = fmt;
+            k->attr[k->nattr++].offset = 0;
+            continue;
         }
         if (!data) {
             if (cbind < 0) {
@@ -2479,7 +2516,7 @@ retry:
        same too */
     TargetFormats tf;
     target_formats(rt, zt, n, &tf);
-    if (kept && (memcmp(&tf, &g_draw.tf, sizeof tf) || streams_empty(r, g_draw.plan.used) != g_draw.plan.empty))
+    if (kept && (memcmp(&tf, &g_draw.tf, sizeof tf) || attributes_empty(r, vs->si.in_mask) != g_draw.plan.empty))
         kept = 0;
     PipeKey made_k;
     VertexPlan made_pl;
@@ -2503,7 +2540,7 @@ retry:
     }
     /* each binding's buffer: all of them prefetched first (vk_buf_prefetch), then looked up */
     VkBuffer vbuf[33];
-    VkDeviceSize voff[33];
+    VkDeviceSize voff[33], vsize[33];
     struct {
         u64 gva, len;
         u32 b, base;
@@ -2513,29 +2550,45 @@ retry:
     u64 last_vertex = k->nbind ? draw_last_vertex(ch, indexed, first, count, base_vertex) : ~0ull;
     u64 last_instance = (u64)base_instance + instances - 1;
     for (u32 v = 0; v < k->nbind; v++) {
-        if (pl->key[v] == ~0u) {
+        if (pl->key[v] == ~0u || pl->key[v] == ~1u) {
             /* the constants: staging that fails skips the draw (it once drew without the attributes) */
             if (!frame_consts(&vbuf[v], &voff[v])) {
                 g_vk_skipped++;
                 return;
             }
-            voff[v] += 16;
+            int zero = pl->key[v] == ~1u;
+            voff[v] += zero ? 48 : 16;
+            vsize[v] = zero ? 16 : 32; /* typed zero, or float/integer defaults */
             continue;
         }
         u32 sbuf = pl->key[v] & 31;
         /* up to a power of two of the bytes it reads: the cache keeps a range by its length, and draws of a mesh's parts
            that end at different vertices then share a few ranges, not one each */
-        u64 len = stream_len(r, sbuf), last = k->bind[v].divisor ? last_instance : last_vertex;
+        u64 limit = stream_len(r, sbuf), len = limit;
+        u64 last = k->bind[v].divisor ? last_instance : last_vertex;
         if (pl->stride[v] && last < len / pl->stride[v]) {
             u64 need = (last + 1) * pl->stride[v], up = 4096;
             while (up < need) up <<= 1;
             if (up < len) len = up;
         }
         if (len > (64u << 20)) len = 64u << 20;
+        /* Overlapping records can need the attribute's tail beyond a stride,
+           but never beyond the guest binding's inclusive limit. */
+        len += pl->pad[v] < limit - len ? pl->pad[v] : limit - len;
+        u32 base = pl->key[v] >> 5;
+        if (base >= len) {
+            if (!frame_consts(&vbuf[v], &voff[v])) {
+                g_vk_skipped++;
+                return;
+            }
+            voff[v] += 48;
+            vsize[v] = 0;
+            continue;
+        }
         vq[nvq].gva = stream_start(r, sbuf);
-        vq[nvq].len = len + pl->pad[v];
+        vq[nvq].len = len;
         vq[nvq].b = v;
-        vq[nvq].base = pl->key[v] >> 5;
+        vq[nvq].base = base;
         nvq++;
     }
     for (u32 q = 0; q < nvq; q++) vk_buf_prefetch(vq[q].gva, vq[q].len, 0);
@@ -2547,6 +2600,7 @@ retry:
             return;
         }
         voff[vq[q].b] += vq[q].base;
+        vsize[vq[q].b] = vq[q].len - vq[q].base;
     }
     VkPrimitiveTopology topo = topology_vk(topology);
 
@@ -2568,7 +2622,7 @@ retry:
     int zt_ro = 0;
     u32 fb = 0;
     DrawImages images = {0};
-    VkDescriptorSet vset = stage_set(ch, 0, vs, rt, zt, n, &zt_ro, NULL, NULL, &storage, NULL);
+    VkDescriptorSet vset = stage_set(ch, 0, vs, rt, zt, n, &zt_ro, NULL, NULL, &storage, &images);
     VkDescriptorSet fset = fs ? stage_set(ch, 4, fs, rt, zt, n, &zt_ro, &fb, fres, &storage, &images) : VK_NULL_HANDLE;
     /* the sets of the stages between, at their stage's index (shader_vk_set) */
     between[0] = tcs;
@@ -2846,7 +2900,7 @@ retry:
             rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, (u32)b + 2, 1, &bset[b], 0, NULL);
         }
     if (k->nbind)
-        rec_CmdBindVertexBuffers2(cb, 0, k->nbind, vbuf, voff, NULL, g_vk.has_dynamic_stride ? pl->stride : NULL);
+        rec_CmdBindVertexBuffers2(cb, 0, k->nbind, vbuf, voff, vsize, g_vk.has_dynamic_stride ? pl->stride : NULL);
 
     VkViewport vp = vk_render_viewport(r);
     u32 viewports = last->si.writes_viewport ? GUEST_VIEWPORTS : 1;

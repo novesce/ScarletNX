@@ -57,10 +57,19 @@ char* snx_chunk_label(const SnxCodegen* codegen, size_t first, size_t last) {
                       (unsigned long long)hi, functions, functions == 1 ? "" : "s", instructions);
 }
 
-void snx_report_unit(size_t done, size_t count, const char* name, const char* label, int cached, double seconds) {
+void snx_unit_line(char* out, size_t size, size_t done, size_t count, const char* name, const char* label, int cached,
+                   double seconds, SnxU64 used) {
     if (cached)
-        printf("  compiled block %zu/%zu: %s, %s (cached)\n", done, count, name, label);
+        snprintf(out, size, "  compiled block %zu/%zu: %s, %s (cached)", done, count, name, label);
+    else if (used)
+        snprintf(out, size, "  compiled block %zu/%zu: %s, %s (%.1f s, %llu MiB in use)", done, count, name, label,
+                 seconds, (unsigned long long)(used >> 20));
     else
-        printf("  compiled block %zu/%zu: %s, %s (%.1f s)\n", done, count, name, label, seconds);
+        snprintf(out, size, "  compiled block %zu/%zu: %s, %s (%.1f s)", done, count, name, label, seconds);
+}
+void snx_report_unit(size_t done, size_t count, const char* name, const char* label, int cached, double seconds) {
+    char line[512];
+    snx_unit_line(line, sizeof line, done, count, name, label, cached, seconds, cached ? 0 : snx_footprint());
+    puts(line);
     fflush(stdout);
 }

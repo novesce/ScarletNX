@@ -83,11 +83,16 @@ typedef struct {
 } SnxIrRegisterCache;
 
 /* SSA flags are a per-block forwarding table, not a second CPU state.
-   Every write still commits to the architectural structure immediately. */
+   Every write still commits to the architectural structure immediately. When all four come from a compare (SUBS,
+   ADDS of a constant, ANDS), origin keeps its operands: a condition on them is that compare (ir_flags_cond), which
+   the host's own flags give, not the NZCV values */
+enum { SNX_IR_FLAGS_SOME, SNX_IR_FLAGS_SUB, SNX_IR_FLAGS_ADD, SNX_IR_FLAGS_LOGIC };
 typedef struct {
     LLVMValueRef value[4];
     LLVMBasicBlockRef block;
     unsigned valid;
+    unsigned origin;          /* SNX_IR_FLAGS_*: what all four came from, in this block (SOME: anything) */
+    LLVMValueRef left, right; /* SUB: left - right; ADD: left + right; LOGIC: left, the result */
 } SnxIrFlags;
 
 /* Block-local LLVM SSA snapshots, never guest architectural state. */
@@ -162,6 +167,18 @@ int snx_ir_init(char* error, size_t error_size);
 void snx_ir_slp_vectorizer(int on);
 /* whether it runs: LLVM's own, on, until snx_ir_slp_vectorizer. The caches' keys carry it */
 int snx_ir_slp(void);
+/* Whether the generated code keeps FPSR's cumulative flags (IOC, DZC, OFC, UFC, IXC and QC) as the console raises
+   them (the setting fpsr_flags, on by default): off, the FP fast paths give the console's results and nothing else,
+   the host's IEEE arithmetic wherever the result is not a NaN, the flags only where the helpers run, and saturating
+   instructions leave QC alone. Once per process, before
+   any module is made; the caches' keys carry it */
+void snx_ir_fpsr_flags(int exact);
+int snx_ir_fpsr_exact(void);
+/* Whether the guest's loads and stores are volatile (the setting volatile_memory, off by default): on, LLVM keeps
+   each where the guest has it (ir_state.c's ir_rd). Once per process, before any module is made; the caches' keys
+   carry it */
+void snx_ir_volatile_memory(int on);
+int snx_ir_volatile(void);
 /* opt is the -O letter: 0,1,2,3,s,z */
 SnxIr* snx_ir_new(const char* name, char opt, char* error, size_t error_size);
 /* the same for code the JIT loader loads into this process (code_loader.h): the host's target, CPU and calling
@@ -182,7 +199,7 @@ int snx_ir_object(SnxIr* ir, char opt, unsigned char** data, size_t* size, char*
 /* What makes an object of a module besides its IR, LLVM, the target machine's triple, CPU and features, the -O letter
    and the tuning: new_ir's other target machine settings and what snx_ir_module_object does around LLVM's passes. The
    unit cache's key holds it (unit_cache.c), so a change there that changes the object of the same IR bumps it */
-#define SNX_IR_OBJECT_VERSION 1
+#define SNX_IR_OBJECT_VERSION 3
 /* The same for another module of the SnxIr's context, made with its target and data layout (the A32 executor's
    blocks, common/cpu/arm/exec.c): verified, optimized and compiled with its target machine. The module stays the
    caller's */
@@ -203,6 +220,9 @@ void snx_ir_emit(SnxIr* ir, SnxCodegen* codegen, const SnxFunction* function);
 /* u64 name(CPU* c): one instruction at pc, for a guest with these A64 features (0: the Switch's; tests and audit
    tools) */
 LLVMValueRef snx_ir_static_step(SnxIr* ir, SnxU32 word, SnxU64 pc, SnxU64 features, const char* name);
+/* the emitted function's accesses to the registers in the CPU structure onto locals, which the CPU structure gets
+   back around every call and return (ir_promote.c) */
+void ir_promote_registers(SnxIr* ir, LLVMValueRef fn);
 /* Starts a function body: entry block, c and M */
 void snx_ir_begin(SnxIr* ir, LLVMValueRef function);
 
@@ -288,6 +308,9 @@ LLVMValueRef ir_intrinsic(SnxIr* ir, const char* name, LLVMTypeRef type, LLVMVal
 /* memory effects of a declared function: none (pure), or only memory reached through its pointer arguments */
 void ir_pure(SnxIr* ir, LLVMValueRef function);
 void ir_argmem(SnxIr* ir, LLVMValueRef function);
+/* a helper that takes c but touches none of its registers (X, SP, NZCV, V), only FPCR, FPSR or the exclusive
+   monitor: ir_promote_registers needs the CPU structure to hold none of them around its calls */
+void ir_noregs(SnxIr* ir, LLVMValueRef function);
 /* if (condition) { then() } else { otherwise() }: blocks positioned by the caller */
 LLVMBasicBlockRef ir_block(SnxIr* ir, const char* name);
 /* a stack slot in the entry block, as a C local whose address is taken */

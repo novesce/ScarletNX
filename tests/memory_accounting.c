@@ -2,10 +2,12 @@
    Copyright 2026 the ScarletNX contributors */
 /* Exercise the production memory SVCs and block list without game files. The POSIX backing is sparse, with
    injectable commit failures. Thread/handle/GPU services are stubs, not the code under test. */
+#include "nx/memory/own.h"
 #include "nx/hle/kernel/kernel_int.h"
 #include "nx/hle/hle.h"
 #include "nx/runtime/clock.h"
 #include "nx/gpu/gpu.h"
+#include <errno.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdarg.h>
@@ -37,8 +39,14 @@ u64 plat_vm_page(void) { return host_page; }
 /* aligned to host_page, a page more reserved for that (the unaligned head and tail stay inaccessible) */
 static u8* reservation;
 static u64 reservation_size;
+static u64 refuse_above; /* a system that gives no more than this much address space (0: any) */
 u8* plat_vm_reserve(u64 size) {
-    void* p = mmap(NULL, size + host_page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    void* p;
+    if (refuse_above && size > refuse_above) {
+        errno = ENOMEM;
+        return NULL;
+    }
+    p = mmap(NULL, size + host_page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p == MAP_FAILED) return NULL;
     reservation = (u8*)p;
     reservation_size = size + host_page;
@@ -90,6 +98,10 @@ void plat_alias_host_free(u8* p, u64 size) { (void)p, (void)size; }
 /* memory/own.c and the freeze its pages need: nothing is GPU-owned here */
 void own_acquire(u64 addr, u64 size) { (void)addr, (void)size; }
 void own_drop(u64 addr, u64 size) { (void)addr, (void)size; }
+u32 own_lookup(u64 addr, u64 size, OwnRange* out, u32 max) { /* nothing is the GPU's here */
+    (void)addr, (void)size, (void)out, (void)max;
+    return 0;
+}
 void plat_freeze(u8* p, u64 size) { (void)p, (void)size; }
 void plat_thaw(void) {}
 void gpu_mem_changed(u64 a, u64 size) {
@@ -185,6 +197,58 @@ static void test_heap(void) {
         CHECK(mem_total() == (gb == 4 ? 3285 : gb == 6 ? 4916 : 6964) * MIB);
         CHECK(svc_set_heap_size(3200 * MIB) == 0);
         CHECK(svc_set_heap_size(0) == 0);
+    }
+}
+/* a 32-bit process's GetInfo total is its heap region's size (2 GiB without an alias region), not the application
+   pool's: a title that sets its heap to nearly the total it reads otherwise asks for 3.2 GiB and gets none */
+static void test_heap32(void) {
+    MemLayout saved = g_layout;
+    mem_layout32(2);
+    base_process();
+    g_code_memory = 22 * MIB;
+    CHECK(info(5) == 2ull << 30);
+    CHECK(info(6) == 2ull << 30 && info(7) == 23 * MIB);
+    CHECK(info(21) == 2ull << 30 && info(22) == 23 * MIB);
+    CHECK(svc_set_heap_size(3260 * MIB) == R_OUTOFMEM); /* the pool's total, more than the heap region */
+    CHECK(svc_set_heap_size(2022 * MIB) == 0);          /* what it asks once GetInfo names the heap region */
+    CHECK(svc_set_heap_size(0) == 0);
+    mem_layout32(1); /* with an alias region the heap is 1 GiB */
+    base_process();
+    g_code_memory = 22 * MIB;
+    CHECK(info(5) == 1ull << 30 && info(6) == 1ull << 30 && info(21) == 1ull << 30);
+    CHECK(svc_set_heap_size(3260 * MIB) == R_OUTOFMEM);
+    CHECK(svc_set_heap_size(1000 * MIB) == 0);
+    CHECK(svc_set_heap_size(0) == 0);
+    g_layout = saved;
+}
+/* memory_fit: the game is told the budget the measure leaves, at most Memory (GB)'s, and the console's amount when
+   the system told nothing */
+static void test_fit(void) {
+    base_process();
+    CHECK(mem_fit_budget(3000 * MIB, 300 * MIB) == 2600 * MIB);  /* the rest, at least 700 MiB */
+    CHECK(mem_fit_budget(8000 * MIB, 1000 * MIB) == 7744 * MIB); /* the runtime's 1000, the graphics' 256 */
+    CHECK(mem_fit_budget(100 * MIB, 100 * MIB) == 1024 * MIB);   /* a GiB however little is left */
+    mem_fit(1, 2000 * MIB, 300 * MIB);
+    CHECK(g_hle.svcmem.fit == 1600 * MIB && mem_total() == 1600 * MIB && info(6) == 1600 * MIB);
+    CHECK(svc_set_heap_size(1546 * MIB) == R_LIMIT); /* 56 MiB used: 1544 is the most */
+    CHECK(svc_set_heap_size(1544 * MIB) == 0 && svc_set_heap_size(0) == 0);
+    mem_fit(1, 8000 * MIB, 1000 * MIB); /* more than the console's: the console's */
+    CHECK(mem_total() == 3285 * MIB);
+    g_settings.memory_gb = 8;
+    CHECK(mem_total() == 6964 * MIB);
+    g_settings.memory_gb = 0;
+    mem_fit(0, 0, 0);
+    CHECK(!g_hle.svcmem.fit && mem_total() == 3285 * MIB);
+    { /* a 32-bit process is told the smaller of the budget and its heap region */
+        MemLayout saved = g_layout;
+        mem_layout32(2);
+        base_process();
+        mem_fit(1, 3000 * MIB, 300 * MIB);
+        CHECK(mem_total() == 2600 * MIB && info(6) == 2ull << 30);
+        mem_fit(1, 2000 * MIB, 300 * MIB);
+        CHECK(info(6) == 1600 * MIB && info(21) == 1600 * MIB);
+        mem_fit(0, 0, 0);
+        g_layout = saved;
     }
 }
 static void test_system_resource(void) {
@@ -406,11 +470,7 @@ static void test_shared_memory(void) {
     CHECK(svc_unmap_shm(0x1234, a, 0x2000) == 0);
     CHECK(kshmem_ptr(s) == s->host && s->host[1] == 9 && state(a) == MS_FREE);
     test_handle = NULL;
-    s->o.destroy(&s->o);
-}
-int kobj_never_signaled(KObj* o) {
-    (void)o;
-    return 0;
+    kshmem_destroy(&s->o);
 }
 
 int main(void) {
@@ -428,6 +488,8 @@ int main(void) {
         mapping_begins = mapping_ends = 0; /* test_mapping_boundary's, from the round before */
         mem_init();
         test_heap();
+        test_heap32();
+        test_fit();
         test_system_resource();
         test_rollback();
         test_locked_shrink();
@@ -438,8 +500,20 @@ int main(void) {
         test_mapped_runs();
         test_mapping_boundary(); /* last: every commit after it must be inside a mapping */
         CHECK(munmap(reservation, reservation_size) == 0);
+        g_mem = NULL; /* the next round reserves it again */
         printf("memory accounting with %llu KiB host pages: %u checks passed\n",
                (unsigned long long)(host_page >> 10), checks);
     }
+    /* a system that gives less than the console's 128 GiB: the largest tier it gives, in a layout of that size */
+    host_page = (u64)sysconf(_SC_PAGESIZE);
+    refuse_above = 24ull << 30;
+    mem_reserve();
+    CHECK(g_mem && g_as_size == 24ull << 30 && g_layout.end == 24ull << 30);
+    CHECK(g_layout.alias == 4ull << 30 && g_layout.alias_size == 4ull << 30 && g_layout.heap == 8ull << 30 &&
+          g_layout.heap_size == 8ull << 30 && g_layout.stack == 16ull << 30 && g_layout.stack_size == 2ull << 30 &&
+          g_layout.kern == 23ull << 30 && g_layout.kern_end == 24ull << 30);
+    CHECK(munmap(reservation, reservation_size) == 0);
+    g_mem = NULL;
+    refuse_above = 0;
     return 0;
 }

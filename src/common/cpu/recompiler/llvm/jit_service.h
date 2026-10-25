@@ -116,7 +116,10 @@ void snx_jit_remove_image(SnxJitService* service, SnxU64 base);
 /* Guest memory in [addr, addr+size) changed: what was compiled from it is stale. Its dispatch slots and entries go;
    the next lookup compiles a pc in the range from what is there now, and a compile already running publishes nothing
    for it. The code stays loaded, as a thread may still be running it */
+typedef void (*SnxJitInvalidatedRange)(void* context, SnxU64 start, SnxU64 end);
 void snx_jit_invalidate(SnxJitService* service, SnxU64 addr, SnxU64 size);
+void snx_jit_invalidate_ranges(SnxJitService* service, SnxU64 addr, SnxU64 size, SnxJitInvalidatedRange callback,
+                               void* context);
 
 typedef struct {
     unsigned long batches, compiled, failures; /* compiled, failures: pcs the queues held */

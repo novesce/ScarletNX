@@ -287,9 +287,10 @@ int vita_run(VitaProcess* p, double seconds) {
                 continue;
             }
             report_fault(p, t,
-                         t->cpu.exit == SNX_ARM_UNDEFINED ? "undefined instruction"
+                         t->cpu.exit == SNX_ARM_UNDEFINED    ? "undefined instruction"
                          : t->cpu.exit == SNX_ARM_BREAKPOINT ? "breakpoint"
-                                                              : "unsupported instruction (exit reason in cpsr) word",
+                         : t->cpu.exit == SNX_ARM_IT_ENTRY   ? "Thumb block entered inside an IT block, ITSTATE"
+                                                             : "unsupported instruction (exit reason in cpsr) word",
                          t->cpu.syndrome);
             result = 1;
             goto done;

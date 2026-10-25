@@ -218,8 +218,8 @@ bool snx_ctr_romfs_open(FsTree* tree, SnxCtrRomfs** out) {
     r->dirs = m.dirs;
     r->files = m.files;
     r->meta_size = (size_t)meta_size;
-    unsigned shared = 0, failed = 0;
-    if (fs_tree_share(tree, root, &shared, &failed)) {
+    FsShare share = {0};
+    if (fs_tree_share(tree, root, &share)) {
         free(r);
         goto fail;
     }
@@ -268,7 +268,7 @@ static uint32_t image32(const SnxCtrRomfs* r, uint64_t at) {
     return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
 }
 /* whether path (relative, '/'-separated UTF-8) names an entry of the image's level-3 tables: the root for "", then
-   each component among the folder's child folders, the last also among its files. snx_ctr_cia_open walked the tables
+   each component among the folder's child folders, the last also among its files. The loader walked the tables
    already; the bounds are checked again all the same */
 static bool image_has(const SnxCtrRomfs* r, const char* path) {
     uint32_t dir_table = image32(r, 12), dir_size = image32(r, 16), file_table = image32(r, 28),

@@ -16,7 +16,7 @@ import re
 import subprocess
 import tempfile
 
-from arm_test import CPU, PC, SIZE
+from arm_test import CPU, PC, SIZE, unicorn_dies
 
 
 def catalogue():
@@ -191,8 +191,11 @@ def compare(functions, words, names, states):
     u.ctl_set_cpu_model(A.UC_CPU_ARM_MAX)
     u.mem_map(0, SIZE)
     regs = [getattr(A, f'UC_ARM_REG_R{i}') for i in range(13)] + [A.UC_ARM_REG_SP, A.UC_ARM_REG_LR, A.UC_ARM_REG_PC]
-    total = 0
+    total, left = 0, []
     for index, (word, text) in enumerate(zip(words, names)):
+        if unicorn_dies('arm', [word]):
+            left.append(text)
+            continue
         fn = functions[index]
         for seed in range(states):
             cpu, mem = initial(word, seed)
@@ -221,7 +224,9 @@ def compare(functions, words, names, states):
             )
             assert bytes(mem) == bytes(u.mem_read(0, SIZE)), label + ': memory differs'
             total += 1
-    print(f'  {total} exact comparisons passed ({len(words)} encodings)')
+    print(f'  {total} exact comparisons passed ({len(words) - len(left)} encodings)')
+    if left:
+        print(f'  {len(left)} left to another host, Unicorn 2.1.4 dying on them on this one: {", ".join(left)}')
 
 
 def main():

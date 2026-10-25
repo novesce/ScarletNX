@@ -30,6 +30,7 @@ static const size_t flag_offsets[4] = {offsetof(CPU, n), offsetof(CPU, z), offse
 void ir_flags_invalidate(SnxIr* ir) {
     ir->state.flags.valid = 0;
     ir->state.flags.block = NULL;
+    ir->state.flags.origin = SNX_IR_FLAGS_SOME;
 }
 
 static SnxIrFlags* flags_block(SnxIr* ir) {
@@ -38,6 +39,7 @@ static SnxIrFlags* flags_block(SnxIr* ir) {
     if (flags->block != block) {
         flags->valid = 0;
         flags->block = block;
+        flags->origin = SNX_IR_FLAGS_SOME;
     }
     return flags;
 }
@@ -61,6 +63,13 @@ static void flags_commit(SnxIr* ir, LLVMValueRef n, LLVMValueRef z, LLVMValueRef
         flags->value[i] = bits;
     }
     flags->valid = 15;
+    flags->origin = SNX_IR_FLAGS_SOME;
+}
+
+static void flags_origin(SnxIr* ir, unsigned origin, LLVMValueRef left, LLVMValueRef right) {
+    ir->state.flags.origin = origin;
+    ir->state.flags.left = left;
+    ir->state.flags.right = right;
 }
 
 LLVMValueRef ir_flags_adds(SnxIr* ir, unsigned bits, LLVMValueRef a, LLVMValueRef b, LLVMValueRef cin) {
@@ -75,6 +84,7 @@ LLVMValueRef ir_flags_adds(SnxIr* ir, unsigned bits, LLVMValueRef a, LLVMValueRe
     LLVMValueRef overflow =
         LLVMBuildAnd(ir->b, LLVMBuildNot(ir->b, LLVMBuildXor(ir->b, a, b, ""), ""), LLVMBuildXor(ir->b, a, r, ""), "");
     flags_commit(ir, n, z, ir_bool32(ir, cf), LLVMBuildLShr(ir->b, overflow, sign, ""));
+    if (LLVMIsAConstantInt(cin) && !LLVMConstIntGetZExtValue(cin)) flags_origin(ir, SNX_IR_FLAGS_ADD, a, b);
     return r;
 }
 
@@ -86,6 +96,7 @@ LLVMValueRef ir_flags_subs(SnxIr* ir, unsigned bits, LLVMValueRef a, LLVMValueRe
     flags_commit(ir, LLVMBuildLShr(ir->b, r, sign, ""),
                  ir_bool32(ir, LLVMBuildICmp(ir->b, LLVMIntEQ, r, LLVMConstNull(type), "")),
                  ir_bool32(ir, LLVMBuildICmp(ir->b, LLVMIntUGE, a, b, "")), LLVMBuildLShr(ir->b, overflow, sign, ""));
+    flags_origin(ir, SNX_IR_FLAGS_SUB, a, b);
     return r;
 }
 
@@ -93,6 +104,7 @@ void ir_flags_logic(SnxIr* ir, LLVMValueRef value, unsigned bits) {
     flags_commit(ir, LLVMBuildLShr(ir->b, value, LLVMConstInt(LLVMTypeOf(value), bits - 1, 0), ""),
                  ir_bool32(ir, LLVMBuildICmp(ir->b, LLVMIntEQ, value, LLVMConstNull(LLVMTypeOf(value)), "")),
                  ir_i32(ir, 0), ir_i32(ir, 0));
+    flags_origin(ir, SNX_IR_FLAGS_LOGIC, value, NULL);
 }
 
 void ir_flags_set_nzcv(SnxIr* ir, LLVMValueRef nzcv) {
@@ -103,10 +115,52 @@ void ir_flags_set_nzcv(SnxIr* ir, LLVMValueRef nzcv) {
     flags_commit(ir, n, z, c, LLVMBuildAnd(ir->b, nzcv, one, ""));
 }
 
+/* Condition code (cond >> 1, but AL) on flags a compare gave, as an i1 of that compare: NULL for VS of SUB and ADD
+   and the ones of ADD a variable needs the overflow for. CMN with a constant k other than 0 and the most negative
+   value gives the four flags of CMP with -k (its carry is a + k >= 2^n, so a >= -k; its overflow that of the same
+   sum), and ANDS those of CMP of its result with 0, but for C, which ANDS clears */
+static LLVMValueRef origin_cond(SnxIr* ir, const SnxIrFlags* flags, unsigned code) {
+    LLVMValueRef left = flags->left, right = flags->right, zero;
+    LLVMTypeRef type = LLVMTypeOf(left);
+    unsigned origin = flags->origin, bits = LLVMGetIntTypeWidth(type);
+    static const LLVMIntPredicate sub[7] = {LLVMIntEQ, LLVMIntUGE, LLVMIntSLT, 0, LLVMIntUGT, LLVMIntSGE, LLVMIntSGT};
+    zero = LLVMConstNull(type);
+    if (origin == SNX_IR_FLAGS_ADD && LLVMIsAConstantInt(right)) {
+        SnxU64 k = LLVMConstIntGetZExtValue(right), top = (SnxU64)1 << (bits - 1);
+        if (k != 0 && k != top) {
+            origin = SNX_IR_FLAGS_SUB;
+            right = LLVMConstNeg(right);
+        }
+    }
+    switch (origin) {
+        case SNX_IR_FLAGS_SUB:
+            if (code == 3) return NULL;
+            if (code == 2) return LLVMBuildICmp(ir->b, LLVMIntSLT, LLVMBuildSub(ir->b, left, right, ""), zero, "");
+            return LLVMBuildICmp(ir->b, sub[code], left, right, "");
+        case SNX_IR_FLAGS_ADD: {
+            LLVMValueRef r = LLVMBuildAdd(ir->b, left, right, "");
+            if (code == 0) return LLVMBuildICmp(ir->b, LLVMIntEQ, r, zero, "");
+            if (code == 1) return LLVMBuildICmp(ir->b, LLVMIntULT, r, left, ""); /* the carry out */
+            if (code == 2) return LLVMBuildICmp(ir->b, LLVMIntSLT, r, zero, "");
+            return NULL;
+        }
+        case SNX_IR_FLAGS_LOGIC:
+            if (code == 1 || code == 3 || code == 4) return LLVMConstInt(ir->t_i1, 0, 0); /* C and V are 0 */
+            if (code == 2) return LLVMBuildICmp(ir->b, LLVMIntSLT, left, zero, "");
+            return LLVMBuildICmp(ir->b, sub[code], left, zero, "");
+        default: return NULL;
+    }
+}
+
 LLVMValueRef ir_flags_cond(SnxIr* ir, unsigned cond) {
     unsigned code = cond >> 1;
     if (code == 7) return ir_i32(ir, 1);
     LLVMValueRef r, z, c, n, v;
+    SnxIrFlags* flags = flags_block(ir);
+    if (flags->origin != SNX_IR_FLAGS_SOME && (r = origin_cond(ir, flags, code)) != NULL) {
+        if (cond & 1) r = LLVMBuildNot(ir->b, r, "");
+        return ir_bool32(ir, r);
+    }
     switch (code) {
         case 0: r = LLVMBuildICmp(ir->b, LLVMIntNE, ir_flag_read(ir, 1), ir_i32(ir, 0), ""); break;
         case 1: r = LLVMBuildICmp(ir->b, LLVMIntNE, ir_flag_read(ir, 2), ir_i32(ir, 0), ""); break;
@@ -250,32 +304,36 @@ LLVMValueRef ir_mp(SnxIr* ir, LLVMValueRef address) {
 static LLVMTypeRef int_type(SnxIr* ir, unsigned bits) { return LLVMIntTypeInContext(ir->ctx, bits); }
 /* Guest addresses carry no alignment the host may rely on: the C dereferences of RDn/WRn compile to the same plain
    x86 moves as these align-1 accesses */
-/* Every guest access is volatile: it happens exactly as the guest wrote it, as on the hardware. LLVM may otherwise
-   hoist a load out of a loop that polls memory another thread writes (a relaxed atomic is a plain LDR), or sink a
-   store out of one, now that the alias scopes let it move everything else */
+/* A guest access is volatile only under the setting volatile_memory (snx_ir_volatile_memory): otherwise LLVM may
+   merge two loads of one address, forward a store to a load or drop a store written over, between the barriers and
+   atomics, which are fences and seq_cst accesses. The ARMv8 memory model allows all of that: a load may return what
+   an earlier one of the same address did, and stores may coalesce. A loop that polls memory another thread writes (a
+   relaxed atomic is a plain LDR) keeps its load: every backward branch in a function polls (ir_codegen.c's poll),
+   calling the runtime through a pointer on its cold path, which LLVM must take to write any memory, so it hoists no
+   load out of the loop and sinks no store; a loop through other functions has their calls */
 LLVMValueRef ir_rd(SnxIr* ir, LLVMValueRef address, unsigned bits) {
     LLVMValueRef load = LLVMBuildLoad2(ir->b, int_type(ir, bits), ir_mp(ir, address), "");
     LLVMSetAlignment(load, 1);
-    LLVMSetVolatile(load, 1);
+    LLVMSetVolatile(load, snx_ir_volatile());
     return ir_guest_order(ir, ir_tag_guest(ir, load));
 }
 LLVMValueRef ir_rd_bytes(SnxIr* ir, LLVMValueRef address, unsigned bytes) {
     LLVMValueRef load = LLVMBuildLoad2(ir->b, LLVMVectorType(ir->t_i8, bytes), ir_mp(ir, address), "");
     LLVMSetAlignment(load, 1);
-    LLVMSetVolatile(load, 1);
+    LLVMSetVolatile(load, snx_ir_volatile());
     return ir_tag_guest(ir, load);
 }
 void ir_wr_bytes(SnxIr* ir, LLVMValueRef address, LLVMValueRef value) {
     LLVMValueRef store = LLVMBuildStore(ir->b, value, ir_mp(ir, address));
     LLVMSetAlignment(store, 1);
-    LLVMSetVolatile(store, 1);
+    LLVMSetVolatile(store, snx_ir_volatile());
     ir_tag_guest(ir, store);
 }
 void ir_wr(SnxIr* ir, LLVMValueRef address, unsigned bits, LLVMValueRef value) {
     LLVMValueRef pointer = ir_mp(ir, address);
     LLVMValueRef store = LLVMBuildStore(ir->b, ir_guest_order(ir, ir_cast(ir, value, int_type(ir, bits), 0)), pointer);
     LLVMSetAlignment(store, 1);
-    LLVMSetVolatile(store, 1);
+    LLVMSetVolatile(store, snx_ir_volatile());
     ir_tag_guest(ir, store);
 }
 /* __atomic_load_n/__atomic_store_n on T* (cpu.h LDACQ/STREL): seq_cst, naturally aligned as the C type says */

@@ -59,18 +59,46 @@ int main(void) {
         unsigned x = snx_thumb_decode((uint16_t)i, 0xf800, &a);
         unsigned y = snx_thumb_decode_profile(SNX_ARM_PROFILE_A57, (uint16_t)i, 0xf800, &b);
         assert(x == y && !memcmp(&a, &b, sizeof a));
-        y = snx_thumb_decode_profile(SNX_ARM_PROFILE_ARM7TDMI, (uint16_t)i, 0xf800, &b);
-        assert(x == y && !memcmp(&a, &b, sizeof a));
         y = snx_thumb_decode_profile(SNX_ARM_PROFILE_ARM11, (uint16_t)i, 0xf800, &b);
         assert(y <= TH_F16); /* never accidentally decode Thumb-2 */
         if ((i & 0xff00) == 0xbf00 || ((i & 0xf800) == 0xe800 && (i & 1))) assert(!y);
+        /* ARMv4T, the ARM7TDMI: nothing ARMv5 and ARMv6 added (BLX, its suffix and by register, and the 1011 group
+           past ADD/SUB SP, PUSH and POP); BL's halves apart and the PC-relative load as ARM11's; the rest A57's
+           16-bit Thumb, the forms ARMv6 makes UNPREDICTABLE included, which the ARM7TDMI runs */
+        {
+            SnxThumb c = {0};
+            int later = ((i & 0xf000) == 0xb000 && (i & 0xff00) != 0xb000 && (i & 0xfe00) != 0xb400 &&
+                         (i & 0xfe00) != 0xbc00) ||
+                        (i & 0xf800) == 0xe800 || (i & 0xff80) == 0x4780;
+            unsigned z = snx_thumb_decode_profile(SNX_ARM_PROFILE_ARM7TDMI, (uint16_t)i, 0xf800, &c);
+            if (later)
+                assert(!z);
+            else if (i >= 0xf000)
+                assert(z == 1 && c.shape == TH_LEGACY_BL);
+            else if ((i & 0xf800) == 0x4800)
+                assert(z == 1 && c.shape == TH_LOAD && c.rn == 15);
+            else
+                assert(z == x && (!z || !memcmp(&a, &c, sizeof a))); /* a refusal leaves A57's partly filled */
+        }
     }
     SnxThumb t;
     assert(snx_thumb_decode_profile(SNX_ARM_PROFILE_ARM11, 0xf400, 0xd000, &t) == 1 && t.shape == TH_LEGACY_BL);
     assert(snx_thumb_decode_profile(SNX_ARM_PROFILE_ARM11, 0xf800, 0, &t) == 1 && t.op == 1);
     assert(snx_thumb_decode_profile(SNX_ARM_PROFILE_ARM11, 0xe800, 0, &t) == 1 && t.op == 2);
     assert(snx_thumb_decode_profile(SNX_ARM_PROFILE_ARM11, 0xc903, 0, &t) == 1 && !(t.flags & TH_WB));
-    puts("ARM11 profile and unchanged default decoder witnesses passed");
+    /* the ARM7TDMI: BL's halves apart; BLX, BKPT, CPS, IT and the hints undefined; BX and PUSH as ever */
+    assert(snx_thumb_decode_profile(SNX_ARM_PROFILE_ARM7TDMI, 0xf400, 0xd000, &t) == 1 && t.shape == TH_LEGACY_BL &&
+           !t.op);
+    assert(snx_thumb_decode_profile(SNX_ARM_PROFILE_ARM7TDMI, 0xf800, 0, &t) == 1 && t.op == 1);
+    assert(!snx_thumb_decode_profile(SNX_ARM_PROFILE_ARM7TDMI, 0xe800, 0, &t));
+    assert(!snx_thumb_decode_profile(SNX_ARM_PROFILE_ARM7TDMI, 0x4788, 0, &t));     /* BLX r1 */
+    assert(!snx_thumb_decode_profile(SNX_ARM_PROFILE_ARM7TDMI, 0xbe00, 0, &t));     /* BKPT */
+    assert(!snx_thumb_decode_profile(SNX_ARM_PROFILE_ARM7TDMI, 0xb662, 0, &t));     /* CPSIE i */
+    assert(!snx_thumb_decode_profile(SNX_ARM_PROFILE_ARM7TDMI, 0xbf08, 0, &t));     /* IT EQ */
+    assert(!snx_thumb_decode_profile(SNX_ARM_PROFILE_ARM7TDMI, 0xbf00, 0, &t));     /* NOP */
+    assert(snx_thumb_decode_profile(SNX_ARM_PROFILE_ARM7TDMI, 0x4708, 0, &t) == 1); /* BX r1 */
+    assert(snx_thumb_decode_profile(SNX_ARM_PROFILE_ARM7TDMI, 0xb510, 0, &t) == 1 && t.shape == TH_PUSHPOP);
+    puts("ARM11 and ARM7TDMI profiles and unchanged default decoder witnesses passed");
     /* The Cortex-A9's stores with writeback into the register they store (llvm-mc -mcpu=cortex-a9, which warns that
        they are UNPREDICTABLE): str r0, [r0, #28]!; strb r1, [r1], #4; strh r2, [r2, #-2]!; str r3, [r3, r4]!. A57
        rejects them; a load into its base with writeback, and STRD, stay rejected */

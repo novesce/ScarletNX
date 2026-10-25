@@ -68,12 +68,12 @@ char* snx_ctr_game_file(const char* directory, const char* suffix);
 /* The title's module (snx_ctr_game_file's SNX_CTR_MODULE_SUFFIX) is compiled when it is missing, when it no longer loads or matches the
    image (an older build, a changed .code), or when SNX_CTR_RECOMPILE asks, then run unless SNX_CTR_COMPILE_ONLY: until
    the game exits or its window closes, for limit blocks when limit is not 0, or for seconds when it is above 0. The title is the extraction in
-   directory, or with cia the CIA read where it lies, directory then its state folder. The module is
+   directory, or with game the game read where it lies, directory then its state folder. The module is
    trusted as code the driver compiled itself, never as a sandbox. */
 enum { SNX_CTR_RECOMPILE = 1, SNX_CTR_COMPILE_ONLY = 2 };
 /* ipc_stubs: the services whose unknown commands answer success instead of stopping when the ctr_auto_stub_ipc setting
    is off (snx_ctr_ipc_stub_mask). runtime: the program copied into the folder as the game's own once its module is
    ready (snx_ctr_game_file's name, .exe on Windows), NULL for none */
-int snx_ctr_aot_run(const char* directory, const SnxCtrCia* cia, SnxCtrModel model, uint64_t limit, double seconds,
+int snx_ctr_aot_run(const char* directory, const SnxCtrSource* game, SnxCtrModel model, uint64_t limit, double seconds,
                     unsigned flags, uint32_t ipc_stubs, const char* runtime, char* error, size_t error_size);
 #endif

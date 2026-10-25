@@ -116,6 +116,7 @@ int gui_settings_read(GuiSettings* s, const char* runtime) {
         if (*field[8]) words = words_of(field[8], &free_words, &values);
         v = row(s, field[0], field[1], field[7], field[6], words, words ? GUI_KEY_WORD : GUI_KEY_TEXT);
         v->values = values;
+        v->type_text = !strcmp(field[3], "text");
         v->fallback = v->def = field[2];
         for (w = 1; words && words[w]; ++w) /* the word of the default's value */
             if (!strcmp(values ? values[w] : words[w], field[2])) v->fallback = words[w];
@@ -322,6 +323,50 @@ static int own_on(const GuiSettings* s, const char* key) {
     int i = find(s, key);
     const char* value = i < s->own ? picked(s, i) : NULL;
     return value && !strcmp(value, "on");
+}
+/* a and b the same value: the same number when both are one, else the same text */
+static int same_value(const char* a, const char* b) {
+    char *a_end, *b_end;
+    double x = strtod(a, &a_end), y = strtod(b, &b_end);
+    if (a_end != a && !*a_end && b_end != b && !*b_end) return x == y;
+    return !strcmp(a, b);
+}
+/* row i in the Debug section, or a page of it */
+static int debug_row(const GuiSettings* s, int i) {
+    const char* section = s->keys[i].section;
+    return !s->values[i].kind && section && !strncmp(section, "Debug", 5) && (!section[5] || section[5] == '/');
+}
+int gui_settings_debug(const GuiSettings* s, const char* ini, int picks, char* out, size_t size) {
+    size_t at = 0, bytes;
+    char *text = ini ? (char*)snx_read_file(ini, &bytes) : NULL, *key, *value;
+    const char** file = s->count ? (const char**)calloc((size_t)s->count, sizeof *file) : NULL; /* by row */
+    int count = 0, i;
+    SnxIni lines;
+    if (size) out[0] = 0;
+    if (text && file) {
+        snx_ini_start(&lines, text);
+        while (snx_ini_next(&lines, &key, &value))
+            if ((i = find(s, key)) < s->count) file[i] = value; /* the last one's, as the runtime reads it */
+    }
+    for (i = 0; i < s->count; ++i) {
+        const char* now = picks ? picked(s, i) : NULL;
+        const GuiSetting* v = &s->values[i];
+        if (!debug_row(s, i) || !v->def) continue;
+        if (!now) now = file && file[i] ? file[i] : v->def;
+        if (same_value(now, v->def)) continue;
+        if (at < size && v->type_text)
+            at += (size_t)snprintf(out + at, size - at, "%s%s", count ? ", " : "", v->key);
+        else if (at < size)
+            at += (size_t)snprintf(out + at, size - at, "%s%s=%s", count ? ", " : "", v->key, now);
+        ++count;
+    }
+    if (picks && own_on(s, "gdbstub")) {
+        if (at < size) snprintf(out + at, size - at, "%sgdbstub", count ? ", " : "");
+        ++count;
+    }
+    free(file);
+    free(text);
+    return count;
 }
 const char* gui_settings_tmpfs(const GuiSettings* s) { return own_on(s, "tmpfs") ? "--tmpfs" : NULL; }
 const char* gui_settings_extract(const GuiSettings* s) { return own_on(s, "extract") ? "--extract-container" : NULL; }

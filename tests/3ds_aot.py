@@ -12,14 +12,16 @@ import subprocess
 import sys
 import tempfile
 
-from ctr_fixtures import cia, ncch, put
+from ctr_fixtures import cia, ncsd, ncch, put
 
 
 # a guest's bad access: the checked bus's fault, or the flat space's host fault (memory/host.c) where the host has one
 FAULT = ('guest fault', 'guest data abort')
 
 
-def application(words=None, raw=None, text_size=None, ro=None):
+def application_ncch(words=None, raw=None, text_size=None, ro=None):
+    """the game's NCCH: its .code the words (or raw bytes) padded to pages, with the read-only and data words
+    behind the text"""
     if raw is None:
         raw = struct.pack('<' + 'I' * len(words), *words)
     size = text_size if text_size is not None else len(raw)
@@ -38,7 +40,16 @@ def application(words=None, raw=None, text_size=None, ro=None):
             put(ex, 0x20, '<I', 0x2000000)
             put(ex, 0x30, '<I', 0x3000000)
 
-    return cia(application=ncch(code_blob=bytes(code), patch_exheader=header))
+    return ncch(code_blob=bytes(code), patch_exheader=header)
+
+
+def application(words=None, raw=None, text_size=None, ro=None):
+    return cia(application=application_ncch(words, raw, text_size, ro))
+
+
+def cartridge(words=None, raw=None, text_size=None, ro=None):
+    """the same game as application's, in a cartridge image"""
+    return ncsd(game=application_ncch(words, raw, text_size, ro))
 
 
 def ipc_program(wait=False):
@@ -271,10 +282,10 @@ def main():
     with tempfile.TemporaryDirectory(prefix='snx-ctr-aot-') as temp:
         root = Path(temp)
 
-        def run(blob, status=0, message='Guest ExitProcess', extra=()):
+        def run(blob, status=0, message='Guest ExitProcess', extra=(), extension='cia'):
             nonlocal cases
             cases += 1
-            source, output = root / f'input {cases};literal.cia', root / f'out {cases};literal'
+            source, output = root / f'input {cases};literal.{extension}', root / f'out {cases};literal'
             source.write_bytes(blob)
             p = subprocess.run(
                 [driver, *extra, '--output', str(output), str(source)], text=True, capture_output=True, timeout=90
@@ -508,6 +519,19 @@ def main():
         if readelf:
             deps = subprocess.check_output([readelf, '-d', str(module_of(workload))], text=True)
             assert 'LLVM' not in deps and 'scarletnx' not in deps
+        # A cartridge image plays the same game: its first run compiles, and that module then serves the CIA of the
+        # same game, as the image is the game's ExHeader and code, whichever container named them
+        card_out, text = run(
+            cartridge([0xE3A0002A, 0xEF000003]), message='Guest ExitProcess: r0=42 blocks=2', extension='cci'
+        )
+        assert 'Recompiling ARM11' in text
+        card = root / f'input {cases};literal.cci'  # the image run() just played
+        same = root / f'same {cases};literal.cia'
+        same.write_bytes(application([0xE3A0002A, 0xEF000003]))
+        p = subprocess.run([driver, '--output', str(card_out), str(same)], text=True, capture_output=True, timeout=90)
+        assert p.returncode == 0 and 'r0=42' in p.stdout and 'Recompiling' not in p.stdout, p.stdout + p.stderr
+        p = subprocess.run([driver, '--output', str(card_out), str(card)], text=True, capture_output=True, timeout=90)
+        assert p.returncode == 0 and 'r0=42' in p.stdout and 'Recompiling' not in p.stdout, p.stdout + p.stderr
     print(f'CTR end-to-end static AOT: {cases} pipelines, native ABI mutations and image identity checks passed')
 
 

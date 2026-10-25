@@ -4,6 +4,7 @@
 
 type nn::account::ProfileDigest = bytes<0x10>;
 type nn::account::profile::UserData = bytes<0x80>;
+type nn::account::NasUserBaseForApplication = bytes<0x68>;
 type nn::account::profile::ProfileBase = struct {
     nn::account::Uid uid;
     u64 last_edit_timestamp;
@@ -47,6 +48,10 @@ interface nn::account::baas::IManagerForApplication {
     [1] GetAccountId() -> nn::account::NetworkServiceAccountId id;
     [2] EnsureIdTokenCacheAsync() -> object<nn::account::detail::IAsyncContext> context;
     @stub [3] LoadIdTokenCache(buffer<u8, 6> token) -> u32 size;
+    # the online account's cached user resource: NasUserBaseForApplication (0x68 bytes) and a second buffer, both
+    # nought (none of its details is known here), and the account's id
+    [130] GetNintendoAccountUserResourceCacheForApplication(buffer<nn::account::NasUserBaseForApplication, 0x1a> base,
+                                                            buffer<u8, 6> extra) -> u64 id;
     @stub [160] StoreOpenContext();
 }
 

@@ -163,7 +163,7 @@ static int windows_arena(SnxCodeLoader* loader, char* error, size_t error_size) 
    until then). Every thread runs code from it, and only the loading thread sees it writable, while it writes a load
    (snx_code_writable): to the others the read-only data stays read-only, and no thread can write and run the code at
    once. Data is ordinary private memory mapped over the mapping's end, made read-write as loads reach it. An app
-   without the hardened runtime, as the ad hoc signed ScarletNX.app is (scripts/apple-app.sh), needs no entitlement for
+   without the hardened runtime, as the ad hoc signed ScarletNX.app is (cmake/apple_package.cmake), needs no entitlement for
    MAP_JIT and may have several such mappings, one per loader; with it, com.apple.security.cs.allow-jit allows one. 0,
    or -1 with the reason in error */
 static int apple_arena(SnxCodeLoader* loader, char* error, size_t error_size) {
@@ -350,11 +350,24 @@ SnxCodeLoader* snx_code_loader_new(size_t reserve, char* error, size_t error_siz
     return snx_code_loader_new_machine(reserve, HOST_MACHINE, error, error_size);
 }
 
-static SnxCodeLoader* new_loader(size_t reserve, unsigned machine, uint64_t toc, int shared, char* error,
-                                 size_t error_size);
+static SnxCodeLoader* new_loader(size_t reserve, const size_t* sizes, unsigned machine, uint64_t toc, int shared,
+                                 char* error, size_t error_size);
 
 SnxCodeLoader* snx_code_loader_new_machine(size_t reserve, unsigned machine, char* error, size_t error_size) {
-    return new_loader(reserve, machine, 0, 0, error, error_size);
+    return new_loader(reserve, NULL, machine, 0, 0, error, error_size);
+}
+
+SnxCodeLoader* snx_code_loader_new_regions(const size_t size[3], char* error, size_t error_size) {
+    if (!HOST_MACHINE) {
+        snprintf(error, error_size, "the JIT loader runs on x86-64, AArch64 and PowerPC64 hosts");
+        return NULL;
+    }
+    return snx_code_loader_new_regions_machine(size, HOST_MACHINE, error, error_size);
+}
+
+SnxCodeLoader* snx_code_loader_new_regions_machine(const size_t size[3], unsigned machine, char* error,
+                                                   size_t error_size) {
+    return new_loader(0, size, machine, 0, 0, error, error_size);
 }
 
 #if defined(__powerpc64__)
@@ -393,7 +406,7 @@ SnxCodeLoader* snx_code_loader_new_toc(size_t reserve, SnxU64 toc, char* error, 
     if (!reserve) reserve = SNX_CODE_ARENA_DEFAULT;
     /* the module and what the system mapped near it may leave less room in reach: a smaller arena then */
     for (; !loader && reserve >= ((size_t)1 << 26); reserve /= 2)
-        loader = new_loader(reserve, HOST_MACHINE, toc, 1, error, error_size);
+        loader = new_loader(reserve, NULL, HOST_MACHINE, toc, 1, error, error_size);
     return loader;
 #else
     (void)toc;
@@ -401,23 +414,49 @@ SnxCodeLoader* snx_code_loader_new_toc(size_t reserve, SnxU64 toc, char* error, 
 #endif
 }
 
-static SnxCodeLoader* new_loader(size_t reserve, unsigned machine, uint64_t toc, int shared, char* error,
-                                 size_t error_size) {
+/* The arena of sizes' regions (snx_code_loader_new_regions), or of reserve bytes in snx_code_loader_new's shares when
+   sizes is NULL */
+static SnxCodeLoader* new_loader(size_t reserve, const size_t* sizes, unsigned machine, uint64_t toc, int shared,
+                                 char* error, size_t error_size) {
     SnxCodeLoader* loader;
-    size_t page = snx_vm_page_size();
+    size_t page = snx_vm_page_size(), size[REGIONS];
     int i;
-    if (!reserve) {
-        reserve = SNX_CODE_ARENA_DEFAULT;
+    if (sizes) {
+        /* whole pages, at Windows' 64 KiB allocation granularity, where views of a section go (windows_arena); a region
+           of none still maps one unit */
+        size_t unit = page > ((size_t)1 << 16) ? page : (size_t)1 << 16;
+        reserve = 0;
+        for (i = 0; i < REGIONS && sizes[i] <= (size_t)1 << 31; ++i) {
+            size[i] = (sizes[i] ? (sizes[i] + unit - 1) / unit : 1) * unit;
+            reserve += size[i];
+        }
+        if (i < REGIONS || reserve > (size_t)1 << 31) {
+            snprintf(error, error_size,
+                     "a code arena holds at most 2 GiB, so 32-bit displacements reach across it: %.1f MiB of code, "
+                     "%.1f MiB of read-only data and %.1f MiB of data asked",
+                     (double)sizes[CODE] / 1048576.0, (double)sizes[RODATA] / 1048576.0,
+                     (double)sizes[DATA] / 1048576.0);
+            return NULL;
+        }
+    } else {
+        if (!reserve) {
+            reserve = SNX_CODE_ARENA_DEFAULT;
 #ifdef IOS_JIT
-        /* address space and the debugger's preparing time (4 s a GiB) are scarce on a device, and the code the JIT
-           adds to a game's is small (17 KiB in a minute of one game) */
-        reserve = (size_t)1 << 27;
+            /* address space and the debugger's preparing time (4 s a GiB) are scarce on a device, and the code the JIT
+               adds to a game's is small (17 KiB in a minute of one game) */
+            reserve = (size_t)1 << 27;
 #endif
-    }
-    if (reserve <= (size_t)1 << 31) reserve = (reserve + 8 * page - 1) / (8 * page) * (8 * page); /* whole pages */
-    if (reserve > (size_t)1 << 31) {
-        snprintf(error, error_size, "a code arena holds at most 2 GiB, so 32-bit displacements reach across it");
-        return NULL;
+        }
+        if (reserve <= (size_t)1 << 31) reserve = (reserve + 8 * page - 1) / (8 * page) * (8 * page); /* whole pages */
+        if (reserve > (size_t)1 << 31) {
+            snprintf(error, error_size, "a code arena holds at most 2 GiB, so 32-bit displacements reach across it");
+            return NULL;
+        }
+        /* code is most of what a unit holds. Read-only data is its jump tables, constants, function table and GOT,
+           and generated code writes no data of its own (nor does the runtime library) */
+        size[CODE] = reserve / 8 * 5;
+        size[RODATA] = reserve / 8 * 2;
+        size[DATA] = reserve - size[CODE] - size[RODATA];
     }
     if (!can_publish(machine, error, error_size)) return NULL;
     loader = (SnxCodeLoader*)calloc(1, sizeof(*loader));
@@ -428,13 +467,11 @@ static SnxCodeLoader* new_loader(size_t reserve, unsigned machine, uint64_t toc,
     loader->reserved = reserve;
     loader->page = page;
     loader->machine = machine;
-    /* code is most of what a unit holds. Read-only data is its jump tables, constants, function table and GOT, and
-       generated code writes no data of its own (nor does the runtime library) */
-    loader->region[CODE].size = reserve / 8 * 5;
-    loader->region[RODATA].start = loader->region[CODE].size;
-    loader->region[RODATA].size = reserve / 8 * 2;
-    loader->region[DATA].start = loader->region[RODATA].start + loader->region[RODATA].size;
-    loader->region[DATA].size = reserve - loader->region[DATA].start;
+    loader->region[CODE].size = size[CODE];
+    loader->region[RODATA].start = size[CODE];
+    loader->region[RODATA].size = size[RODATA];
+    loader->region[DATA].start = size[CODE] + size[RODATA];
+    loader->region[DATA].size = size[DATA];
 #ifdef _WIN32
     (void)i;
     if (windows_arena(loader, error, error_size)) {
@@ -675,11 +712,17 @@ void snx_code_writable(int writable) {
    x86-64: jmp *slot(%rip) through the symbol's GOT slot, and two int3 to the next stub (8 bytes), for a symbol
    outside the arena. AArch64: an elf_object.c veneer (12 bytes), for any table symbol, since B and BL reach 128 MiB
    and the arena is larger: direct (ADRP, ADD) to one in the arena, indirect through its GOT slot (ADRP, LDR) to one
-   outside, which ADRP's 4 GiB may not reach */
+   outside, which ADRP's 4 GiB may not reach. An AArch64 load of SNX_ELF_VENEER_TEXT or more, a game's whole code, has
+   no stub area, which a call at its far end would not reach: each object has the same veneers in an island after its
+   code, to the table and to the other objects' definitions, as the AOT linker gives them (island_stub) */
 #define STUB_SIZE_X86 8
 /* where each load's code starts: a line no running code shares, so writing it never touches a line another core may
    be executing from */
 #define CODE_LINE     64
+/* the stub area's alignment, after a load's code */
+#define STUB_ALIGN    8
+/* a GOT slot: a 64-bit address, 8-aligned */
+#define GOT_SLOT      8
 
 /* One snx_code_load call. Addresses are absolute, the arena's [arena_start, arena_end) */
 typedef struct {
@@ -689,8 +732,11 @@ typedef struct {
     SnxLinkNames globals; /* the unit's own: name -> object << 32 | symbol index */
     SnxLinkNames got;     /* "object:symbol" of a unit definition, or "@address" of a table symbol -> GOT slot */
     SnxLinkNames stubs;   /* "@address" of a table symbol that a call may not reach -> stub */
+    SnxLinkNames veneer;  /* "object|key" (veneer_key) of a call that may not reach its target -> the object's veneer */
+    int islands;          /* AArch64 code of SNX_ELF_VENEER_TEXT or more: veneers in each object's island, no stubs */
     size_t got_count, stub_count;
     uint64_t arena_start, arena_end, got_address, stub_address;
+    uint64_t text_address; /* where the load's code starts, which each object's island is an offset from */
     uint64_t toc; /* PowerPC64's: the loader's */
     unsigned abi; /* PowerPC64's: SNX_ELF_PPC_ELFV1 or ELFV2 */
 } Load;
@@ -710,10 +756,8 @@ typedef struct {
 
 static uint64_t align_up(uint64_t value, uint64_t alignment) { return (value + alignment - 1) / alignment * alignment; }
 
-static uint64_t stub_size(const Load* ld) {
-    return ld->machine == EM_AARCH64 ? SNX_ELF_VENEER_SIZE
-           : ld->machine == EM_PPC64 ? SNX_ELF_PPC_VENEER_SIZE
-                                     : STUB_SIZE_X86;
+static uint64_t stub_size(unsigned machine) {
+    return machine == EM_AARCH64 ? SNX_ELF_VENEER_SIZE : machine == EM_PPC64 ? SNX_ELF_PPC_VENEER_SIZE : STUB_SIZE_X86;
 }
 
 #define at        snx_code_at
@@ -763,11 +807,16 @@ static int resolve(const SnxCodeLoader* loader, const Load* ld, size_t object, s
 
 /* Whether a call to t may need a stub: on x86-64 one outside the arena (inside, rel32 reaches across it); on AArch64
    any table symbol, earlier loads' included, since the arena is larger than B's reach. The unit's own definitions are
-   in reach of its calls, the unit being far smaller than 128 MiB */
+   in reach of its calls below SNX_ELF_VENEER_TEXT; a larger AArch64 load has veneers instead (scan) */
 static int may_need_stub(const Load* ld, const Target* t) {
     if (ld->machine == EM_AARCH64 || ld->machine == EM_PPC64) return t->key[0] == '@';
     return t->far;
 }
+
+/* A call's veneer key in a load with islands: the calling object's index, then t's key. 21 bytes and Target's key
+   (with its NUL) hold it */
+#define VENEER_KEY (21 + sizeof(((Target*)0)->key))
+static void veneer_key(char* key, size_t object, const Target* t) { sprintf(key, "%zu|%s", object, t->key); }
 
 /* Section number section when it holds the relocations of a loaded section, which the two passes walk; else NULL */
 static const Elf64_Shdr* relocations(const SnxElfObject* o, size_t section) {
@@ -776,12 +825,93 @@ static const Elf64_Shdr* relocations(const SnxElfObject* o, size_t section) {
     return s;
 }
 
-/* First pass: the GOT slots and stubs the unit needs. A stub that jumps through a GOT slot gets one */
+/* What snx_elf_layout and a load's start take at most of one kind of the objects' sections: each with its alignment's
+   padding, and the kind's start at its largest alignment. A section or alignment past 4 GiB, which no arena holds,
+   makes it 1 TiB, which the sums of snx_code_need hold and new_loader refuses */
+static uint64_t kind_need(const SnxElfObject* objs, size_t count, int kind) {
+    const uint64_t huge = (uint64_t)1 << 32;
+    uint64_t total = 0, top = 1, align;
+    size_t i, j;
+    for (i = 0; i < count; ++i)
+        for (j = 0; j < objs[i].eh->e_shnum; ++j)
+            if (objs[i].kind[j] == kind) {
+                align = objs[i].sh[j].sh_addralign ? objs[i].sh[j].sh_addralign : 1;
+                if (objs[i].sh[j].sh_size > huge || align > huge) return (uint64_t)1 << 40;
+                total += objs[i].sh[j].sh_size + align - 1;
+                if (align > top) top = align;
+                if (total > huge) return (uint64_t)1 << 40;
+            }
+    return total + top - 1;
+}
+
+/* An object's calls get at most a stub or veneer per symbol they name (scan: one per target, of the object's or of
+   the load), and its calls and GOT references a GOT slot per symbol: two of its symbols may resolve to one target,
+   never one to two */
+int snx_code_need(const SnxLinkInput* inputs, size_t count, size_t need[3], char* error, size_t error_size) {
+    SnxElfObject* objs = (SnxElfObject*)calloc(count ? count : 1, sizeof(*objs));
+    unsigned char* seen = NULL; /* per symbol of an object: 1 once a stub is counted for it, 2 once a GOT slot is */
+    uint64_t calls = 0, slots = 0;
+    unsigned machine = 0, abi = 0;
+    size_t i, j, k, most = 1;
+    int rc = -1;
+    if (!objs) {
+        snprintf(error, error_size, "out of memory");
+        return -1;
+    }
+    for (i = 0; i < count; ++i) {
+        if (snx_elf_parse(&objs[i], &inputs[i], &machine, &abi, error, error_size)) goto done;
+        if (objs[i].nsyms > most) most = objs[i].nsyms;
+    }
+    seen = (unsigned char*)malloc(most);
+    if (!seen) {
+        snprintf(error, error_size, "out of memory");
+        goto done;
+    }
+    for (i = 0; i < count; ++i) {
+        const SnxElfObject* o = &objs[i];
+        memset(seen, 0, most);
+        for (j = 0; j < o->eh->e_shnum; ++j) {
+            const Elf64_Shdr* s = relocations(o, j);
+            const Elf64_Rela* r;
+            if (!s) continue;
+            r = (const Elf64_Rela*)(o->input->data + s->sh_offset);
+            for (k = 0; k < s->sh_size / sizeof(Elf64_Rela); ++k) {
+                unsigned type = ELF64_R_TYPE(r[k].r_info);
+                size_t symbol = ELF64_R_SYM(r[k].r_info);
+                int call = snx_elf_call_relocation(machine, type);
+                if (!symbol || symbol >= o->nsyms) continue; /* nothing to reach, or what the load refuses (resolve) */
+                if (call && !(seen[symbol] & 1)) {
+                    seen[symbol] |= 1;
+                    ++calls;
+                }
+                if ((call || snx_elf_got_relocation(machine, type)) && !(seen[symbol] & 2)) {
+                    seen[symbol] |= 2;
+                    ++slots;
+                }
+            }
+        }
+    }
+    /* the code from a new line, up to 3 bytes an object to align its island of veneers where it has one
+       (snx_elf_layout), then the stub area; the GOT after the read-only data; the bss after the data */
+    need[CODE] = (size_t)(kind_need(objs, count, SNX_ELF_TEXT) + CODE_LINE + 3 * (uint64_t)count + STUB_ALIGN +
+                          stub_size(machine) * calls);
+    need[RODATA] = (size_t)(kind_need(objs, count, SNX_ELF_RODATA) + GOT_SLOT + GOT_SLOT * slots);
+    need[DATA] = (size_t)(kind_need(objs, count, SNX_ELF_DATA) + kind_need(objs, count, SNX_ELF_BSS));
+    rc = 0;
+done:
+    for (i = 0; i < count; ++i) snx_elf_free(&objs[i]);
+    free(objs);
+    free(seen);
+    return rc;
+}
+
+/* First pass: the GOT slots and stubs the unit needs, or with islands each object's veneers, which snx_elf_layout
+   places. A stub or veneer that jumps through a GOT slot gets one */
 static int scan(const SnxCodeLoader* loader, Load* ld, char* error, size_t error_size) {
     size_t i, j, k, n, slot;
     Target t;
     for (i = 0; i < ld->count; ++i) {
-        const SnxElfObject* o = &ld->objs[i];
+        SnxElfObject* o = &ld->objs[i];
         for (j = 0; j < o->eh->e_shnum; ++j) {
             const Elf64_Shdr* s = relocations(o, j);
             const Elf64_Rela* r;
@@ -807,6 +937,14 @@ static int scan(const SnxCodeLoader* loader, Load* ld, char* error, size_t error
                         return -1;
                     }
                     if (!snx_link_find(&ld->got, t.key, &slot)) snx_link_insert(&ld->got, t.key, ld->got_count++);
+                } else if (ld->islands && snx_elf_call_relocation(ld->machine, type) && t.key[0] &&
+                           (!t.here || t.def_object != i)) {
+                    /* to the table or another object: the object's own call to its own code reaches it */
+                    char key[VENEER_KEY];
+                    veneer_key(key, i, &t);
+                    if (!snx_link_find(&ld->veneer, key, &slot)) snx_link_insert(&ld->veneer, key, o->veneers++);
+                    if (t.far && !snx_link_find(&ld->got, t.key, &slot))
+                        snx_link_insert(&ld->got, t.key, ld->got_count++);
                 } else if (snx_elf_call_relocation(ld->machine, type) && may_need_stub(ld, &t) &&
                            !snx_link_find(&ld->stubs, t.key, &slot)) {
                     snx_link_insert(&ld->stubs, t.key, ld->stub_count++);
@@ -824,7 +962,7 @@ static uint64_t got_slot(const SnxCodeLoader* loader, const Load* ld, const Targ
     size_t slot = 0;
     uint64_t address;
     snx_link_find(&ld->got, t->key, &slot);
-    address = ld->got_address + 8 * (uint64_t)slot;
+    address = ld->got_address + GOT_SLOT * (uint64_t)slot;
     snx_link_put64(at(loader, address), t->address);
     return address;
 }
@@ -837,7 +975,7 @@ static int call_stub(const SnxCodeLoader* loader, const Load* ld, const Target* 
     uint64_t address, slot;
     unsigned char* s;
     if (!t->key[0] || !snx_link_find(&ld->stubs, t->key, &index)) return SNX_LINK_RANGE;
-    address = ld->stub_address + stub_size(ld) * (uint64_t)index;
+    address = ld->stub_address + stub_size(ld->machine) * (uint64_t)index;
     s = at(loader, address);
     slot = t->far ? got_slot(loader, ld, t) : 0;
     if (ld->machine == EM_AARCH64) {
@@ -850,6 +988,22 @@ static int call_stub(const SnxCodeLoader* loader, const Load* ld, const Target* 
     snx_link_rel32(s + 2, slot, address + 6); /* both in the arena: in reach */
     /* PLT32's addend is the call's own, its displacement's distance from the next instruction */
     return snx_elf_relocate(ld->machine, p, room, type, address, A, P, ld->got_address, 0);
+}
+
+/* The call at p (address P, addend A) from object caller to t, which it cannot reach, in a load with islands: through
+   the caller's veneer to t, in the island after the caller's code, which all of that code reaches. 0, or
+   SNX_LINK_RANGE when t has no veneer */
+static int island_stub(const SnxCodeLoader* loader, const Load* ld, size_t caller, const Target* t, unsigned char* p,
+                       int64_t A, uint64_t P) {
+    char key[VENEER_KEY];
+    size_t index;
+    uint64_t veneer;
+    if (A || !t->key[0]) return SNX_LINK_RANGE; /* the veneer goes to the symbol itself, shared by the object's calls */
+    veneer_key(key, caller, t);
+    if (!snx_link_find(&ld->veneer, key, &index)) return SNX_LINK_RANGE;
+    veneer = ld->text_address + ld->objs[caller].island + SNX_ELF_VENEER_SIZE * (uint64_t)index;
+    return snx_elf_branch_veneer(p, P, at(loader, veneer), veneer, t->far ? got_slot(loader, ld, t) : t->address,
+                                 t->far);
 }
 
 /* PowerPC64's call (REL24, REL14) of relocation type at p (address P, addend A) to t: to its entry point, which keeps
@@ -882,8 +1036,8 @@ static int ppc_call(const SnxCodeLoader* loader, const Load* ld, const Target* t
     written = veneer ? SNX_LINK_RANGE : snx_elf_relocate(EM_PPC64, p, room, type, local, 0, P, ld->toc, 0);
     if (written != SNX_LINK_RANGE || type != SNX_PPC_REL24 || !t->key[0] || !snx_link_find(&ld->stubs, t->key, &index))
         return written;
-    return snx_elf_ppc_branch_veneer(p, P, at(loader, ld->stub_address + stub_size(ld) * (uint64_t)index),
-                                     ld->stub_address + stub_size(ld) * (uint64_t)index, global, ld->toc);
+    return snx_elf_ppc_branch_veneer(p, P, at(loader, ld->stub_address + stub_size(ld->machine) * (uint64_t)index),
+                                     ld->stub_address + stub_size(ld->machine) * (uint64_t)index, global, ld->toc);
 }
 
 /* Second pass: every relocation of the unit, written into its placed sections */
@@ -917,7 +1071,8 @@ static int relocate(const SnxCodeLoader* loader, const Load* ld, char* error, si
                         written = snx_elf_relocate(ld->machine, p, room, type, t.address, r[k].r_addend, P,
                                                    ld->machine == EM_PPC64 ? ld->toc : ld->got_address, slot);
                         if (written == SNX_LINK_RANGE && snx_elf_call_relocation(ld->machine, type))
-                            written = call_stub(loader, ld, &t, p, room, type, r[k].r_addend, P);
+                            written = ld->islands ? island_stub(loader, ld, i, &t, p, r[k].r_addend, P)
+                                                  : call_stub(loader, ld, &t, p, room, type, r[k].r_addend, P);
                     }
                 }
                 if (written == SNX_LINK_OUTSIDE) {
@@ -997,18 +1152,21 @@ static int load(SnxCodeLoader* loader, const SnxLinkInput* inputs, size_t count,
             snprintf(error, error_size, "symbol %s is not defined", names[i]);
             goto done;
         }
+    ld.islands = ld.machine == EM_AARCH64 && snx_elf_text_size(ld.objs, count) >= SNX_ELF_VENEER_TEXT;
     if (scan(loader, &ld, error, error_size)) goto done;
-    /* the unit's parts, each at its region's next free byte: [code, stubs] [read-only data, GOT] [data, bss] */
+    /* the unit's parts, each at its region's next free byte: [code with its islands, stubs] [read-only data, GOT]
+       [data, bss] */
     snx_elf_layout(ld.objs, count, kind_size, kind_align);
     start[CODE] =
         align_up(next_free(loader, CODE), kind_align[SNX_ELF_TEXT] > CODE_LINE ? kind_align[SNX_ELF_TEXT] : CODE_LINE);
     kind_address[SNX_ELF_TEXT] = start[CODE];
-    ld.stub_address = align_up(start[CODE] + kind_size[SNX_ELF_TEXT], 8);
-    end[CODE] = ld.stub_address + stub_size(&ld) * (uint64_t)ld.stub_count;
+    ld.text_address = start[CODE];
+    ld.stub_address = align_up(start[CODE] + kind_size[SNX_ELF_TEXT], STUB_ALIGN);
+    end[CODE] = ld.stub_address + stub_size(ld.machine) * (uint64_t)ld.stub_count;
     start[RODATA] = align_up(next_free(loader, RODATA), kind_align[SNX_ELF_RODATA]);
     kind_address[SNX_ELF_RODATA] = start[RODATA];
-    ld.got_address = align_up(start[RODATA] + kind_size[SNX_ELF_RODATA], 8);
-    end[RODATA] = ld.got_address + 8 * (uint64_t)ld.got_count;
+    ld.got_address = align_up(start[RODATA] + kind_size[SNX_ELF_RODATA], GOT_SLOT);
+    end[RODATA] = ld.got_address + GOT_SLOT * (uint64_t)ld.got_count;
     start[DATA] = align_up(next_free(loader, DATA), kind_align[SNX_ELF_DATA]);
     kind_address[SNX_ELF_DATA] = start[DATA];
     kind_address[SNX_ELF_BSS] = align_up(start[DATA] + kind_size[SNX_ELF_DATA], kind_align[SNX_ELF_BSS]);
@@ -1077,6 +1235,7 @@ done:
     snx_link_names_free(&ld.globals);
     snx_link_names_free(&ld.got);
     snx_link_names_free(&ld.stubs);
+    snx_link_names_free(&ld.veneer);
     return rc;
 }
 int snx_code_load(SnxCodeLoader* loader, const SnxLinkInput* inputs, size_t count, const char* const* names,
@@ -1103,6 +1262,11 @@ int snx_code_load_private(SnxCodeLoader* loader, const SnxLinkInput* inputs, siz
                           size_t name_count, SnxU64* addresses, char* error, size_t error_size) {
     (void)loader, (void)inputs, (void)count, (void)names, (void)name_count, (void)addresses;
     snprintf(error, error_size, "the JIT loader loads COFF objects with their globals published");
+    return -1;
+}
+int snx_code_need(const SnxLinkInput* inputs, size_t count, size_t need[3], char* error, size_t error_size) {
+    (void)inputs, (void)need;
+    snprintf(error, error_size, "the JIT loader reads COFF objects on Windows: %zu ELF objects not sized", count);
     return -1;
 }
 #endif

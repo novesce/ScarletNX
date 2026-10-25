@@ -12,7 +12,7 @@ add_library(snx_vita_usse STATIC gpu/usse.c)
 target_link_libraries(snx_vita_usse PUBLIC scarletnx-common)
 add_executable(snx-vita-usse "${PROJECT_SOURCE_DIR}/tools/snx_vita_usse.c")
 target_link_libraries(snx-vita-usse PRIVATE snx_vita_usse)
-set_target_properties(snx-vita-usse PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+set_target_properties(snx-vita-usse PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}")
 
 add_library(snx_vita_program STATIC
     aot/compiler.c aot/load.c
@@ -77,7 +77,7 @@ else()
     add_executable(scarletnx-vita runtime/main.c)
     target_link_libraries(scarletnx-vita PRIVATE snx_vita_program)
     set_target_properties(scarletnx-vita PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+        RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}")
     target_compile_options(scarletnx-vita PRIVATE -Wall -Wextra -Werror=missing-prototypes)
     if(SNX_DEPLOY AND NOT (SNX_TEST_SANITIZERS AND BUILD_TESTING))
         add_custom_command(TARGET scarletnx-vita POST_BUILD

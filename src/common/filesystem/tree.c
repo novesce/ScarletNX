@@ -675,26 +675,48 @@ FsTreeResult fs_tree_mtime(FsTree* tree, const FsNode* node, uint64_t* unix_ms) 
 #endif
     return FS_TREE_OK;
 }
-FsTreeResult fs_tree_share(FsTree* tree, FsNode* node, unsigned* shared, unsigned* failed) {
+/* node, a regular file, mapped within share's limits: FS_TREE_OK whether it was or not (counted in share), else the
+   error of its path. fd stored last, with release order, for fs_tree_mapped */
+static FsTreeResult share_file(FsTree* tree, FsNode* node, FsShare* share) {
+    const uint8_t* map;
+    int fd;
+    if ((share->files && share->shared >= share->files) ||
+        (share->bytes && node->size > share->bytes - share->mapped_bytes)) {
+        share->skipped++;
+        return FS_TREE_OK;
+    }
+    char path[FS_TREE_PATH_MAX];
+    FsTreeResult rc = fs_tree_path(tree, node, path, sizeof path);
+    if (rc) return rc;
+    if (plat_file_share(path, node->size, &fd, &map))
+        share->failed++;
+    else {
+        node->map = map;
+        __atomic_store_n(&node->fd, fd, __ATOMIC_RELEASE);
+        share->shared++;
+        share->mapped_bytes += node->size;
+    }
+    return FS_TREE_OK;
+}
+FsTreeResult fs_tree_share(FsTree* tree, FsNode* node, FsShare* share) {
     if (!belongs_to(tree, node)) return FS_TREE_NOTFOUND;
     node->readonly = 1;
     if (node->is_dir) {
         for (FsNode* child = node->children; child; child = child->next) {
-            FsTreeResult rc = fs_tree_share(tree, child, shared, failed);
+            FsTreeResult rc = fs_tree_share(tree, child, share);
             if (rc) return rc;
         }
         return FS_TREE_OK;
     }
-    if (node->is_virtual || node->fd >= 0) return FS_TREE_OK;
-    char path[FS_TREE_PATH_MAX];
-    FsTreeResult rc = fs_tree_path(tree, node, path, sizeof path);
-    if (rc) return rc;
-    if (plat_file_share(path, node->size, &node->fd, &node->map))
-        (*failed)++;
-    else
-        (*shared)++;
-    return FS_TREE_OK;
+    if (node->is_virtual || node->fd >= 0 || share->lazy) return FS_TREE_OK;
+    return share_file(tree, node, share);
 }
+int fs_tree_map(FsTree* tree, FsNode* node, FsShare* share) {
+    if (node->fd >= 0) return 0;
+    if (node->is_dir || node->is_virtual || !node->readonly || !node->attached || !belongs_to(tree, node)) return -1;
+    return share_file(tree, node, share) || node->fd < 0 ? -1 : 0;
+}
+int fs_tree_mapped(const FsNode* node) { return __atomic_load_n(&node->fd, __ATOMIC_ACQUIRE) >= 0; }
 
 /* whether name is one of names (NULL-terminated, or NULL for none) */
 static int named(const char* const* names, const char* name) {
@@ -702,8 +724,8 @@ static int named(const char* const* names, const char* name) {
         if (!strcmp(names[i], name)) return 1;
     return 0;
 }
-/* The initial scan uses native directory APIs because PDir cannot distinguish end-of-directory from failures,
-   and its POSIX implementation follows symlinks and skips failed stats. Neither behavior can build a full index.
+/* The initial scan uses native directory APIs: a full index has to tell the end of a folder from a failure to read
+   it, and must not follow symlinks or skip entries whose stat failed.
    host's entries named in skipped are left out, as if they weren't there; its folders' are all scanned */
 static FsTreeResult scan_directory(FsTree* tree, FsNode* parent, char* host, unsigned depth,
                                    const char* const* skipped) {

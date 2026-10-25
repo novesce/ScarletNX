@@ -8,6 +8,7 @@
 #define _DARWIN_C_SOURCE /* libproc's types, which the POSIX name above hides */
 #endif
 #include "gui/gui_process.h"
+#include "common/utilities/common.h"
 #include "gui/i18n.h"
 #include <dirent.h>
 #include <errno.h>
@@ -243,6 +244,7 @@ static bool driver_start(GuiProcess* process, const char* const* argv, char* err
     fflush(NULL);
     if (dup2(output[1], STDOUT_FILENO) < 0 || dup2(output[1], STDERR_FILENO) < 0) goto failed;
     atomic_store(&process->done, 0);
+    snx_abort_request(0);
     if (pthread_attr_init(&attributes) || pthread_attr_setstacksize(&attributes, GUI_DRIVER_STACK) ||
         pthread_create(&process->thread, &attributes, driver_thread, process)) {
         dup2(process->saved[0], STDOUT_FILENO);
@@ -496,7 +498,10 @@ bool gui_process_low(GuiProcess* process, bool low, char* error, size_t size) {
 void gui_process_terminate(GuiProcess* process) {
     if (!process) return;
 #ifdef GUI_DRIVER_THREAD
-    return; /* a thread cannot be killed: the driver runs to its end, which the menu waits for */
+    /* a thread cannot be killed: the driver is asked to stop (the recompiler looks between its units), and the menu
+       waits for it to end */
+    snx_abort_request(1);
+    return;
 #endif
     if (process->pid) {
         /* Freeze the session before killing it, so a compiler cannot fork a new

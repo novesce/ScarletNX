@@ -61,6 +61,7 @@ def main():
         'HidNpadControllerColor': 'NpadControllerColor',
         'HidNpadFullKeyColorState': 'NpadFullKeyColorState',
         'HidNpadJoyColorState': 'NpadJoyColorState',
+        'HidNpadCondition': 'NpadCondition',
         'HidKeyboardState': 'KeyboardState',
         'HidMouseState': 'MouseState',
         'HidDebugPadState': 'DebugPadState',
@@ -84,6 +85,7 @@ def main():
     offsets('HidNpadCommonStateAtomicStorage', sampling_number=0, state=8)
     offsets('HidCommonLifoHeader', unused=0, buffer_count=8, tail=16, count=24)
     offsets('HidNpadCommonState', sampling_number=0, buttons=8, analog_stick_l=16, analog_stick_r=24, attributes=32)
+    offsets('HidNpadCondition', is_initialized=4, hold_type=8, is_valid=12)
     offsets('HidSixAxisSensorState', acceleration=16, direction=16 + 3 * 12, attributes=16 + 6 * 12)
     offsets('HidTouchScreenState', count=8, touches=16)
     # TouchState: u64 delta_time, u32 attribute, u32 finger, a Point<u32>, two u32 diameters, s32 rotation_angle.
@@ -122,6 +124,9 @@ def main():
         if field:
             offsets('HidSharedMemory', **{field: position})
         position += sizes[reference]
+    # 0x19e0 reserved, the debug mouse, 0x200 reserved, then the global condition
+    position += 0x19E0 + sizes['MouseSharedMemoryFormat'] + 0x200
+    offsets('HidSharedMemory', npad_condition=position)
 
     offsets(
         'HidNpadInternalState',

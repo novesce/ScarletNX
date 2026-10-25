@@ -5,6 +5,7 @@
 #include "gui/main.c"
 #define SNX_SCREEN_TEST "gui_sdl.c"
 #include "gui_screen.h"
+#include "common/cpu/aarch64/cpu.h" /* SNX_ABI, which a save state names */
 #include <assert.h>
 #ifdef _WIN32
 #include "win32_crash.h"
@@ -340,6 +341,13 @@ static void focus_game(App* app, const char* name) {
     app->browser.selected = app->browser.head + i % app->browser.page_size;
 }
 static void finish(App* app, int status) {
+    /* the fake driver's game run waits for this, so the menu has shown it running before it ends: without it the
+       process could exit before the test's first pump, which made compile_first fail now and then */
+    const char* argv_file = getenv("SNX_TEST_ARGV");
+    char* go = argv_file ? snx_format("%s.go", argv_file) : NULL;
+    if (go) {
+        assert(!snx_write_file(go, "", 0));
+    }
     assert(app->menu.running && !app->finished && !app->aborting && !app->abnormal_exit);
     int selected = app->menu.selected;
     Uint64 until = SDL_GetTicks() + 10000;
@@ -380,6 +388,10 @@ static void finish(App* app, int status) {
     /* the item the run was started from has the focus again */
     assert(app->menu.selected == selected && setting_is(app, "fullscreen", "1"));
     render(app);
+    if (go) {
+        remove(go);
+        free(go);
+    }
 }
 /* the queue's recompile running, through to its end as pump reads it: how it ended (OK for status 0, else FAILED) on its
    row, its output kept; then ESC on the Recompile tab, back to Games, the line seen and gone with the tab, and the menu
@@ -955,6 +967,11 @@ static char* built_in_settings(void) {
     return snx_strdup("Display\tfullscreen\t0\tint\t0\t1\t1 = start in fullscreen\t\t0=0|1=1\n"
                       "Network\tbuilt_in\t0\tint\t0\t1\tOne the program's own list has\t\t0=Off|1=On\n");
 }
+/* a runtime's list with a Debug row, for the games run with one off its default */
+static char* debug_settings(void) {
+    return snx_strdup("Display\tfullscreen\t0\tint\t0\t1\t1 = start in fullscreen\t\t0=0|1=1\n"
+                      "Debug\tlog\t1\tint\t0\t2\tThe log's detail\tLog level\t0=0|1=1|2=2\n");
+}
 static int SDLCALL hang(void* unused) {
     (void)unused;
     for (;;) SDL_Delay(100);
@@ -1306,10 +1323,18 @@ static void grid_view(App* app, const char* temporary) {
     key(app, SDLK_V);
     render(app);
     shows(app, "- View          < List >", normal);
-    hides(app, "Icon size", normal); /* the grid's alone */
+    /* Icon size, the grid's: still there in the list, greyed, Enter on it saying why and changing nothing (#614) */
+    shows(app, "- Icon size     < Medium >", rgb(app->theme.soft));
     {
-        int shown_rows[GUI_VIEW_BOX_ROWS];
-        assert(view_rows(app, shown_rows) == GUI_VIEW_BOX_ROWS - 1 && shown_rows[4] == GUI_VIEW_SIDE);
+        int shown_rows[GUI_VIEW_BOX_ROWS], icons = app->options[GUI_OPTION_ICONS];
+        assert(view_rows(app, shown_rows) == GUI_VIEW_BOX_ROWS && shown_rows[GUI_OPTION_ICONS] == GUI_OPTION_ICONS &&
+               shown_rows[GUI_VIEW_BOX_ROWS - 1] == GUI_VIEW_SIDE);
+        app->options_focus = GUI_OPTION_ICONS;
+        key(app, SDLK_RETURN);
+        assert(app->options[GUI_OPTION_ICONS] == icons && !games_grid(app) &&
+               !strcmp(app->message, "Icon size is the grid's: View is List"));
+        app->options_focus = 0;
+        app->message[0] = 0;
     }
     for (int i = 0; i < 3; ++i) key(app, SDLK_DOWN);
     key(app, SDLK_RETURN);
@@ -2704,153 +2729,6 @@ static void recompile_queue(App* app) {
     }
     go_tab(app, GUI_TAB_MENU);
 }
-/* a game opened that no game of the library was made from: its first compile in the queue, the Compile tab showing it.
-   It plays once it ended while the tab still shows it; sent away from the tab first, the tips say it is ready instead
-   (DraVee's pick, 2026-10-24) */
-static void compile_first(App* app, const char* dir) {
-    char *dump = snx_path_join(dir, "first compile.nsp"), *got = snx_path_join(dir, "driver argv"), *made, *argv_got;
-    Uint64 until;
-    assert(!snx_write_file(dump, "fixture", 7) && !app->queue.count);
-    assert(gui_settings_set(&app->settings, "fullscreen", "1")); /* as finish() reads a run's */
-    go_tab(app, GUI_TAB_MENU);
-    app->menu.selected = GUI_SWITCH;
-    driver_will(got, 0, "Recompiling first compile");
-    launch(app, snx_strdup(dump), false);
-    assert(!app->menu.running && gui_queue_running(&app->queue) == 0 && app->queue.job[0].kind == GUI_JOB_COMPILE);
-    assert(app->menu.view == GUI_LOAD_RECOMPILE && tab_shown(app) == GUI_TAB_RECOMPILE && tab_reads(app, "Compile"));
-    made = made_game(app, dump, "first compile"); /* as its driver leaves it, before the menu sees it end */
-    for (until = SDL_GetTicks() + 10000; !app->menu.running && SDL_GetTicks() < until; SDL_Delay(2)) pump(app);
-    assert(app->queue.job[0].state == GUI_JOB_OK && app->menu.running && app->menu.selected == GUI_SWITCH);
-    argv_got = ran(app, 0); /* the game it made, played */
-    assert(strstr(argv_got, made) && !has_arg(argv_got, "-r", NULL));
-    free(argv_got);
-    queue_drop(app, 0);
-    assert(!snx_remove_tree(made));
-    free(made);
-    /* away from the tab before it ended: nothing plays, the tips say it is ready, Enter then plays it */
-    launch(app, snx_strdup(dump), false);
-    assert(app->queue.job[0].kind == GUI_JOB_COMPILE && app->menu.view == GUI_LOAD_RECOMPILE);
-    key(app, SDLK_TAB);
-    assert(app->menu.view != GUI_LOAD_RECOMPILE);
-    made = made_game(app, dump, "first compile");
-    for (until = SDL_GetTicks() + 10000; app->queue.job[0].state < GUI_JOB_OK && SDL_GetTicks() < until; SDL_Delay(2))
-        pump(app);
-    assert(app->queue.job[0].state == GUI_JOB_OK && !app->menu.running);
-    assert(!strcmp(app->message, "first compile: compiled, Enter on it plays it"));
-    remove(got);
-    queue_drop(app, 0);
-    made_gone(app, made);
-    /* made already in a folder of the Library's recompiled ones, where a recompile keeps it: opening the dump asks,
-       naming the game and its folder, Play first. Back does nothing, Recompile queues it as R does, Play runs it */
-    {
-        char *library = snx_path_join(dir, "library recompiled"), *games_was = app->games_dir, expected[1024];
-        app->games_dir = library; /* made_game's place, for the game alone */
-        made = made_game(app, dump, "first compile");
-        app->games_dir = games_was;
-        folder_keep(app, library, GUI_LIBRARY_RECOMPILED, false);
-        go_tab(app, GUI_TAB_MENU);
-        launch(app, snx_strdup(dump), false);
-        snprintf(expected, sizeof expected, "first compile is compiled already, in %s", made);
-        assert(app->confirm.shown && app->confirm.ask == GUI_ASK_MADE && !launched(app));
-        assert(!strcmp(app->ask_line, expected));
-        key(app, SDLK_ESCAPE);
-        assert(!app->confirm.shown && !launched(app) && !app->made_file);
-        launch(app, snx_strdup(dump), false);
-        key(app, SDLK_DOWN);
-        key(app, SDLK_RETURN); /* Recompile */
-        assert(!app->menu.running && app->queue.job[0].kind == GUI_JOB_RECOMPILE);
-        argv_got = ran(app, 0);
-        assert(has_arg(argv_got, "-r", dump));
-        free(argv_got);
-        launch(app, snx_strdup(dump), false);
-        key(app, SDLK_RETURN); /* Play: the dump, its driver playing the game made */
-        assert(app->menu.running && !app->queue.count);
-        argv_got = ran(app, 0);
-        assert(strstr(argv_got, dump) && !has_arg(argv_got, "-r", NULL));
-        free(argv_got);
-        /* made by another build (its stamp another ABI's): Play compiles the dump in the queue first, as a first
-           compile does, -r and the dump, and plays the game once it ended while the tab shows it */
-        {
-            char *base = snx_path_join(made, "first compile"), *stamp = snx_format("%s.abi", base),
-                 *other = snx_game_stamp_for(SNX_ABI + 1, ""), *program;
-            const char* job_argv[GUI_QUEUE_ARGS];
-            int n, k;
-#ifdef _WIN32
-            program = snx_format("%s.exe", base);
-#else
-            program = snx_strdup(base);
-#endif
-            assert(!snx_write_file(stamp, other, strlen(other)));
-            launch(app, snx_strdup(dump), false);
-            key(app, SDLK_RETURN); /* Play */
-            assert(!app->menu.running && app->queue.count == 1 && app->queue.job[0].kind == GUI_JOB_COMPILE);
-            assert(app->menu.view == GUI_LOAD_RECOMPILE && tab_reads(app, "Compile"));
-            n = gui_queue_argv(&app->queue, 0, job_argv);
-            for (k = 1; k + 1 < n && strcmp(job_argv[k], "-r"); ++k) continue;
-            assert(k + 1 < n && !strcmp(job_argv[k + 1], dump));
-            stamp_here(made, "first compile"); /* as the driver's -r leaves it */
-            for (until = SDL_GetTicks() + 10000; !app->menu.running && SDL_GetTicks() < until; SDL_Delay(2)) pump(app);
-            assert(app->queue.job[0].state == GUI_JOB_OK && app->menu.running && app->queue.count == 1);
-            argv_got = ran(app, 0); /* the game's program, played */
-            assert(strstr(argv_got, program) && !has_arg(argv_got, "-r", NULL));
-            free(argv_got);
-            queue_drop(app, 0);
-            free(program);
-            free(other);
-            free(stamp);
-            free(base);
-        }
-        free(app->folders[--app->folder_count]); /* off the list, no screen of Folders opened for it */
-        assert(!snx_remove_tree(library));
-        free(made);
-        free(library);
-    }
-    /* a game of the library another build made (its stamp another ABI's): opened, it compiles in the queue as a first
-       compile does, -r and its program, and plays once it ended while the tab shows it. A compile that left the stamp
-       as it was plays it all the same, once, with no second compile */
-    for (int kept = 0; kept < 2; ++kept) {
-        char *base, *stamp, *other = snx_game_stamp_for(SNX_ABI + 1, ""), *program;
-        const char* job_argv[GUI_QUEUE_ARGS];
-        int n, k;
-        made = made_game(app, dump, "first compile");
-        base = snx_path_join(made, "first compile");
-        stamp = snx_format("%s.abi", base);
-#ifdef _WIN32
-        program = snx_format("%s.exe", base);
-#else
-        program = snx_strdup(base);
-#endif
-        assert(!snx_write_file(stamp, other, strlen(other)));
-        go_tab(app, GUI_TAB_MENU);
-        app->menu.selected = GUI_SWITCH;
-        driver_will(got, 0, "Recompiling first compile");
-        launch(app, snx_strdup(program), true);
-        assert(!app->menu.running && app->queue.count == 1 && app->queue.job[0].kind == GUI_JOB_COMPILE &&
-               app->queue.job[0].native);
-        assert(app->menu.view == GUI_LOAD_RECOMPILE && tab_shown(app) == GUI_TAB_RECOMPILE &&
-               tab_reads(app, "Compile"));
-        n = gui_queue_argv(&app->queue, 0, job_argv);
-        for (k = 1; k + 1 < n && strcmp(job_argv[k], "-r"); ++k) continue;
-        assert(k + 1 < n && !strcmp(job_argv[k + 1], program));
-        if (!kept) stamp_here(made, "first compile"); /* as the driver's -r leaves it */
-        for (until = SDL_GetTicks() + 10000; !app->menu.running && SDL_GetTicks() < until; SDL_Delay(2)) pump(app);
-        assert(app->queue.job[0].state == GUI_JOB_OK && app->menu.running && app->native && app->queue.count == 1);
-        argv_got = ran(app, 0); /* the game's program, played */
-        assert(strstr(argv_got, program) && !has_arg(argv_got, "-r", NULL));
-        free(argv_got);
-        queue_drop(app, 0);
-        made_gone(app, made);
-        free(program);
-        free(other);
-        free(stamp);
-        free(base);
-    }
-    driver_will(NULL, 0, NULL);
-    assert(!remove(dump));
-    go_tab(app, GUI_TAB_MENU);
-    free(got);
-    free(dump);
-}
 /* the fake driver's wait for the test: until path is there (taken), ten seconds at most */
 static void wait_taken(const char* path) {
     for (int n = 0; n < 2000 && !snx_is_file(path); ++n) SDL_Delay(5);
@@ -2930,10 +2808,19 @@ int main(int argc, char** argv) {
     if (argc > 1 && getenv("SNX_TEST_ARGV")) {
         /* a driver doing what the test asked (driver_will): its argv kept, a string a line, for the test to check */
         FILE* kept = fopen(getenv("SNX_TEST_ARGV"), "wb"); /* "\n" alone, as has_arg reads, on Windows too */
+        int compiling = 0, status;
+        for (int i = 1; i < argc; ++i) compiling |= !strcmp(argv[i], "-r");
         for (int i = 0; kept && i < argc; ++i) fprintf(kept, "%s\n", argv[i]);
         assert(kept && !fclose(kept));
         puts(getenv("SNX_TEST_SAY") ? getenv("SNX_TEST_SAY") : "the fake driver ran");
-        return getenv("SNX_TEST_STATUS") ? atoi(getenv("SNX_TEST_STATUS")) : 0;
+        status = getenv("SNX_TEST_STATUS") ? atoi(getenv("SNX_TEST_STATUS")) : 0;
+        if (!compiling) { /* a game: let the menu show it running, then the test's finish lets it end */
+            char* go = snx_format("%s.go", getenv("SNX_TEST_ARGV"));
+            for (int n = 0; n < 100 && !snx_is_file(go); ++n) SDL_Delay(5);
+            remove(go);
+            free(go);
+        }
+        return status;
     }
     if (argc == 3 && !strcmp(argv[1], "--fullscreen=1") && !strcmp(argv[2], "--controls=0")) {
         puts("prepared game stdout");
@@ -2953,6 +2840,13 @@ int main(int argc, char** argv) {
         assert(strstr(argv[0], "runtime") && snx_is_file(argv[1 + r]));
         assert(!strcmp(argv[argc - 2], "--data") && argv[argc - 1][0]);
         puts("ScarletNX - an update");
+        return 0;
+    }
+    if (strstr(argv[0], "0100ABCD12350000")) { /* a game played from its save state, slot 1: its own program */
+        int i, found = 0;
+        for (i = 1; i < argc; i++) found |= !strncmp(argv[i], "--state_load=0:", 15) && strstr(argv[i], ".1.snxstate");
+        assert(found);
+        puts("ScarletNX - a save state");
         return 0;
     }
     if (argc > 2 && !strcmp(argv[1], "-r") && strstr(argv[2], "folder game")) { /* R on it: recompiled, not played */
@@ -3206,7 +3100,7 @@ int main(int argc, char** argv) {
     key(&app, SDLK_RIGHT);
     assert(app.menu.selected == GUI_3DS);
     render(&app);
-    shows(&app, "- Load 3DS CIA", yellow);
+    shows(&app, "- Load 3DS game", yellow);
     shows(&app, "- Load Switch NSP/XCI/NRO", normal);
     key(&app, SDLK_RIGHT);
     assert(app.menu.selected == GUI_VITA);
@@ -3483,7 +3377,8 @@ int main(int argc, char** argv) {
     shows(&app, "- Overlay", normal); /* the runtime's On-screen controls */
     hides(&app, "On-screen controls", normal);
     shows(&app, "- User", normal);
-    shows(&app, "Reset to Defaults", normal); /* App's last row, beside: none among the groups */
+    /* App's last row, beside: none among the groups; greyed, every setting at its default (#614) */
+    shows(&app, "Reset to Defaults", rgb(app.theme.soft));
     hides(&app, "\x1e", rgb(app.theme.soft)); /* every row shows: no arrows */
     hides(&app, "\x1f", rgb(app.theme.soft));
     key(&app, SDLK_DOWN);
@@ -3493,12 +3388,12 @@ int main(int argc, char** argv) {
     assert(app.form == GUI_FORM_SETTINGS);
     key(&app, SDLK_RETURN);
     /* a group's settings on the right, a row each with its help in the tips; the group named over them */
-    /* gdbstub, Extract to tmpfs, Extract dump, Optimization level, AOT threads, Unit cache limit, the
+    /* gdbstub, Extract to tmpfs, Extract dump, Optimization level, AOT threads, Unit size, Unit cache limit, the
        LLVM Internals page and Tracy capture, whose row a launcher without SNX_TRACY does not list */
     int tracy = 0;
     for (int i = 0; i < app.settings.own; i++)
         if (!strcmp(app.settings.values[i].key, "tracy_capture")) tracy = 1;
-    assert(app.form == GUI_FORM_GROUP && app.group == 1 && app.editor.count == 7 + tracy);
+    assert(app.form == GUI_FORM_GROUP && app.group == 1 && app.editor.count == 8 + tracy);
     render(&app);
     shows(&app, "Launch", normal);
     shows_half(&app, "Enables gdbstub", normal); /* in the tips */
@@ -3656,7 +3551,8 @@ int main(int argc, char** argv) {
         shows(&app, "- App", yellow); /* the group open, as focused while its rows have the focus */
         snprintf(line, sizeof line, "- %-20s %s", "Theme", first); /* past Background recompile, the longest */
         shows(&app, line, yellow);
-        shows(&app, "- UI scale             Auto", normal);
+        shows(&app, "- UI scale", normal); /* its slider, the size at the row's end (#613) */
+        shows(&app, "Auto", normal);
         shows(&app, "- Language             Auto: English", normal); /* SDL_PREFERRED_LOCALES, the test's */
         shows(&app, "- Theme Editor", normal);
         /* under the rows, the three folders Folders moves, whole: the extractions too */
@@ -3681,17 +3577,44 @@ int main(int argc, char** argv) {
             app.work_dir = work;
             app_values(&app);
         }
-        shows(&app, "- Clean Old Settings", normal);
+        shows(&app, "- Clean Old Settings", rgb(app.theme.soft)); /* nothing to clean here: greyed (#614) */
         hides(&app, "- Layout", normal);
+        { /* a row with nothing to do greyed, still there (#614): Move Old Files with nothing left, Clean Old Settings
+             with nothing to clean; something to do, F5 looking again, in ink; Enter on a greyed one says why */
+            size_t size = 0;
+            char *was = (char*)snx_read_file(app.app_file, &size), *old;
+            int row = app.editor.row;
+            assert(!app.lefts);
+            shows(&app, "- Move Old Files", rgb(app.theme.soft));
+            app.editor.row = GUI_APP_CLEAN;
+            key(&app, SDLK_RETURN);
+            assert(!app.confirm.shown && strstr(app.editor.note, "Nothing to clean"));
+            app.lefts = 1;
+            old = snx_format("%s[app]\nan_old_key = 1\n", was ? was : "");
+            assert(!snx_write_file(app.app_file, old, strlen(old)));
+            app.editor.row = row; /* off them, so they read in ink */
+            key(&app, SDLK_F5);
+            render(&app);
+            shows(&app, "- Move Old Files", normal);
+            shows(&app, "- Clean Old Settings", normal);
+            assert(!snx_write_file(app.app_file, was ? was : "", was ? size : 0));
+            app.lefts = 0;
+            app.clean_found = -1;
+            app.editor.row = row;
+            app.editor.note[0] = 0;
+            render(&app);
+            free(old);
+            free(was);
+        }
         key(&app, SDLK_RIGHT);
         assert(strcmp(app.theme.name, first) && !strcmp(app.app_form.theme, app.theme.name));
         key(&app, SDLK_LEFT);
         assert(!strcmp(app.theme.name, first));
     }
     key(&app, SDLK_DOWN);
-    /* UI scale: its sizes in a box, Auto's parts first; the one picked is used at once and asked about: Keep keeps it,
-       Back, ESC or no answer in 15 s bring the one before it back */
-    key(&app, SDLK_RIGHT);
+    /* UI scale: its sizes in a box Enter opens, Auto's parts first; the one picked is used at once and asked about:
+       Keep keeps it, Back, ESC or no answer in 15 s bring the one before it back */
+    key(&app, SDLK_RETURN);
     assert(app.sizes_shown && app.sizes.count == GUI_TEXT_MAX + 4 && app.sizes.focus == 3 && !app.menu.text_size);
     render(&app);
     { /* the pointer over a size: its focus; a click off the box closes it, nothing taken */
@@ -3703,7 +3626,7 @@ int main(int argc, char** argv) {
         assert(app.sizes_shown && app.sizes.focus == 5 && !app.menu.text_size);
         mouse_px(&app, c.box.x - 4, c.box.y + c.box.h / 2, true);
         assert(!app.sizes_shown && !app.menu.text_size && !app.confirm.shown);
-        key(&app, SDLK_RIGHT);
+        key(&app, SDLK_RETURN);
         assert(app.sizes_shown && app.sizes.focus == 3);
     }
     { /* in an area too short for them: the rows that fit, from the focus's; the arrow of those hidden above in the first
@@ -3759,6 +3682,55 @@ int main(int argc, char** argv) {
     pump(&app);
     assert(!app.confirm.shown && !app.menu.text_size && !app.size_until);
     app.clock = 0;
+    /* UI scale as a slider (#613): the row a bar, a tick a step, the knob on the size in use, in the focus colour on the
+       focused row. Left and Right step it, the size used at once and asked about as the box's is; Left/Right again
+       while it is asked go on stepping, the size before them kept to go back to, and back on it no question; a press
+       on the bar takes the step under it and a drag follows it, over the question too, until the button lifts */
+    {
+        SDL_Event up = {0};
+        GuiRect bar;
+        int span, cw = cell_w(&app);
+        render(&app);
+        bar = app.slider_bar;
+        span = bar.w - cw;
+        assert(app.editor.row == GUI_APP_TEXT && bar.w >= GUI_SIZE_STEPS * cw && span > 0);
+        assert(same_colour(
+            pixel(&app, (float)(bar.x + 3 * span / (GUI_SIZE_STEPS - 1) + cw / 2), (float)(bar.y + bar.h / 2)),
+            yellow)); /* Auto, the fourth step */
+        key(&app, SDLK_RIGHT);
+        assert(app.menu.text_size == 1 && app.confirm.shown && app.confirm.ask == GUI_ASK_TEXT && app.size_slid);
+        key(&app, SDLK_RIGHT);
+        assert(app.menu.text_size == 2 && app.confirm.shown && strstr(app.size_line, "Back to Auto in 15 s"));
+        key(&app, SDLK_LEFT);
+        key(&app, SDLK_LEFT);
+        assert(!app.menu.text_size && !app.confirm.shown && !app.size_until); /* back on Auto: nothing to ask */
+        key(&app, SDLK_LEFT);
+        assert(app.menu.text_size == -3 && app.confirm.shown);
+        key(&app, SDLK_ESCAPE);
+        assert(!app.menu.text_size && !app.confirm.shown);
+        for (int k = 0; k < 9; ++k) key(&app, SDLK_RIGHT); /* past its last: 4x, there it stays */
+        assert(app.menu.text_size == GUI_TEXT_MAX && app.confirm.shown);
+        key(&app, SDLK_ESCAPE);
+        assert(!app.menu.text_size);
+        render(&app);
+        bar = app.slider_bar;
+        span = bar.w - cw;
+        mouse_px(&app, bar.x + cw / 2 + 5 * span / (GUI_SIZE_STEPS - 1), bar.y + bar.h / 2, true); /* 2x's step */
+        assert(app.slider_drag && app.menu.text_size == 2 && app.confirm.shown);
+        render(&app); /* laid out again at 2x: the bar where it is now */
+        bar = app.slider_bar;
+        span = bar.w - cell_w(&app);
+        assert(bar.w && span > 0);
+        mouse_px(&app, bar.x + cell_w(&app) / 2 + 4 * span / (GUI_SIZE_STEPS - 1), bar.y + bar.h / 2, false);
+        assert(app.slider_drag && app.menu.text_size == 1 && app.confirm.shown);
+        up.type = SDL_EVENT_MOUSE_BUTTON_UP;
+        up.button.button = SDL_BUTTON_LEFT;
+        event(&app, &up);
+        assert(!app.slider_drag);
+        key(&app, SDLK_ESCAPE); /* Auto again, as it was before the press */
+        assert(!app.menu.text_size && !app.confirm.shown);
+        render(&app);
+    }
     /* a part of Auto is Auto's scale times it, rounded, never under 1x */
     {
         int was = app.auto_scale;
@@ -3932,7 +3904,8 @@ int main(int argc, char** argv) {
             assert(find_letters(&app, "\xe8\x8f\x9c\xe5\x8d\x95", normal, 1, &x, &y));
             snprintf(line, sizeof line, "- \xe4\xb8\xbb\xe9\xa2\x98%16s %.4s", "", app.app_form.theme);
             assert(find_letters(&app, line, normal, 1, &x, &y));
-            assert(hint_width("\xe4\xb8\x8a/\xe4\xb8\x8b", "linha") == 11 && up >= 0 && down >= 0 && up != down);
+            /* its button: the keys' 5 columns, a space, "linha", a column inside either side */
+            assert(hint_width("\xe4\xb8\x8a/\xe4\xb8\x8b", "linha") == 13 && up >= 0 && down >= 0 && up != down);
             assert(hint_pick("\xe4\xb8\x8a/\xe4\xb8\x8b", 1, false) == up &&
                    hint_pick("\xe4\xb8\x8a/\xe4\xb8\x8b", 2, false) == up);
             assert(hint_pick("\xe4\xb8\x8a/\xe4\xb8\x8b", 3, false) == down &&
@@ -4400,8 +4373,8 @@ int main(int argc, char** argv) {
     key(&app, SDLK_ESCAPE);
     assert(app.form == GUI_FORM_APP && app.editor.row == GUI_APP_EDITOR);
     /* Folders, every folder on one screen, a box a group: the app's (Data, Settings read-only, Logs, Caches,
-       Extractions), the recompiled library (its
-       Main, recompiled/, its Extras, Add Folder), the dumps one (its Main, dumps/, its Extras, Add Folder); one
+       Extractions), the dumps library (its Main, dumps/, its Extras, Add Folder), then the recompiled one (its
+       Main, recompiled/, its Extras, Add Folder); one
        dropped on a library's row is added to it and kept, once; the picker answers none here
        (SDL_FILE_DIALOG_DRIVER=none); Del or Enter asks before an Extra is taken off, the folder staying */
     key(&app, SDLK_DOWN);
@@ -4411,9 +4384,9 @@ int main(int argc, char** argv) {
     assert(app.form == GUI_FORM_FOLDERS && gui_editor_rows(&app.editor) == 10 && app.editor.row == 0);
     assert(FOLDER_ROW(GUI_ROW_PLACE, GUI_PLACE_DATA) == 0 && FOLDER_ROW(GUI_ROW_CONFIG, -1) == 1 &&
            FOLDER_ROW(GUI_ROW_PLACE, GUI_PLACE_STATE) == 2 && FOLDER_ROW(GUI_ROW_PLACE, GUI_PLACE_CACHE) == 3 &&
-           FOLDER_ROW(GUI_ROW_PLACE, GUI_PLACE_WORK) == 4 && FOLDER_ROW(GUI_ROW_PLACE, GUI_PLACE_GAMES) == 5 &&
-           FOLDER_ROW(GUI_ROW_ADD, GUI_LIBRARY_RECOMPILED) == 6 && FOLDER_ROW(GUI_ROW_DUMPS, -1) == 7 &&
-           FOLDER_ROW(GUI_ROW_ADD, GUI_LIBRARY_DUMPS) == 8);
+           FOLDER_ROW(GUI_ROW_PLACE, GUI_PLACE_WORK) == 4 && FOLDER_ROW(GUI_ROW_DUMPS, -1) == 5 &&
+           FOLDER_ROW(GUI_ROW_ADD, GUI_LIBRARY_DUMPS) == 6 && FOLDER_ROW(GUI_ROW_PLACE, GUI_PLACE_GAMES) == 7 &&
+           FOLDER_ROW(GUI_ROW_ADD, GUI_LIBRARY_RECOMPILED) == 8);
     /* no Back row over the rows: the foot's ESC, clicked, does what the key does, back on the App's row */
     {
         GuiFormBoxes f;
@@ -4433,8 +4406,9 @@ int main(int argc, char** argv) {
             assert(ui_form_side_rows_get_row_info(&app, 9 + GUI_FOLDER_GROUPS + 1, 100, &info) &&
                    info.attr == UI_ATTR_TITLE && !strcmp(info.label, "Defaults"));
             info = (UiRowInfo){0};
-            assert(ui_form_side_rows_get_row_info(&app, 9 + GUI_FOLDER_GROUPS + 2, 100, &info) && !info.attr &&
-                   !strcmp(info.label, "Reset to Defaults"));
+            /* greyed while no folder is picked: nothing to reset (#614) */
+            assert(ui_form_side_rows_get_row_info(&app, 9 + GUI_FOLDER_GROUPS + 2, 100, &info) &&
+                   info.attr == UI_ATTR_OFF && !strcmp(info.label, "Reset to Defaults"));
             assert(!ui_form_side_rows_get_row_info(&app, 9 + GUI_FOLDER_GROUPS + 3, 100, &info));
             assert(ui_form_side_rows_get_row_info(&app, 0, 100, &info) && info.attr == UI_ATTR_TITLE &&
                    !strcmp(info.label, "App Folders"));
@@ -4442,9 +4416,14 @@ int main(int argc, char** argv) {
         render(&app);
         { /* each group's title: in the page's colour on a band of ink in a theme of filled boxes, else in ink */
             SDL_Color title = rgb(app.theme.panels == GUI_PANELS_FILL ? app.theme.page : app.theme.ink);
+            int ax, ay, dx, dy, rx, ry;
             shows(&app, "App Folders", title);
             shows(&app, "Recompiled Library", title);
             shows(&app, "Dumps Library", title);
+            /* the dumps' library above the recompiled one, under the app's */
+            assert(find_text(&app, "App Folders", title, 1, &ax, &ay) &&
+                   find_text(&app, "Dumps Library", title, 1, &dx, &dy) &&
+                   find_text(&app, "Recompiled Library", title, 1, &rx, &ry) && ay < dy && dy < ry);
         }
         { /* each group in a box as far as it shows, half a cell wider than its rows, in the dim colour; Reset to
              Defaults, the last row, in one of its own */
@@ -4932,7 +4911,7 @@ int main(int argc, char** argv) {
         snprintf(line, sizeof line, "%.24s", data);
         shows_half(&app, line, rgb(app.theme.soft));
         shows(&app, "- Extractions", normal);
-        shows(&app, "- Reset to Defaults", normal);
+        shows(&app, "- Reset to Defaults", rgb(app.theme.soft)); /* every folder its default: greyed (#614) */
         assert(!strcmp(app.place_line[GUI_PLACE_GAMES], app.games_dir) &&
                !strcmp(app.app_form.folder[FOLDER_ROW(GUI_ROW_PLACE, GUI_PLACE_GAMES)], "default"));
         assert(strstr(app.place_about[GUI_PLACE_GAMES], "The recompiled games, ") &&
@@ -5404,7 +5383,7 @@ int main(int argc, char** argv) {
         }
         assert(app.menu.view == GUI_LOAD_DROP && !strcmp(app.message, "No file was picked."));
     }
-    /* the NRO made already: opening it plays it, as below (a game not made compiles first: compile_first) */
+    /* the NRO made already: opening it plays it, as below (a game not made compiles first) */
     char* input_made = made_game(&app, input, "game with spaces");
     app.menu.selected = GUI_LINUX; /* a drop runs the item that opened the screen */
     SDL_Event e = {0};
@@ -5747,7 +5726,8 @@ int main(int argc, char** argv) {
                     const char* kind;
                 } unlisted[] = {{"far away.nsp", GUI_SWITCH, "A dump, prepared when it runs"},
                                 {"tool.elf", GUI_LINUX, "Linux ARM ELF, run with scarletnx-gnuabi"},
-                                {"homebrew.cia", GUI_3DS, "3DS CIA, opened with scarletnx-3ds"},
+                                {"homebrew.cia", GUI_3DS, "3DS game, opened with scarletnx-3ds"},
+                                {"card.3ds", GUI_3DS, "3DS game, opened with scarletnx-3ds"},
                                 {"homebrew.vpk", GUI_VITA, "Vita VPK, opened with scarletnx-vita"},
                                 {"homebrew.gba", GUI_GBA, "GBA ROM, played with scarletnx-agb"}};
                 GuiRecent was = app.recent;
@@ -6936,10 +6916,63 @@ int main(int argc, char** argv) {
                 /* Games' every key at once, the most parts a foot puts together: each in F1's box, none left out */
                 assert(strstr(said, "R: recompile.") && strstr(said, "M: mods.") && strstr(said, "P: folders.") &&
                        strstr(said, "V: view.") && strstr(said, "ESC: back.") && strstr(said, "Tab: screen."));
+#ifndef SDL_PLATFORM_ANDROID
+                assert(strstr(said, "S: save states."));
+#endif
                 assert(strstr(shown_keys(&app, said, sizeof said), "R: recompile.") && strstr(said, "B: AOT pack.") &&
                        strstr(said, "P: folders.") && strstr(said, "ESC: back."));
                 app.aot_state = state;
                 app.aot_match = match;
+            }
+            /* a game whose .ini has a Debug setting off its default: its row says so, as no other game's, its side
+               panel lists it in the failure colour and its Play says so too; the GDB stub on puts it on every game */
+            {
+                char *ini = snx_game_ini(folder, "folder game"), *dir = ini ? snx_dirname(ini) : NULL, row[256];
+                size_t index, other, size = 0;
+                char *was = ini ? (char*)snx_read_file(ini, &size) : NULL, *debug;
+                int nx, ny, r;
+                bool play = false;
+                debug = snx_format("%s\n[Debug]\nlog=2\n", was ? was : ""); /* beside what the folder's .ini has */
+                assert(dir && debug && !snx_mkdirs(dir) && !snx_write_file(ini, debug, strlen(debug)));
+                snx_menu_settings = debug_settings;
+                settings_forget(&app);
+                focus_game(&app, "folder game");
+                index = app.browser.page * app.browser.page_size + app.browser.selected - app.browser.head;
+                for (other = 0; other < app.games.count && (other == index || !app.games.paths[other]); ++other) {}
+                assert(other < app.games.count);
+                render(&app);
+                game_label(&app, &app.games, index, row, sizeof row);
+                assert(strstr(row, "  (Debug on)"));
+                game_label(&app, &app.games, other, row, sizeof row);
+                assert(!strstr(row, "(Debug on)"));
+                assert(!strcmp(app.debug_focus, "log=2"));
+                assert(find_text(&app, "Debug on: log=2", rgb(app.theme.failure), 1, &nx, &ny));
+                key(&app, SDLK_M);
+                assert(app.addons_shown && app.addons_debug);
+                for (r = 0; r < addons_rows(&app); ++r) {
+                    addons_label(&app, r, row, sizeof row);
+                    play = play || strstr(row, "Play  (Debug on)");
+                }
+                assert(play);
+                key(&app, SDLK_ESCAPE);
+                assert(!app.addons_shown);
+                launcher(&app, true);
+                render(&app);
+                game_label(&app, &app.games, other, row, sizeof row);
+                assert(strstr(row, "(Debug on)") && app.debug_picks);
+                launcher(&app, false);
+                assert(was ? !snx_write_file(ini, was, size) : !remove(ini));
+                settings_forget(&app);
+                snx_menu_settings = NULL;
+                list_games(&app);
+                render(&app);
+                game_label(&app, &app.games, other, row, sizeof row);
+                assert(!strstr(row, "(Debug on)") && !app.debug_picks);
+                focus_game(&app, "folder game");
+                free(debug);
+                free(was);
+                free(dir);
+                free(ini);
             }
             /* M on it, a game with no update, DLC, mod or cheat: its box all the same, for its Add rows, its mods and
                cheats folders those of its data (add_mod adds to it); ESC closes it, nothing run */
@@ -6999,6 +7032,131 @@ int main(int argc, char** argv) {
             app.menu.selected = item;
             assert(!snx_remove_tree(cia));
             free(cia);
+        }
+        /* a game's save states (S on Games): a row each, the newest first, the focused one's picture beside the box;
+           one this build can't load in the failure colour, Enter saying why; Del deletes one, asked first; Enter
+           plays the game's program with --state_load= of the state */
+        {
+            char *own = snx_path_join(app.games_dir, "0100ABCD12350000"), *program, *states, *file[3], *kept, *name;
+            static uint8_t thumb[320 * 180 * 4];
+            static const uint64_t created[3] = {1000, 2000, 500};
+            static const char* const slots[3] = {"1", "auto", "2"};
+            GuiStatesBoxes d;
+            SDL_Color c;
+            size_t size;
+            int i, k, nx, ny;
+#ifdef _WIN32
+            program = snx_path_join(own, "0100ABCD12350000.exe");
+#else
+            program = snx_path_join(own, "0100ABCD12350000");
+#endif
+            states = snx_path_join(own, "states");
+            assert(!snx_mkdirs(states));
+            assert(!snx_copy_file(self, program) && !snx_make_executable(program));
+            for (k = 0; k < 320 * 180; k++) { /* a red picture */
+                thumb[k * 4] = 255;
+                thumb[k * 4 + 3] = 255;
+            }
+            for (i = 0; i < 3; i++) {
+                SnxStateHeader h;
+                uint8_t* bytes = (uint8_t*)calloc(1, SNX_STATE_HEADER + sizeof thumb);
+                memset(&h, 0, sizeof h);
+                h.format = SNX_STATE_FORMAT;
+                h.abi = i == 2 ? SNX_ABI + 1 : SNX_ABI; /* slot 2's from another recompiled code */
+                h.title_id = 0x0100ABCD12350000ull;
+                h.created = created[i];
+                h.guest_ns = 3723000000000ull; /* 1:02:03 */
+                h.thumb_w = 320;
+                h.thumb_h = 180;
+                assert(bytes);
+                snx_state_header_write(bytes, &h, 0, 0);
+                memcpy(bytes + SNX_STATE_HEADER, thumb, sizeof thumb);
+                name = snx_format("0100ABCD12350000.%s.snxstate", slots[i]);
+                file[i] = name ? snx_path_join(states, name) : NULL; /* the system's separator, as the box joins */
+                free(name);
+                assert(file[i]);
+                assert(!snx_write_file(file[i], bytes, SNX_STATE_HEADER + sizeof thumb));
+                free(bytes);
+            }
+            app.menu.selected = GUI_SWITCH;
+            go_tab(&app, GUI_TAB_GAMES);
+            focus_game(&app, "0100ABCD12350000");
+            render(&app);
+            {
+                char said[512];
+                assert(strstr(shown_keys(&app, said, sizeof said), "S: save states.")); /* Games' foot says S */
+            }
+            key(&app, SDLK_S);
+            assert(app.states_shown && app.states_count == 3 && !app.menu.running);
+            assert(strstr(app.states[0].label, "Auto ") && strstr(app.states[1].label, "Slot 1 ") &&
+                   strstr(app.states[2].label, "Slot 2 ") && strstr(app.states[0].label, "1:02:03"));
+            assert(!app.states[0].why[0] && !app.states[1].why[0] && strstr(app.states[2].why, "SNX_ABI"));
+            { /* a pad's X opens it too, and the pad's foot says so */
+                char said[512];
+                key(&app, SDLK_ESCAPE);
+                assert(!app.states_shown);
+                app.pad_driven = true;
+                assert(strstr(shown_keys(&app, said, sizeof said), "X: save states."));
+                { /* X as pad_menu.c gives it: Del from the pads' own keyboard */
+                    SDL_Event e = {0};
+                    e.type = SDL_EVENT_KEY_DOWN;
+                    e.key.key = SDLK_DELETE;
+                    e.key.which = GUI_PAD_KEYBOARD;
+                    event(&app, &e);
+                }
+                assert(app.states_shown && app.states_count == 3 && !app.confirm.shown);
+                app.pad_driven = false;
+            }
+            render(&app);
+            assert(find_text(&app, "Slot 1", rgb(app.theme.ink), 1, &nx, &ny));
+            states_boxes(&app, &d);
+            assert(d.picture.w > 0);
+            c = pixel(&app, (float)(d.picture.x + d.picture.w / 2), (float)(d.picture.y + d.picture.h / 2));
+            assert(c.r > 200 && c.g < 40 && c.b < 40); /* the focused state's picture */
+            /* the one this build can't load: Enter says why, nothing runs */
+            key(&app, SDLK_DOWN);
+            key(&app, SDLK_DOWN);
+            key(&app, SDLK_RETURN);
+            assert(app.states_shown && !app.menu.running && strstr(app.message, "SNX_ABI"));
+            /* Del asks; Back keeps it, Delete takes it */
+            key(&app, SDLK_DELETE);
+            assert(app.confirm.shown && app.confirm.ask == GUI_ASK_STATE && strstr(app.ask_line, "Slot 2"));
+            key(&app, SDLK_ESCAPE);
+            assert(!app.confirm.shown && app.states_shown && snx_is_file(file[2]));
+            key(&app, SDLK_DELETE);
+            key(&app, SDLK_DOWN);
+            key(&app, SDLK_RETURN);
+            assert(!app.confirm.shown && app.states_shown && app.states_count == 2 && !snx_is_file(file[2]));
+            assert(app.states_focus == 1);
+            /* Enter on slot 1: the game's program, loading it */
+            launcher(&app, true);
+            key(&app, SDLK_RETURN);
+            assert(!app.states_shown && app.menu.running && !app.state_load);
+            {
+                char* ran = snx_absolute(program);
+                assert(ran && !strcmp(app.file, ran));
+                free(ran);
+            }
+            finish(&app, 0);
+            launcher(&app, false);
+            kept = (char*)snx_read_file(app.run_log, &size);
+            {
+                char* option = snx_format("--state_load=0:%s", file[0]);
+                assert(kept && option && strstr(kept, option));
+                free(option);
+            }
+            free(kept);
+            /* a game without states: S says so, no box */
+            for (i = 0; i < 2; i++) assert(!remove(file[i]));
+            go_tab(&app, GUI_TAB_GAMES);
+            focus_game(&app, "0100ABCD12350000");
+            key(&app, SDLK_S);
+            assert(!app.states_shown && strstr(app.message, "no save states"));
+            for (i = 0; i < 3; i++) free(file[i]);
+            assert(!snx_remove_tree(own));
+            free(own);
+            free(program);
+            free(states);
         }
         /* a game with two versions of its update and a DLC beside it: opening it shows its updates as a choice of one,
            the newest first, and No update, its DLC as a box to check, as the game's addons= has them; then Save and
@@ -8081,10 +8239,10 @@ int main(int argc, char** argv) {
         app.menu.active = GUI_3DS;
         render(&app);
         b = menu_entry_box(&app, &m, GUI_3DS);
-        text_px_is(&app, b.x + cw / 2, item_text_y(&app, b), "- Load 3DS CIA", rgb(app.theme.active), black);
+        text_px_is(&app, b.x + cw / 2, item_text_y(&app, b), "- Load 3DS game", rgb(app.theme.active), black);
         app.menu.activated = false;
         render(&app);
-        text_px_is(&app, b.x + cw / 2, item_text_y(&app, b), "- Load 3DS CIA", normal, black);
+        text_px_is(&app, b.x + cw / 2, item_text_y(&app, b), "- Load 3DS game", normal, black);
         /* a row taller than a cell and a pixel, as Android's 40px: its text in the middle, not at its top */
         b = gui_rect(b.x, b.y, b.w, 40 * s);
         fill_rect(&app, b, app.theme.page); /* the rows it covers, gone */
@@ -8104,6 +8262,44 @@ int main(int argc, char** argv) {
                                (SDL_Color){255, 0, 0, 255}, 8));
             text_px_is(&app, x + side + cw / 2, b.y + (40 * s - 16 * s + s) / 2, "Exit", normal, black);
             SDL_DestroyTexture(red);
+        }
+        { /* a row with nothing to do now (UI_ATTR_OFF): greyed, still there, its text in the soft colour, focused or
+             not, activated or not; framed in the focus colour while focused; a failure's look over it */
+            int ty = b.y + (40 * s - 16 * s + s) / 2;
+            GuiRect in;
+            fill_rect(&app, b, app.theme.page);
+            ui_draw_row(&app, b, "Exit", NULL, UI_COLOR_NONE, UI_ATTR_OFF, false);
+            text_px_is(&app, b.x + cw / 2, ty, "- Exit", rgb(app.theme.soft), black);
+            fill_rect(&app, b, app.theme.page);
+            ui_draw_row(&app, b, "Exit", NULL, UI_COLOR_NONE, UI_ATTR_OFF | UI_ATTR_ACTIVE, true);
+            text_px_is(&app, b.x + cw / 2, ty, "- Exit", rgb(app.theme.soft), black);
+            assert(same_colour(pixel(&app, (float)b.x, (float)(b.y + b.h / 2)), yellow));
+            fill_rect(&app, b, app.theme.page);
+            ui_draw_row(&app, b, "Exit", NULL, UI_COLOR_NONE, UI_ATTR_OFF | UI_ATTR_FAILURE, false);
+            text_px_is(&app, b.x + cw / 2, ty, "- Exit", black, rgb(app.theme.failure));
+            /* where the focus inverts (YoRHa's bar), on the soft colour rather than the focus's; unfocused, on its box */
+            app.theme = *gui_theme_builtin("yorha");
+            assert(app.theme.focus_bar && app.theme.panels == GUI_PANELS_FILL);
+            in = ui_row_box(&app, b);
+            fill_rect(&app, b, app.theme.page);
+            ui_draw_row(&app, b, "Exit", NULL, UI_COLOR_NONE, UI_ATTR_OFF, true);
+            in.x += cw / 2 + gui_text_cols(app.theme.marker) * cw; /* the text after the marker */
+            text_px_is(&app, in.x, ty, "Exit", rgb(app.theme.page), rgb(app.theme.soft));
+            fill_rect(&app, b, app.theme.page);
+            ui_draw_row(&app, b, "Exit", NULL, UI_COLOR_NONE, UI_ATTR_OFF, false);
+            text_px_is(&app, in.x, ty, "Exit", rgb(app.theme.soft), rgb(app.theme.dim));
+            { /* a tile (Games' grid) the same */
+                GuiRect tile = gui_rect(b.x, b.y, 12 * cw, 4 * 16 * s + 8 * s);
+                int tx = tile.x + (tile.w - 4 * cw) / 2, tty = tile.y + tile.h - 16 * s - 2 * s;
+                fill_rect(&app, tile, app.theme.page);
+                ui_draw_tile(&app, tile, "Exit", NULL, UI_COLOR_NONE, UI_ATTR_OFF, true);
+                text_px_is(&app, tx, tty, "Exit", rgb(app.theme.page), rgb(app.theme.soft));
+                fill_rect(&app, tile, app.theme.page);
+                ui_draw_tile(&app, tile, "Exit", NULL, UI_COLOR_NONE, UI_ATTR_OFF, false);
+                text_px_is(&app, tx, tty, "Exit", rgb(app.theme.soft), rgb(app.theme.dim));
+            }
+            app.theme = *gui_theme_builtin("default");
+            render(&app);
         }
         /* the side box: the focus's name over a rule and the keys in use, what it does left to the tips; the status
            box under it */
@@ -8150,16 +8346,21 @@ int main(int argc, char** argv) {
            focus colour; the default's on the page, no box */
         r = m.place.keys;
         assert(r.y > m.place.list.y + m.place.list.h && r.y + r.h == 800 - 8 * s);
-        { /* the keys in the foot's letters, a size under the rest's: ESC alone against the left edge of the first row,
-             F1's the last key, against the right edge of the keys' last row */
-            int fs = foot_scale(&app), rows;
+        { /* the keys in the foot's letters, a size under the rest's, each sentence a button as a tab is (a box a cell
+             and 4 pixels of its letters high, the sentence a column inside, a column between two, the rows 2 pixels
+             apart): ESC alone against the left edge of the first row, F1's the last key, against the right edge of the
+             keys' last row */
+            int fs = foot_scale(&app), rows, pitch = 20 * fs;
             assert(fs == s - 1);
-            rows = (r.h - 4 * fs) / (16 * fs);
-            assert(rows >= 1 && r.h == rows * 16 * fs + 4 * fs);
-            foot_px_is(&app, r.x, r.y + 2 * fs, "ESC", yellow, black);
+            rows = r.h / pitch;
+            assert(rows >= 1 && r.h == rows * pitch); /* one row as tall as before the buttons: 16 and 4 pixels */
+            foot_px_is(&app, r.x + 8 * fs, r.y + 2 * fs, "ESC", yellow, black);
+            assert(
+                same_colour(pixel(&app, (float)r.x, (float)(r.y + 10 * fs)), rgb(app.theme.dim))); /* its box's edge */
+            assert(same_colour(pixel(&app, (float)(r.x + 4 * fs), (float)r.y), rgb(app.theme.dim)));
             shows_foot(&app, "exit", normal);
             hides(&app, "ESC", yellow);
-            foot_px_is(&app, r.x + r.w - 7 * 8 * fs, r.y + 2 * fs + (rows - 1) * 16 * fs, "F1", yellow, black);
+            foot_px_is(&app, r.x + r.w - 8 * 8 * fs, r.y + 2 * fs + (rows - 1) * pitch, "F1", yellow, black);
             app.menu.text_size = 1; /* 1x: the foot's too, never under it */
             render(&app);
             assert(app.scale == 1 && foot_scale(&app) == 1);
@@ -8189,6 +8390,33 @@ int main(int argc, char** argv) {
         r = tab_rect(&app, m.place.tabs, GUI_TAB_MENU);
         mouse_px(&app, r.x + 4, r.y + 4, true);
         assert(!app.editing && app.menu.view == GUI_LOAD_NONE);
+        { /* a finger's row is ui.txt's phones' rows, every list's */
+            size_t size = 0;
+            char *text = (char*)snx_read_file(SNX_GUI_UI_TXT, &size), *at;
+            int rows = 0, px;
+            assert(text);
+            for (at = text; (at = strstr(at, "android.row_height = ")) != NULL; ++at, ++rows)
+                assert(sscanf(at, "android.row_height = %dpx", &px) == 1 && px == GUI_FINGER_ROW);
+            assert(rows >= 13);
+            free(text);
+        }
+        /* on a screen of fingers (Android, iOS) the tabs are a finger's row high, as the lists' rows there, their names
+           in their middle, and so are the foot's keys' buttons, in the text's letters; a tap low on a tab opens it */
+        app.fingers = true;
+        render(&app);
+        menu_boxes(&app, &m);
+        r = tab_rect(&app, m.place.tabs, GUI_TAB_GAMES);
+        assert(m.place.tabs.h == GUI_FINGER_ROW * s && r.h == m.place.tabs.h && r.y + r.h <= m.place.list.y);
+        text_px_is(&app, r.x + cw, r.y + (r.h - 16 * s) / 2, "Games", normal, black);
+        assert(button_h(&app) == GUI_FINGER_ROW * s && hint_pitch(&app) == (GUI_FINGER_ROW - 4) * s &&
+               foot_scale(&app) == s);
+        mouse_px(&app, r.x + 4, r.y + r.h - 4, true);
+        assert(app.menu.view == GUI_LOAD_GAMES);
+        key(&app, SDLK_ESCAPE);
+        assert(app.menu.view == GUI_LOAD_NONE);
+        app.fingers = false;
+        render(&app);
+        menu_boxes(&app, &m);
         app.menu.selected = GUI_KEYS;
         render(&app);
         r = m.place.tips;
@@ -8644,9 +8872,10 @@ int main(int argc, char** argv) {
                 menu_boxes(&app, &mb);
                 room = foot_room(&app, mb.place.keys, app.theme.footer_box);
                 app.scale = foot_scale(&app);
-                assert(find_text(&app, "ESC", yellow, 1, &x, &y) && x == room.x);
+                /* each in its button, a column inside its edges */
+                assert(find_text(&app, "ESC", yellow, 1, &x, &y) && x == room.x + GUI_BUTTON_PAD * 8 * app.scale);
                 assert(find_text(&app, "F1", yellow, 1, &x, &y) &&
-                       x + (int)(strlen("F1 help") * 8) * app.scale == room.x + room.w);
+                       x + (int)(strlen("F1 help") + GUI_BUTTON_PAD) * 8 * app.scale == room.x + room.w);
                 app.scale = scale;
                 hides_foot(&app, "Arrows/mouse", yellow);
                 hides_foot(&app, "Tab", yellow);
@@ -10018,7 +10247,6 @@ int main(int argc, char** argv) {
         leave_editor(&app);
         app.theme = *gui_theme_builtin("default");
     }
-    compile_first(&app, temporary);
     recompile_queue(&app);
 #ifdef SNX_XDG /* the last of the test: SDL keeps the picker it found from then on */
     pickers_asked(&app, temporary, self);
