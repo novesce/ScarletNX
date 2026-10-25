@@ -84,6 +84,9 @@ enum { MEM_BADSTATE = -1, MEM_NOMEM = -2, MEM_LIMIT = -3 };
 /* the console's layout below 4 GiB for a 32-bit process, by the NPDM's address space type: 0 with the alias region, 2
    without */
 void mem_layout32(unsigned aspace);
+/* The guest's address space reserved now, the largest tier the system gives from the console's 128 GiB down to 5 GiB,
+   each refused one said: before the game's code takes a share of a small one. mem_init finds it kept */
+void mem_reserve(void);
 void mem_init(void);
 int mem_map(u64 addr, u64 size, u32 state, u32 perm); /* 0, MEM_BADSTATE when it isn't free, MEM_NOMEM */
 int mem_unmap(u64 addr, u64 size);

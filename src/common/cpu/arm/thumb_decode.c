@@ -160,15 +160,17 @@ static unsigned thumb16(uint16_t h, SnxThumb* o) {
             o->imm <<= 1;
             return TH_F16;
         }
+        if ((h & 0xFFE8) == 0xB660) { /* CPS: what it changes isn't user mode's, which runs it as NOP */
+            o->shape = TH_HINT;
+            o->op = 0;
+            return TH_F16;
+        }
         if (top == 0xBF) { /* hints and IT */
             unsigned firstcond = (h >> 4) & 15, mask = h & 15;
-            if (!mask) {
-                if (firstcond <= 4) {
-                    o->shape = TH_HINT;
-                    o->op = firstcond;
-                    return TH_F16;
-                }
-                return 0;
+            if (!mask) { /* NOP, YIELD, WFE, WFI, SEV; SEVL and the reserved hints behave as NOP */
+                o->shape = TH_HINT;
+                o->op = firstcond <= 4 ? firstcond : 0;
+                return TH_F16;
             }
             o->shape = TH_IT;
             o->imm = (firstcond << 4) | mask;
@@ -250,6 +252,7 @@ static unsigned twin_kind(SnxThumb* o, uint32_t word, SnxA32Kind kind, unsigned 
     o->imm = word;
     o->op = kind;
     o->ra = pair;
+    o->rd = 0;
     return TH_F32;
 }
 static unsigned twin(SnxThumb* o, uint32_t word) { return twin_kind(o, word, snx_a32_decode(word), 0); }
@@ -304,10 +307,14 @@ static unsigned multiple_dual(unsigned a, unsigned b, SnxThumb* o) {
         o->flags = (op1 & 2 ? TH_PRE : 0) | (op1 & 1 ? TH_UP : 0) | (wb ? TH_WB : 0);
         return TH_F32;
     }
-    if (op1 == 0) { /* STREX/LDREX (T1): A32's have no offset */
-        if (b & 0xFF) return 0;
-        if (op2 == 0) return twin(o, 0xE1800F90u | (uint32_t)n << 16 | (uint32_t)t2 << 12 | t); /* Rd in hw2[11:8] */
-        return t2 == 15 ? twin(o, 0xE1900F9Fu | (uint32_t)n << 16 | (uint32_t)t << 12) : 0;
+    if (op1 == 0) { /* STREX/LDREX (T1): their imm8 * 4 offset, which A32's lack, in .rd */
+        unsigned twinned;
+        if (op2 == 0) /* Rd in hw2[11:8] */
+            twinned = t2 == n || t2 == t ? 0 : twin(o, 0xE1800F90u | (uint32_t)n << 16 | (uint32_t)t2 << 12 | t);
+        else
+            twinned = t2 == 15 ? twin(o, 0xE1900F9Fu | (uint32_t)n << 16 | (uint32_t)t << 12) : 0;
+        o->rd = (b & 0xFF) * 4;
+        return twinned;
     }
     if (op2 == 1 && op3 < 2) {                /* TBB / TBH */
         if ((b & 0xFFE0) != 0xF000) return 0; /* 1111 0000 000H Rm */
@@ -551,8 +558,8 @@ static unsigned thumb32(uint16_t a, uint16_t b, SnxThumb* o) {
     }
     if ((a & 0xFFF0) == 0xF340 || (a & 0xFFF0) == 0xF360 || (a & 0xFFF0) == 0xF3C0) { /* SBFX, BFI/BFC, UBFX */
         unsigned lsb = (((b >> 12) & 7) << 2) | ((b >> 6) & 3);
-        unsigned msb = b & 31;
-        if (b & 0x20) return 0;
+        unsigned msb = b & 31; /* the extracts' widthm1 */
+        if ((b & 0x8020) || (a & 0x20 ? msb < lsb : lsb + msb > 31)) return 0; /* UNPREDICTABLE */
         o->shape = TH_BITFIELD;
         o->rd = (b >> 8) & 15;
         o->rn = a & 15;
@@ -566,7 +573,14 @@ static unsigned thumb32(uint16_t a, uint16_t b, SnxThumb* o) {
         return TH_F32;
     }
     if ((a & 0xFE00) == 0xF800) return load_store(a, b, o);
+    if ((a & 0xFFF0) == 0xEAC0) { /* PKHBT, PKHTB (op 0110 without S): A32's, tb in bit 6 */
+        unsigned n = a & 15, d = (b >> 8) & 15, m = b & 15;
+        if ((b & 0x8010) || n == 13 || n == 15 || d == 13 || d == 15 || m == 13 || m == 15) return 0;
+        return twin(o, 0xE6800010u | (uint32_t)n << 16 | (uint32_t)d << 12 | ((b >> 12) & 7) << 9 | ((b >> 6) & 3) << 7 |
+                           ((b >> 5) & 1) << 6 | m);
+    }
     if ((a >> 8) == 0xEA || (a >> 8) == 0xEB) { /* data-processing, immediate shift */
+        if (b & 0x8000) return 0; /* (0): UNPREDICTABLE */
         o->shape = TH_WDATA;
         o->op = (a >> 5) & 15;
         o->flags = (a & 0x10) ? TH_S : 0;
@@ -579,9 +593,9 @@ static unsigned thumb32(uint16_t a, uint16_t b, SnxThumb* o) {
     }
     if ((a >> 8) == 0xFA) return data_register(a, b, o);
     if ((a & 0xFF80) == 0xFB80) return multiply_long(a, b, o);
-    if ((a >> 8) == 0xFB) { /* MUL / MLA / MLS */
+    if ((a >> 8) == 0xFB) { /* MUL / MLA / MLS: op1 (hw1 bits 6:4) 000, the other op1 being multiply's */
         unsigned sub = (b >> 4) & 15;
-        if (sub == 0 || sub == 1) {
+        if (!(a & 0x70) && (sub == 0 || sub == 1)) {
             o->shape = TH_MUL;
             o->rn = a & 15;
             o->rd = (b >> 8) & 15;

@@ -197,6 +197,9 @@ typedef struct App {
     GuiBrowser browser;
     GuiGames games;
     int* games_drivers; /* the driver that plays each of games' rows (row_driver), read as list_games lists them */
+    /* each of games' rows and of the recent ones: its .ini has a Debug setting off its default, read as list_games
+       lists them; and the picks or the GDB stub put one on every game, as Games is drawn (game_debug) */
+    bool *games_debug, recent_debug[GUI_RECENT_MAX], debug_picks;
     GuiConsole console;
     GuiUsage usage;
     GuiTheme theme;
@@ -254,6 +257,10 @@ typedef struct App {
     char aot_build_opt;  /* the launcher's opt setting, one char */
     int aot_match;         /* the cache's level is the build's */
     Uint64 aot_checked;    /* when aot_focus was looked at */
+    /* the Debug settings a run of the focused row takes off their default (game_debug), for its path, owned, as it
+       was looked at */
+    char debug_focus[1024], *debug_path;
+    Uint64 debug_checked;
     bool aot_pack;         /* the run builds a pack from the cache */
     char* aot_cache;       /* its .jitcache, owned */
     char aot_opt[2];       /* the -O the build uses */
@@ -327,6 +334,7 @@ typedef struct App {
     bool addons_shown, addons_recompile;
     int addons_focus;
     char *addons_game, *addons_title; /* the game's path and what it is shown as */
+    bool addons_debug;                /* it runs with a Debug setting off its default: its Play says so */
     GuiGames addons;
     bool* addons_checked; /* each of addons' */
     char *mods_folder, **mods; /* the game's mods folder and its mods (gui_game_mods), mods_count of them */
@@ -1322,7 +1330,10 @@ static int recent_more(const App* app) { return recent_on(app) && recent_shown(a
 /* the rows over Games' games: the recent games and the row that shows the rest (P, the foot's, adds a folder) */
 static size_t games_head(const App* app) { return (size_t)(recent_shown(app) + recent_more(app)); }
 /* the list as the menu and the file have it */
+static int game_debug(App* app, const char* path, int picks, char* out, size_t size);
+static void recent_debug_read(App* app);
 static void recent_changed(App* app) {
+    recent_debug_read(app); /* its rows moved */
     app->browser.head = games_head(app);
     gui_browser_resize(&app->browser, app->browser.page_size);
     if (app->recent_file) app->recent_unsaved = gui_recent_save(&app->recent, app->recent_file) != 0;
@@ -1358,6 +1369,7 @@ enum { GUI_SHOWS_STATUS = 1, GUI_SHOWS_TABS = 2, GUI_SHOWS_WIDE = 4, GUI_SHOWS_S
 static void place_screen(App* app, GuiPlace* p, const char* keys, int shows);
 static const char* shown_keys(const App* app, char* out, size_t size);
 static void aot_status_update(App* app);
+static void debug_focus_update(App* app);
 /* a screen's keys, Tab's after them; the key back of a screen whose own keys do not say it; F1's, last in a foot */
 #define SAY_TAB      SNX_TR_KEYS("Tab: screen. F2: side box.")
 #ifdef SNX_TOUCH_UI
@@ -3423,6 +3435,7 @@ static void addons_open(App* app, const char* game, const char* title, bool alwa
     }
     app->addons_game = snx_strdup(game);
     app->addons_title = snx_strdup(title);
+    app->addons_debug = game_debug(app, game, 1, NULL, 0) > 0;
     app->addons_checked = (bool*)calloc(app->addons.count + 1, sizeof *app->addons_checked);
     app->mods_on = (bool*)calloc(app->mods_count + 1, sizeof *app->mods_on);
     app->cheats_on = (bool*)calloc(app->cheats_count + 1, sizeof *app->cheats_on);
@@ -3486,7 +3499,8 @@ static void addons_label(const App* app, int row, char* label, size_t size) {
     else if (item == ROW_SAVE)
         snprintf(label, size, "%s%s", app->theme.marker, snx_tr("Save"));
     else
-        snprintf(label, size, "%s%s", app->theme.marker, app->addons_recompile ? snx_tr("Recompile") : snx_tr("Play"));
+        snprintf(label, size, "%s%s%s", app->theme.marker, app->addons_recompile ? snx_tr("Recompile") : snx_tr("Play"),
+                 app->addons_debug && !app->addons_recompile ? snx_tr("  (Debug on)") : "");
 }
 /* the box over the screen, as wide as its title or the longest row; a row each, ui.txt's scene Addons, the focused
    one among those shown (the box kept on the screen) */
@@ -4763,8 +4777,11 @@ bool ui_games_rows_get_row_info(App* app, size_t row, int width, UiRowInfo* info
         int index = (int)row - 1;
         char queued[64];
         job_suffix(app, index < recent_shown(app) ? app->recent.game[index].path : NULL, queued, sizeof queued);
-        snprintf(label, sizeof app->row_text, "%s%s",
-                 index < recent_shown(app) ? app->recent.game[index].name : snx_tr("Show More"), queued);
+        snprintf(label, sizeof app->row_text, "%s%s%s",
+                 index < recent_shown(app) ? app->recent.game[index].name : snx_tr("Show More"),
+                 index < recent_shown(app) && (app->debug_picks || app->recent_debug[index]) ? snx_tr("  (Debug on)")
+                                                                                             : "",
+                 queued);
         info->label = label;
         if (index < recent_shown(app) && app->recent.game[index].driver == GUI_SWITCH)
             info->image = game_icon(app, app->recent.game[index].path);
@@ -4877,12 +4894,15 @@ static const char* games_focus(App* app, const GuiGamesBoxes* g, const char** ab
    holds it, and where it is in the queue of recompiles while it waits or runs there */
 static void game_label(const App* app, const GuiGames* games, size_t i, char* out, size_t size) {
     const char* was = game_was_old(app, games->paths[i]) ? snx_tr("  (games/)") : "";
+    /* Games' own rows, by what list_games read: another list's are add-ons, which run with their game's */
+    const char* debug = games == &app->games && (app->debug_picks || app->games_debug[i]) ? snx_tr("  (Debug on)") : "";
     char queued[64];
     job_suffix(app, games->paths[i], queued, sizeof queued);
     if (games->addons[i]) /* its updates, DLCs and mods, which opening it offers */
-        snprintf(out, size, "%s%s  +%zu%s%s", app->theme.marker, games->shown[i], games->addons[i], was, queued);
+        snprintf(out, size, "%s%s  +%zu%s%s%s", app->theme.marker, games->shown[i], games->addons[i], was, debug,
+                 queued);
     else
-        snprintf(out, size, "%s%s%s%s", app->theme.marker, games->shown[i], was, queued);
+        snprintf(out, size, "%s%s%s%s%s", app->theme.marker, games->shown[i], was, debug, queued);
 }
 /* the path of the game Games' focus is on, recent (*recent says so) or of the page; NULL on a heading, Show More or
    no game */
@@ -4937,6 +4957,8 @@ static void draw_games(App* app) {
     SDL_Color soft = rgb(app->theme.soft), ink = rgb(app->theme.ink), failure = rgb(app->theme.failure);
     int y;
     aot_status_update(app);
+    app->debug_picks = gui_settings_debug(settings_of(app), NULL, 1, NULL, 0) > 0;
+    debug_focus_update(app);
     games_boxes(app, &g);
     chrome(app, &g.place);
     if (games_grid(app))
@@ -4952,6 +4974,10 @@ static void draw_games(App* app) {
         r = gui_rect(r.x, y, r.w, g.place.side.y + g.place.side.h - y);
         y += wrap_in(app, r, r.x, y, about, app->browser.selected != 0, ink) * cell_h(app);
         if (kind[0]) y += wrap_in(app, r, r.x, y, kind, 0, soft) * cell_h(app);
+        if (app->debug_focus[0]) { /* what the game will say over its picture */
+            snprintf(line, sizeof line, snx_tr("Debug on: %s"), app->debug_focus);
+            y += wrap_in(app, r, r.x, y, line, 0, failure) * cell_h(app);
+        }
         if (app->aot_state == GUI_AOT_CACHE) {
             char size[32];
             gui_size_text(size, sizeof size, app->aot_info.size);
@@ -10562,6 +10588,36 @@ static char* aot_leaf(const char* folder) {
     while (leaf > folder && leaf[-1] != '/' && leaf[-1] != '\\') --leaf;
     return snx_strdup(leaf);
 }
+/* the Debug settings a run of the game at path (its program) takes off their default (gui_settings_debug), with the
+   picks and the GDB stub or its .ini's alone: how many. None for a package or a game of another console, whose
+   runtime has its own */
+static int game_debug(App* app, const char* path, int picks, char* out, size_t size) {
+    char *folder = path && gui_game_folder(path) ? snx_dirname(path) : NULL, *name = folder ? aot_leaf(folder) : NULL;
+    char* ini = name ? snx_game_ini(folder, name) : NULL;
+    /* a made game by the console its folder says; else a dump, which the Switch driver prepares and plays */
+    int nx = name ? snx_game_system(folder, name) == SNX_SYSTEM_SWITCH : path && !package(path), n = 0;
+    if (size) out[0] = 0;
+    if (nx) n = gui_settings_debug(settings_of(app), ini, picks, out, size);
+    free(ini);
+    free(name);
+    free(folder);
+    return n;
+}
+/* the recent rows' .ini's part, as list_games reads the others' */
+static void recent_debug_read(App* app) {
+    for (int i = 0; i < recent_shown(app); ++i)
+        app->recent_debug[i] = game_debug(app, app->recent.game[i].path, 0, NULL, 0) > 0;
+}
+/* the focused row's Debug settings, for the side panel: looked at again when the focus moves or a second passes */
+static void debug_focus_update(App* app) {
+    bool recent;
+    const char* path = games_focused_path(app, &recent);
+    if (path && app->debug_path && !strcmp(path, app->debug_path) && now_ms(app) - app->debug_checked < 1000) return;
+    free(app->debug_path);
+    app->debug_path = path ? snx_strdup(path) : NULL;
+    app->debug_checked = now_ms(app);
+    game_debug(app, path, 1, app->debug_focus, sizeof app->debug_focus);
+}
 static int aot_focus_game(App* app, AotFocus* f) {
     size_t row = app->browser.selected, head = app->browser.head;
     size_t index = app->browser.page * app->browser.page_size + row - head;
@@ -11167,6 +11223,12 @@ static void list_games(App* app) {
     free(app->games_drivers);
     app->games_drivers = (int*)snx_alloc((app->games.count + 1) * sizeof *app->games_drivers);
     for (size_t i = 0; i < app->games.count; ++i) app->games_drivers[i] = row_driver(&app->games, i);
+    free(app->games_debug);
+    app->games_debug = (bool*)snx_alloc((app->games.count + 1) * sizeof *app->games_debug);
+    for (size_t i = 0; i < app->games.count; ++i)
+        app->games_debug[i] = app->games.paths[i] && game_debug(app, app->games.paths[i], 0, NULL, 0) > 0;
+    recent_debug_read(app);
+    app->debug_checked = 0; /* and the focused row's, at the next draw */
     app->games_fresh = true;
     watch_set(app);
     memset(&app->browser, 0, sizeof(app->browser));
@@ -12539,6 +12601,8 @@ static void forget(App* app) {
     free(app->job_log);
     gui_games_free(&app->games);
     free(app->games_drivers);
+    free(app->games_debug);
+    free(app->debug_path);
     addons_close(app);
     SDL_free(app->cwd);
     if (app->editing) gui_editor_stop(&app->editor);

@@ -6,7 +6,9 @@
    under a unit's key is what the module runs (the build read it, not compiled); a cut, altered or short object is
    compiled again and said, and so is a whole object under another unit's key; a reuse renews the file's time, and
    the size limit removes the oldest files, never another file of the folder. Each field of the key changes it, and
-   the key of fixed fields is pinned */
+   the key of fixed fields is pinned. A pack for another machine (here this host's triple) is written a record at a
+   time, the bytes of snx_objects_pack, with the units the cache holds read back from it, and each failure says what
+   failed and why; a unit the cache holds for the pack stays there while the disk's room is made */
 #include "common/cpu/aarch64/cpu.h"
 #include "common/utilities/common.h"
 #include "nx/loader/loader.h"
@@ -14,7 +16,9 @@
 #include "nx/loader/module_abi.h"
 #include "nx/loader/module_llvm.h"
 #include "nx/loader/unit_cache.h"
+#include "common/cpu/recompiler/llvm/objects_pack.h"
 #include <errno.h>
+#include <llvm-c/TargetMachine.h>
 #include <llvm/Config/llvm-config.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +47,12 @@ static struct {
     SnxUnitDisk disk;
     SnxU64 disk_free, disk_total;
     int disk_fails;
+    int disk_plenty; /* the next calls answered with the whole disk free */
+    /* a file cut to disk_cut bytes (0: removed) at the next call, as another process may between a unit's compile and
+       the pack's write */
+    char disk_touch[512];
+    size_t disk_cut;
+    const char* triple; /* the next builds' SnxLlvmBuild.triple: a pack */
 } g_unit_cache;
 
 #define CHECK(x)                                                                                                       \
@@ -59,8 +69,20 @@ static void sink(const char* line) {
         snprintf(g_unit_cache.said[g_unit_cache.said_count++], sizeof g_unit_cache.said[0], "%s", line);
 }
 static void forget(void) { g_unit_cache.said_count = 0; }
+static int damage(const char* path, size_t size, size_t offset);
 static int fake_disk(const char* folder, SnxU64* free_bytes, SnxU64* total) {
     (void)folder;
+    if (g_unit_cache.disk_touch[0]) {
+        if (g_unit_cache.disk_cut ? damage(g_unit_cache.disk_touch, g_unit_cache.disk_cut, 0)
+                                  : snx_remove_tree(g_unit_cache.disk_touch))
+            fprintf(stderr, "cannot cut or remove %s\n", g_unit_cache.disk_touch);
+        g_unit_cache.disk_touch[0] = 0;
+    }
+    if (g_unit_cache.disk_plenty) {
+        --g_unit_cache.disk_plenty;
+        *free_bytes = *total = g_unit_cache.disk_total;
+        return 0;
+    }
     if (g_unit_cache.disk_fails) {
         --g_unit_cache.disk_fails;
         errno = EACCES;
@@ -111,6 +133,7 @@ static int build(const char* folder, const char* output, SnxU64 limit) {
     options.quiet = 1;
     options.chunk_instrs = 1; /* each function a unit */
     llvm.output = output;
+    llvm.triple = g_unit_cache.triple;
     llvm.opt = '2';
     llvm.jobs = 1;
     llvm.quiet = 1;
@@ -348,6 +371,182 @@ static void trim(void) {
     snx_remove_tree(folder);
 }
 
+/* what snx_objects_pack_write's load gives for an input (NULL: nothing), and its calls */
+typedef struct {
+    const char* give;
+    size_t loads, written[4], written_count;
+} PackCalls;
+static unsigned char* pack_load(void* arg, size_t index, size_t* size, char* why, size_t why_size) {
+    PackCalls* calls = (PackCalls*)arg;
+    unsigned char* data;
+    ++calls->loads;
+    if (!calls->give) {
+        snprintf(why, why_size, "the test's load has nothing for input %zu", index);
+        return NULL;
+    }
+    *size = strlen(calls->give);
+    data = (unsigned char*)malloc(*size + 1);
+    memcpy(data, calls->give, *size + 1);
+    return data;
+}
+static void pack_written(void* arg, size_t index) {
+    PackCalls* calls = (PackCalls*)arg;
+    if (calls->written_count < 4) calls->written[calls->written_count++] = index;
+}
+
+/* a pack written a record at a time is snx_objects_pack's bytes, an input of no data read when its turn comes; a
+   read that fails, one of another size, a file that cannot be made or written: each said with what and why */
+static void pack_records(void) {
+    const char* folder = "snx-test-unit-cache.records";
+    SnxLinkInput inputs[3] = {
+        {(const unsigned char*)"abc", 3, "first"}, {NULL, 5, "second"}, {(const unsigned char*)"", 0, "third"}};
+    SnxLinkInput whole[3];
+    PackCalls calls = {0};
+    unsigned char *expected, *file;
+    size_t expected_size = 0, file_size = 0, size = 0;
+    char *path, *missing, error[1024], want[1024];
+    snx_remove_tree(folder);
+    CHECK(!snx_mkdirs(folder));
+    path = snx_path_join(folder, "pack.snxobj");
+    missing = snx_path_join(folder, "none/pack.snxobj");
+    memcpy(whole, inputs, sizeof whole);
+    whole[1].data = (const unsigned char*)"hello";
+    expected = snx_objects_pack(whole, 3, &expected_size);
+    calls.give = "hello";
+    CHECK(!snx_objects_pack_write(inputs, 3, path, &size, pack_load, pack_written, &calls, error, sizeof error));
+    file = snx_read_file(path, &file_size);
+    CHECK(expected && file && file_size == expected_size && size == file_size && !memcmp(file, expected, file_size));
+    CHECK(calls.loads == 1 && calls.written_count == 3 && calls.written[0] == 0 && calls.written[1] == 1 &&
+          calls.written[2] == 2);
+    free(file);
+    calls.give = NULL;
+    CHECK(snx_objects_pack_write(inputs, 3, path, &size, pack_load, NULL, &calls, error, sizeof error) &&
+          !strcmp(error, "cannot read back input 1 of 3 (second): the test's load has nothing for input 1"));
+    calls.give = "help";
+    CHECK(snx_objects_pack_write(inputs, 3, path, &size, pack_load, NULL, &calls, error, sizeof error) &&
+          !strcmp(error, "input 1 of 3 (second) read back is 4 bytes, 5 when it was made"));
+    CHECK(snx_objects_pack_write(whole, 3, missing, &size, NULL, NULL, NULL, error, sizeof error));
+    snprintf(want, sizeof want, "cannot write %s: ", missing);
+    CHECK(!strncmp(error, want, strlen(want)) && strlen(error) > strlen(want)); /* and the system's reason */
+#ifdef __linux__
+    if (snx_path_exists("/dev/full")) { /* every write fails with ENOSPC */
+        /* a record past the stdio buffer fails as it is written, a small pack when the file is closed */
+        static const unsigned char large[1 << 16];
+        SnxLinkInput big = {large, sizeof large, "big"};
+        snprintf(want, sizeof want, "cannot write /dev/full: %s", strerror(ENOSPC));
+        CHECK(snx_objects_pack_write(&big, 1, "/dev/full", &size, NULL, NULL, NULL, error, sizeof error) &&
+              !strcmp(error, want));
+        CHECK(snx_objects_pack_write(whole, 3, "/dev/full", &size, NULL, NULL, NULL, error, sizeof error) &&
+              !strcmp(error, want));
+    }
+#endif
+    free(expected);
+    free(missing);
+    free(path);
+    snx_remove_tree(folder);
+}
+
+/* the path of f0's object in folder, the one that names F_<f0>; NULL for none */
+static char* f0_object(const char* folder) {
+    char **names = NULL, f0[32], *found = NULL;
+    size_t count = 0, i;
+    snprintf(f0, sizeof f0, "F_%llX", (unsigned long long)(SNX_CODE_BASE + TEXT_OFF));
+    if (snx_list_dir(folder, &names, &count)) return NULL;
+    for (i = 0; i < count && !found; ++i) {
+        char* path;
+        unsigned char* data;
+        size_t size = 0;
+        if (strlen(names[i]) != 66 || strcmp(names[i] + 64, ".o")) continue;
+        path = snx_path_join(folder, names[i]);
+        data = snx_read_file(path, &size);
+        if (data && contains(data, size, f0))
+            found = path;
+        else
+            free(path);
+        free(data);
+    }
+    snx_free_strings(names, count);
+    return found;
+}
+
+/* A pack of this host's triple, its units through the cache: the bytes of the pack made with every object in memory,
+   compiled or reused, the units the cache holds read back from it. f0's object removed or cut after its unit took it
+   and before the pack reads it back (while room is made for f1's new unit) fails the pack, saying the unit and why.
+   On a nearly full disk, f1's unit gets no room by removing f0's, which the pack reads back: f1's is not cached and
+   the pack is whole */
+static void pack_units(void) {
+    const char* folder = "snx-test-unit-cache.packs";
+    const char* cache = "snx-test-unit-cache.packs/units";
+    char *triple = LLVMGetDefaultTargetTriple(), *reference, *out, *tmp, *path0 = NULL, f1[2][80];
+    SnxU64 size0 = 0, size1 = 0;
+    snx_remove_tree(folder);
+    CHECK(!snx_mkdirs(folder));
+    reference = snx_path_join(folder, "reference.snxobj");
+    out = snx_path_join(folder, "out.snxobj");
+    tmp = snx_format("%s.tmp", out);
+    g_unit_cache.triple = triple;
+    g_unit_cache.disk_total = 1000000000000ull;
+    program(1);
+    CHECK(!build(NULL, reference, 0));
+    forget();
+    CHECK(!build(cache, out, 0) && same_file(reference, out) && objects(cache, NULL) == 2 && !g_unit_cache.said_count);
+    CHECK(!build(cache, out, 0) && same_file(reference, out));
+    path0 = f0_object(cache);
+    CHECK(path0 != NULL);
+    if (!path0) goto done;
+    size0 = snx_file_size(path0);
+    /* removed: program(5) makes f1's unit new, and its room the moment */
+    g_unit_cache.disk = fake_disk;
+    g_unit_cache.disk_plenty = 1;
+    snprintf(g_unit_cache.disk_touch, sizeof g_unit_cache.disk_touch, "%s", path0);
+    program(5);
+    forget();
+    CHECK(build(cache, out, 0) && !snx_is_file(tmp) && same_file(reference, out));
+    CHECK(said("packing failed: cannot read back input 1 of 3 (code chunk): code_000: cannot read ", path0));
+    /* cut: program(6), another new unit for f1 */
+    g_unit_cache.disk = NULL;
+    program(1);
+    CHECK(!build(cache, out, 0) && snx_file_size(path0) == size0);
+    g_unit_cache.disk = fake_disk;
+    g_unit_cache.disk_plenty = 1;
+    snprintf(g_unit_cache.disk_touch, sizeof g_unit_cache.disk_touch, "%s", path0);
+    g_unit_cache.disk_cut = (size_t)size0 - 100;
+    program(6);
+    forget();
+    CHECK(build(cache, out, 0) && !snx_is_file(tmp));
+    CHECK(said("packing failed: cannot read back input 1 of 3 (code chunk): code_000: ", "is not a whole object (") &&
+          said(path0, "which do not end in the SNXUNIT1 check"));
+    g_unit_cache.disk_cut = 0;
+    /* a nearly full disk: f1's room is a byte, which only f0's object, this run's, could make */
+    g_unit_cache.disk = NULL;
+    program(1);
+    CHECK(!snx_remove_tree(cache) && !build(cache, out, 0) && objects(cache, f1) == 2 && f1[0][0]);
+    {
+        char* path1 = snx_path_join(cache, f1[0]);
+        size1 = snx_file_size(path1);
+        free(path1);
+    }
+    CHECK(size1 > 0 && !snx_remove_tree(cache));
+    g_unit_cache.disk = fake_disk;
+    g_unit_cache.disk_plenty = 1; /* f0's unit, kept */
+    g_unit_cache.disk_free = g_unit_cache.disk_total / 10 + size1 - 1;
+    forget();
+    CHECK(!build(cache, out, 0) && same_file(reference, out));
+    CHECK(snx_is_file(path0) && objects(cache, NULL) == 1);
+    CHECK(said("it leaves free: units without room are not cached", NULL));
+done:
+    g_unit_cache.disk = NULL;
+    g_unit_cache.disk_plenty = 0;
+    g_unit_cache.disk_touch[0] = 0;
+    g_unit_cache.triple = NULL;
+    LLVMDisposeMessage(triple);
+    free(path0);
+    free(tmp);
+    free(out);
+    free(reference);
+    snx_remove_tree(folder);
+}
+
 int main(void) {
 #ifdef _WIN32
 #define SUFFIX ".dll"
@@ -375,14 +574,34 @@ int main(void) {
     CHECK(strstr(llvm, LLVM_VERSION_STRING) != NULL);
     keys();
     trim();
+    pack_records();
+    pack_units();
     snx_remove_tree(folder);
     for (i = 0; i < sizeof dirs / sizeof *dirs; ++i) {
         snx_remove_tree(dirs[i]);
         CHECK(!snx_mkdirs(dirs[i]));
     }
 
-    /* cold: both units compiled and kept */
+    /* a compiled unit's line: its time, and the memory the process holds where the system tells it */
+    {
+        char line[256];
+        const char* label = "0x10-0x20, 1 function, 4 instructions";
+        snx_unit_line(line, sizeof line, 3, 9, "code_002", label, 0, 1.3, (SnxU64)512 << 20);
+        CHECK(!strcmp(line,
+                      "  compiled block 3/9: code_002, 0x10-0x20, 1 function, 4 instructions (1.3 s, 512 MiB in use)"));
+        snx_unit_line(line, sizeof line, 3, 9, "code_002", label, 0, 1.3, 0);
+        CHECK(!strcmp(line, "  compiled block 3/9: code_002, 0x10-0x20, 1 function, 4 instructions (1.3 s)"));
+        snx_unit_line(line, sizeof line, 3, 9, "code_002", label, 1, 1.3, (SnxU64)512 << 20);
+        CHECK(!strcmp(line, "  compiled block 3/9: code_002, 0x10-0x20, 1 function, 4 instructions (cached)"));
+    }
+    /* an abort asked of a build: it stops before its next unit, saying how many it compiled, and keeps none */
     program(1);
+    forget();
+    snx_abort_request(1);
+    CHECK(build(folder, out[0], 0) && said("aborted by the player, 0 of 2 code units compiled", NULL));
+    CHECK(objects(folder, NULL) == 0);
+    snx_abort_request(0);
+    /* cold: both units compiled and kept */
     CHECK(!build(folder, out[0], 0) && run(out[0]) == 42);
     CHECK(g_unit_cache.wrappers == 0); /* no profile cache, whose units alone call them */
     CHECK(objects(folder, f1) == 2 && f1[0][0] && !f1[1][0]);

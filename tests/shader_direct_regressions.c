@@ -11,6 +11,8 @@
 #define EXIT           0xE30000000007000Full
 #define HANDLE_CBUF_R4 ((0x4c98078805a7001eull & ~0xffull) | 4ull)
 #define F2I            0x5CB0118000070A00ull
+#define R2P_R          0x5CF0000000000000ull
+#define P2R_R          0x5CE8000000000000ull
 #define FMUL_FTZ       0x5C68100000070000ull
 #define FMUL_KEEP      0x5C68000000070000ull
 #define FADD_KEEP      0x5C58000000070000ull
@@ -152,6 +154,45 @@ static int count_opcode(const u32* code, size_t words, u32 opcode, u32 operand) 
         i += width;
     }
     return found;
+}
+
+/* Every boolean OpLoad reads a variable whose pointer type points to bool. A predicate or flag whose variable the
+   module leaves out is loaded through id 0 (the flags form of R2P and P2R used to take the flag variables' ids as
+   their indexes), and radv crashed on that module while making the pipeline. */
+static int bool_loads_read_variables(const u32* code, size_t words) {
+    u32 bool_type = 0, pointer_types[8], variables[64];
+    int pointer_count = 0, variable_count = 0;
+    for (size_t i = 5; i < words;) {
+        u32 width = code[i] >> 16, op = code[i] & 0xffff;
+        if (!width || i + width > words) return 0;
+        if (op == 20 && width == 2) bool_type = code[i + 1]; /* OpTypeBool */
+        if (op == 32 && width == 4 && pointer_count < 8 && code[i + 3] == bool_type)
+            pointer_types[pointer_count++] = code[i + 1]; /* OpTypePointer to bool */
+        i += width;
+    }
+    if (!bool_type || !pointer_count) return 0;
+    for (size_t i = 5; i < words;) {
+        u32 width = code[i] >> 16, op = code[i] & 0xffff;
+        if (!width || i + width > words) return 0;
+        if (op == 59 && width >= 4 && variable_count < 64) { /* OpVariable, with an initializer or not */
+            for (int k = 0; k < pointer_count; k++)
+                if (code[i + 1] == pointer_types[k]) variables[variable_count++] = code[i + 2];
+        }
+        i += width;
+    }
+    int loads = 0;
+    for (size_t i = 5; i < words;) {
+        u32 width = code[i] >> 16, op = code[i] & 0xffff;
+        if (!width || i + width > words) return 0;
+        if (op == 61 && width >= 4 && code[i + 1] == bool_type) { /* OpLoad, of bool */
+            int found = 0;
+            for (int k = 0; k < variable_count; k++) found |= variables[k] == code[i + 3];
+            if (!found) return 0;
+            loads++;
+        }
+        i += width;
+    }
+    return loads > 0;
 }
 
 /* whether every OpExtInst names an instruction set the module imports: one naming id 0 crashed NVIDIA's SPIR-V front
@@ -601,6 +642,26 @@ static void f2i_modifiers(void) {
     }
 }
 
+static u64 mov32i(u32 reg, u32 value) { return 0x0100000000000000ull | ((u64)value << 20) | 0x71000ull | reg; }
+
+/* R2P and P2R transfer the condition flags too (bit 40): the flags are variables of their own (z, s, c, o), read
+   and written by their VAR_FLAG + p index, not by their variable id. A program that doesn't also use registers at
+   those ids left R2P loading id 0, invalid SPIR-V that radv crashed on while making the pipeline. */
+static void flag_transfers(void) {
+    const u64 program[] = {
+        mov32i(5, 15),                                                   /* r5 = 15: the flags' bits */
+        mov32i(6, 15),                                                   /* r6 = 15: the mask */
+        R2P_R | (1ull << 40) | (5ull << 8) | (6ull << 20),               /* R2P: z,s,c,o = r5 & r6 */
+        P2R_R | (1ull << 40) | 7 | (5ull << 8) | (6ull << 20),           /* P2R: r7 = r5 with the flags */
+    };
+    ShaderInfo info;
+    size_t words = 0;
+    u32* code = translate(program, 4, ST_FS, &info, &words, 1);
+    check_translated(code, &info, "R2P and P2R's flags translate");
+    if (code) check(bool_loads_read_variables(code, words), "the flags' transfers load their variables");
+    free(code);
+}
+
 static void global_buffers(void) {
     static const struct {
         u64 instructions[3];
@@ -898,7 +959,6 @@ static u64 unguarded(u64 w, u32 d, u32 a, u32 handle) {
     return (w & ~(0xffull | 0xffull << 8 | 0xfull << 16 | 0xffull << 39)) | d | (u64)a << 8 | 7ull << 16 |
            (u64)handle << 39;
 }
-static u64 mov32i(u32 reg, u32 value) { return 0x0100000000000000ull | ((u64)value << 20) | 0x71000ull | reg; }
 
 static int brx_table(u32 bank, u32 offset, u32* value) {
     if (bank || offset > 8) return 0;
@@ -2661,6 +2721,7 @@ int main(int argc, char** argv) {
     cbuf_integer_loads();
     unsupported_names_word();
     f2i_modifiers();
+    flag_transfers();
     global_buffers();
     float_controls();
     precise_math();

@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
    Copyright 2026 the ScarletNX contributors */
 /* thumb_emit HALFWORDS OUTPUT.o [OPT [a57|arm7tdmi]]: each input line is PC followed by up to
-   64 hexadecimal halfwords. Exports block_0, block_1, ... (SnxArmBlock ABI). */
+   64 hexadecimal halfwords. Exports block_0, block_1, ... (SnxArmBlock ABI). ~PC makes
+   the block optional, as in arm_emit. */
 #include "common/cpu/arm/llvm.h"
 #include <llvm-c/Analysis.h>
 #include <llvm-c/Target.h>
@@ -48,8 +49,10 @@ int main(int argc, char** argv) {
         uint32_t pc;
         size_t n = 0, consumed;
         char name[32], *token = strtok(line, " \t\r\n");
+        int lenient;
         if (!token) continue;
-        pc = (uint32_t)strtoul(token, NULL, 16);
+        lenient = *token == '~';
+        pc = (uint32_t)strtoul(token + lenient, NULL, 16);
         while ((token = strtok(NULL, " \t\r\n")) != NULL) {
             if (n == 64) return 2;
             halfwords[n++] = (uint16_t)strtoul(token, NULL, 16);
@@ -57,8 +60,10 @@ int main(int argc, char** argv) {
         snprintf(name, sizeof(name), "block_%u", index++);
         if (!(argc == 5 ? snx_thumb_llvm_block_ex(mod, name, halfwords, n, pc, &consumed, &codegen)
                         : snx_thumb_llvm_block(mod, name, halfwords, n, pc, &consumed)) ||
-            !consumed)
+            !consumed) {
+            if (lenient) continue;
             return 2;
+        }
     }
     fclose(input);
     if (LLVMVerifyModule(mod, LLVMReturnStatusAction, &error)) goto fail;

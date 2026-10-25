@@ -289,12 +289,11 @@ static bool mount(SnxCtrProcess* p, const char* directory, const SnxCtrCia* cia)
     }
     p->tree = tree;
     pm_lock(&tree->lock);
-    unsigned shared = 0, failed = 0;
+    FsShare share = {0};
     bool ok = true;
     for (unsigned i = 0; i < 2 && ok && !cia; ++i) {
         FsNode* node = NULL;
-        if (!fs_tree_lookup(tree, NULL, i ? "exefs" : "romfs", &node))
-            ok = !fs_tree_share(tree, node, &shared, &failed);
+        if (!fs_tree_lookup(tree, NULL, i ? "exefs" : "romfs", &node)) ok = !fs_tree_share(tree, node, &share);
     }
     pm_unlock(&tree->lock);
     if (cia) {

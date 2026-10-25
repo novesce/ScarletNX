@@ -153,7 +153,7 @@ int vk_astc_upload(VkCommandBuffer cb, Surf* t, u32 w, u32 h, u32 depth, u32 lev
             u64 size = row_in * n * nz, offset;
             VkBuffer input;
             VkDescriptorSet set =
-                rows(ctx, cb, z, nz, y, n, &input, &offset) ? vk_desc_alloc(g_astc_ds) : VK_NULL_HANDLE;
+                rows(ctx, &cb, z, nz, y, n, &input, &offset) ? vk_desc_alloc(g_astc_ds) : VK_NULL_HANDLE;
             if (!set) {
                 LOG_LIMIT(1, "vulkan: out of staging memory for a %ux%u ASTC texture (left out)\n", w, h);
                 return 0;

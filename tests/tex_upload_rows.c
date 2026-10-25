@@ -154,7 +154,7 @@ int vk_astc_upload(VkCommandBuffer cb, Surf* t, u32 w, u32 h, u32 depth, u32 lev
             u32 n = ny - y < 3 ? ny - y : 3;
             VkBuffer b;
             u64 off;
-            CHECK(rows(ctx, cb, z, 1, y, n, &b, &off) && mem_of(b));
+            CHECK(rows(ctx, &cb, z, 1, y, n, &b, &off) && mem_of(b));
             memcpy(astc_out + ((u64)z * ny + y) * nx * 16, mem_of(b) + off, (u64)n * nx * 16);
         }
     return 1;

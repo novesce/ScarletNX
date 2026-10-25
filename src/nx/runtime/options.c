@@ -15,6 +15,7 @@
 #include "nx/runtime/main.h"
 #include "nx/runtime/platform/backend.h"
 #include "nx/runtime/platform/gamepad.h"
+#include "nx/runtime/platform/hud.h"
 #include "nx/runtime/platform/log.h"
 #include "nx/runtime/platform/plat.h"
 #include "nx/runtime/platform/unattended.h"
@@ -410,6 +411,23 @@ static void say_deprecated(void) {
     if (ini_deprecated_note(line, sizeof line, g_path, keys, n)) WARN("%s\n", line);
 }
 
+int options_debug(int flags, char* out, size_t n) {
+    int count = ini_changed(g_debug_ini, flags, out, n);
+    size_t at = strlen(out);
+    if (g_opt_gdb && at < n) snprintf(out + at, n - at, "%sgdbstub", count++ ? ", " : "");
+    return count;
+}
+/* the Debug settings in effect at the top of the picture; after a reload that changes them, in the log too */
+static void debug_shown(int reloaded) {
+    char list[HUD_DEBUG_MAX];
+    options_debug(INI_CHANGED_NO_TEXT, list, sizeof list);
+    if (!hud_debug_set(list) || !reloaded) return;
+    if (options_debug(INI_CHANGED_DEFAULT, list, sizeof list))
+        LOG("debug: after the reload, %s\n", list);
+    else
+        LOG("debug: after the reload, every Debug setting is at its default\n");
+}
+
 void ini_open(const char* path) {
     Pending taken[PENDING_MAX];
     unsigned char* text;
@@ -426,6 +444,7 @@ void ini_open(const char* path) {
         WARN("settings: cannot read %s (%s): every setting takes its default, and the file is not written over\n",
              g_path, why);
         apply_all();
+        debug_shown(0);
         g_started = 1;
         return;
     }
@@ -437,6 +456,7 @@ void ini_open(const char* path) {
     n = pending_take(taken);
     say_deprecated();
     apply_all();
+    debug_shown(0);
     if (!write_file()) pending_written(taken, n);
     g_started = 1;
 }
@@ -471,6 +491,7 @@ void ini_poll(int final) {
         n = pending_take(taken);
         apply_all();
         LOG("settings: %s reloaded\n", g_path);
+        debug_shown(1);
         if (!write_file()) pending_written(taken, n);
     } else if (h != g_hash)
         g_seen = h; /* changed: maybe still being saved, read at the next poll if it stays so */

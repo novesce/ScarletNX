@@ -111,8 +111,17 @@ interface nn::ns::detail::IServiceGetterInterface is ns:am2, ns:ec, ns:rid, ns:r
 # ================================================================ prepo, caps, ectx: nothing served
 # play reports, which the console uploads to its maker: kept nowhere here (Switchbrew's "Play Report services")
 interface nn::prepo::detail::ipc::IPrepoService is prepo:u, prepo:a, prepo:a2 {
-    # the user's id and the process's, with no pid placeholder word before them (the game's request: 0x10 raw bytes)
-    @stub [10105] SaveReportWithUser(bytes<0x10, 8> uid, pid, buffer<u8, 9> event_id, buffer<u8, 5> report);
+    # a play report, kept nowhere: the event's name and its MessagePack report, each firmware's command for it the
+    # same. With a user, the user's id and then the process's, with no pid placeholder word before them (a game's
+    # request: 0x10 raw bytes)
+    @stub [10100] SaveReportOld(pid, buffer<u8, 9> event_id, buffer<u8, 5> report);
+    @stub [10101] SaveReportWithUserOld(bytes<0x10, 8> uid, pid, buffer<u8, 9> event_id, buffer<u8, 5> report);
+    @stub [10102] SaveReportOld2(pid, buffer<u8, 9> event_id, buffer<u8, 5> report);
+    @stub [10103] SaveReportWithUserOld2(bytes<0x10, 8> uid, pid, buffer<u8, 9> event_id, buffer<u8, 5> report);
+    @stub [10104] SaveReportOld3(pid, buffer<u8, 9> event_id, buffer<u8, 5> report);
+    @stub [10105] SaveReportWithUserOld3(bytes<0x10, 8> uid, pid, buffer<u8, 9> event_id, buffer<u8, 5> report);
+    @stub [10106] SaveReport(pid, buffer<u8, 9> event_id, buffer<u8, 5> report);
+    @stub [10107] SaveReportWithUser(bytes<0x10, 8> uid, pid, buffer<u8, 9> event_id, buffer<u8, 5> report);
     @stub [10200] RequestImmediateTransmission();
     @stub [10400] GetSystemSessionId() -> u64 id;
 }
@@ -354,15 +363,18 @@ interface nn::irsensor::IIrSensorServer is irs {
     @stub [311] GetNpadIrCameraHandle(u32 npad_id) -> nn::irsensor::IrCameraHandle handle;
 }
 
-# ================================================================ mii: an empty database
+# ================================================================ mii: a fixed database of eight pre-baked Miis
 type nn::mii::CharInfoElement = bytes<0x5c, 4>;
 type nn::mii::CharInfo = bytes<0x58, 4>;
+type nn::mii::StoreDataElement = bytes<0x48, 4>;
+type nn::mii::StoreData = bytes<0x44, 4>;
 
 @fallback(quiet_ok)
 interface nn::mii::detail::IStaticService is mii:e, mii:u {
     [0] GetDatabaseService(i32 key_code) -> object<nn::mii::detail::IDatabaseService> database;
 }
-# the database (source 1) holds no Mii here: what is counted and given are the six defaults (source 2)
+# the database (source flag 1) holds eight pre-baked Miis that never change, so it is never updated or full, and the
+# six defaults (source flag 2) follow them
 interface nn::mii::detail::IDatabaseService {
     @stub [0] IsUpdated(i32 source_flag) -> b8 updated;
     @stub [1] IsFullDatabase() -> b8 full;
@@ -372,6 +384,9 @@ interface nn::mii::detail::IDatabaseService {
     [5] UpdateLatest(nn::mii::CharInfo info, i32 source_flag) -> nn::mii::CharInfo latest;
     [6] BuildRandom(u32 age, u32 gender, u32 race) -> nn::mii::CharInfo info;
     [7] BuildDefault(u32 index) -> nn::mii::CharInfo info;
+    # the same Miis as Get and Get1, as nn::mii::StoreData: packed, with its checksums
+    [8] Get2(i32 source_flag, array<nn::mii::StoreDataElement, 6> elements) -> i32 count;
+    [9] Get3(i32 source_flag, array<nn::mii::StoreData, 6> infos) -> i32 count;
     [21] GetIndex(nn::mii::CharInfo info) -> i32 index;
     [22] SetInterfaceVersion(u32 version);
 }

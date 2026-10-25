@@ -187,14 +187,9 @@ endif()
 
 # Extraction-only and tools-only builds do not contain the NX runtime or its graphics/media dependencies.
 if(SNX_BUILD_NX AND NOT SNX_TOOLS_ONLY)
-    # the shared fonts' stand-ins (cmake/shared_fonts.cmake): DejaVu Sans 2.37 (the Bitstream Vera license, see
-    # dist/licenses/DejaVu/LICENSE) for the five text fonts, because a game asks the font for the box and the symbols
-    # it draws and the Open Sans Eden ships has none of them, and yuzu's controller button glyphs (GPL-2.0-or-later)
-    # in the source file Eden keeps them in
-    CPMAddPackage(NAME DejaVuSans VERSION 2.37
-                  URL https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.tar.bz2
-                  URL_HASH SHA256=fa9ca4d13871dd122f61258a80d01751d603b4d3ee14095d65453b4e846e17d7
-                  DOWNLOAD_ONLY YES)
+    # the shared fonts' stand-ins (cmake/shared_fonts.cmake): Noto Sans subsets in dist/fonts for the five text fonts,
+    # one per script, because a game asks the font for the characters it draws and the Open Sans Eden ships has none
+    # of the CJK ones; and yuzu's controller button glyphs (GPL-2.0-or-later) in the source file Eden keeps them in
     CPMAddPackage(NAME YuzuOSSExtension VERSION 2019
                   URL https://raw.githubusercontent.com/eden-emulator/mirror/2b87305d319f0bd04da36fb96314934f37b12637/src/core/file_sys/system_archive/data/font_nintendo_extended.cpp
                   URL_HASH SHA256=6fbbf5176ff4fd2024f9d150c889477f6b45ece4ac5e45d51286e32f8b13a6f2

@@ -44,6 +44,9 @@
 #include <SDL3/SDL_system.h>
 #include <sys/system_properties.h>
 #endif
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#endif
 #if defined(__APPLE__) || defined(__FreeBSD__)
 #include <sys/sysctl.h>
 #endif
@@ -476,6 +479,42 @@ u64 plat_vm_page(void) {
 }
 /* mmap aligns to the host's own page: a larger plat_vm_page (SNX_HOST_PAGE) takes a page more and trims the rest, so
    guest addresses sit at the same place in a page as their host addresses */
+int plat_address_space(u64* mapped, u64* largest_free) {
+    u64 total = 0, hole = 0, last = 0;
+#if defined(__linux__)
+    /* each mapping's range, in address order, a line each */
+    char line[PATH_MAX + 128];
+    unsigned long long lo, hi;
+    FILE* f = fopen("/proc/self/maps", "r");
+    if (!f) return 0;
+    while (fgets(line, sizeof line, f)) {
+        if (sscanf(line, "%llx-%llx ", &lo, &hi) != 2 || hi <= lo) continue;
+        total += hi - lo;
+        if (last && lo > last && lo - last > hole) hole = lo - last;
+        last = hi;
+    }
+    fclose(f);
+#elif defined(__APPLE__)
+    vm_address_t at = 0;
+    for (;;) {
+        vm_size_t size = 0;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t object = MACH_PORT_NULL;
+        if (vm_region_64(mach_task_self(), &at, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &count,
+                         &object) != KERN_SUCCESS)
+            break;
+        total += size;
+        if (last && at > last && at - last > hole) hole = at - last;
+        last = at + size;
+        at = last;
+    }
+#endif
+    if (!total) return 0;
+    *mapped = total;
+    *largest_free = hole;
+    return 1;
+}
 u8* plat_vm_reserve(u64 size) {
     u64 page = plat_vm_page(), extra = page - (u64)sysconf(_SC_PAGESIZE), head;
     u8* p = (u8*)mmap(NULL, (size_t)(size + extra), PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);

@@ -98,7 +98,10 @@ build/scarletnx --scan-log ~/.local/state/scarletnx/recompiled/<id>/<id>.log [--
   `--log=2`: verbose; Windows `--profile=1`: `profile.txt` every 10 s.
 
 The game's `[Debug]` settings ([USAGE.md](USAGE.md#settings--input)) are for investigating. Each is also given for one run as
-`--key=value` on the game's command line:
+`--key=value` on the game's command line. One not at its default, and the GDB stub, is said at the top of the game's
+picture while it runs (`Debug on: log=2, gdbstub`, a text setting by its key alone), in the log's header
+(`debug: log=2 (default 1), gdbstub`), and in the launcher, as `(Debug on)` on the game's row and its Play and the list
+beside it:
 
 - `--gpu_trace_target=0x5acf62e00[:bytes]`: logs (`gpu-trace-target:`, at most 64 lines of each kind) the clears
   and draws that write a render target starting in that GPU address range, with its size, vertex or index count and

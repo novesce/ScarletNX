@@ -10,6 +10,7 @@ No game assets. Unicorn is optional and pinned to 2.1.4 for reproducibility.
 import argparse
 import ctypes as C
 import pathlib
+import platform
 import random
 import subprocess
 import tempfile
@@ -38,6 +39,35 @@ class CPU(C.Structure):
 
 PC = 0x1000
 SIZE = 0x10000
+
+# On an AArch64 host Unicorn 2.1.4 dies of SIGILL emulating VQADD, VQSUB and VSHL (register) with 64-bit lanes in D
+# registers: its TCG emits for them the vector SQADD, UQADD, SQSUB, UQSUB, SSHL and USHL with 64-bit lanes and Q 0,
+# which are reserved. The tests leave those to the other hosts, saying how many.
+UNICORN_AARCH64 = platform.machine() in ('aarch64', 'arm64')
+
+
+def unicorn_dies(isa, units):
+    """Whether Unicorn 2.1.4 dies on one of the instructions of units (A32 words, or Thumb halfwords) on this host"""
+    if not UNICORN_AARCH64:
+        return False
+    words, i = [], 0
+    while i < len(units):
+        if isa == 'arm':
+            words.append(units[i])
+        elif units[i] >> 11 >= 0x1D and i + 1 < len(units):  # Thumb32: NEON's 111U 1111 is A32's 1111 001U
+            w = units[i] << 16 | units[i + 1]
+            if (w & 0xEF000000) == 0xEF000000:
+                words.append(0xF2000000 | (w >> 28 & 1) << 24 | (w & 0x00FFFFFF))
+            i += 1
+        i += 1
+    for w in words:  # three registers of the same length, size 64, Q 0
+        if (w & 0xFE800000) == 0xF2000000 and (w >> 20) & 3 == 3 and not w & 0x40:
+            op, b = (w >> 8) & 15, (w >> 4) & 1
+            if (op in (0, 2) and b) or (op == 4 and not b):
+                return True
+    return False
+
+
 PROGRAMS = []
 PCS = []
 CASES = []

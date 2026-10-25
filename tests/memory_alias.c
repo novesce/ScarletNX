@@ -347,8 +347,15 @@ static void test_physical_pool(void)
 
 int main(void) {
     hle_init();
-    u64 info = STACK_BASE, off;
+    u64 info = STACK_BASE, off, mapped = 0, hole = 0;
     u8* p;
+    /* the address space as plat_posix.c reads it, which a host thread that cannot start logs: told on Linux and on
+       Apple's systems, every host's pages whatever their size */
+#if defined(__linux__) || defined(__APPLE__)
+    CHECK(plat_address_space(&mapped, &hole) && mapped > 0 && hole > 0);
+#else
+    CHECK(!plat_address_space(&mapped, &hole));
+#endif
     if (sysconf(_SC_PAGESIZE) != 4096) {
         printf("skipped: this host's pages are %ld bytes, and guest memory needs 4 KiB ones\n", sysconf(_SC_PAGESIZE));
         return 77;

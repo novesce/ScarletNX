@@ -17,7 +17,7 @@ Generated modules include runtime ABI code. Game assets, keys and firmware are e
 | NVN texture storage layout (`src/nx/gpu/nvn/nvn_tex.c`), ported from nxnative's `dm/gfx/nvn/nvn_tex.c` (MIT, seedds), whose algorithm is [deko3d](https://github.com/devkitPro/deko3d)'s `source/dk_image.cpp`, Copyright (C) 2018-2020 fincs | MIT / zlib |
 | NVN's texture and sampler descriptors (`src/nx/gpu/nvn/nvn_tic.c`), ported from [deko3d](https://github.com/devkitPro/deko3d)'s `source/maxwell/tic_generate.cpp`, `tsc_generate.cpp` and `format_traits.inc`, Copyright (C) 2018-2020 fincs (notice in the file) | zlib |
 | OpenSSL | Apache 2.0 |
-| DejaVu Sans 2.37 (the shared fonts' stand-in, `cmake/shared_fonts.cmake`) | the Bitstream Vera license ([text](../dist/licenses/DejaVu/LICENSE)) |
+| Noto Sans JP, SC, TC and KR Subsets (the shared fonts' stand-ins, `dist/fonts`, made by `tools/subset_fonts.py` from Google Fonts commit `e7db6ca603fd4862010383ff17ffd6cc4ffac1c0`) | SIL OFL 1.1 ([text](../dist/licenses/Noto/OFL.txt)) |
 | yuzu's controller button glyphs (`font_nintendo_extended.cpp`, as Eden carries it) | GPL-2.0-or-later |
 | The 3DS system archives' open stand-ins (`cmake/ctr_system_archives.cmake`): the Mii data, country list, shared font and bad word list B3n30/citra_system_archives makes (Weiyi Wang's generators), as Azahar carries them | GPL-2.0-or-later |
 | Montserrat and GNU Unifont 10.0.05, the glyphs of the 3DS shared font's stand-in | OFL-1.1 ([text](../dist/licenses/Montserrat/OFL.txt)) / GPL-2.0-or-later with the GNU font embedding exception |
@@ -62,7 +62,7 @@ a source keep that source's copyright lines and license, most with the revision 
 | `src/nx/hle/kernel/`, `src/nx/hle/svc/`, `src/nx/memory/`, `src/nx/hle/services/`, `src/nx/hle/filesystem/` | Eden and yuzu | GPL-3.0-or-later, GPL-2.0-or-later |
 | `src/nx/hle/services/nvdrv.c`, `nvdrv.h` and the `nvdrv_*.h` headers (the nvhost devices' commands and argument layouts, the ioctl encoding, the GMMU and VA layout, the syncpoint manager) | Eden and yuzu (`core/hle/service/nvdrv/`: `nvdata.h`, `core/syncpoint_manager.h`, `devices/nvmap`, `nvhost_as_gpu`, `nvhost_ctrl`, `nvhost_ctrl_gpu`, `nvhost_gpu`; `video_core/memory_manager.h`), with Skyline's parts as Eden carries them | GPL-3.0-or-later, GPL-2.0-or-later |
 | `src/nx/hle/svc/hos.svc` (the SVC declarations and type sizes) and `tools/svcgen/svcgen.c` (their parsing and register allocation) | Eden and yuzu (`tools/svc_generator.py`) | GPL-3.0-or-later, GPL-2.0-or-later |
-| `src/nx/hle/services/misc.c` (the six default Miis, from Eden's `mii/types/raw_data.cpp`) | Ryujinx, as Eden carries it | MIT ([text](../dist/licenses/Ryujinx/LICENSE.txt)) |
+| `src/nx/hle/services/misc.c` (the six default Miis, from Eden's `mii/types/raw_data.cpp`, and StoreData's checksums, from Ryubing's `Mii/Helper.cs` and `Mii/Types/StoreData.cs`) | Ryujinx (the defaults as Eden carries them) | MIT ([text](../dist/licenses/Ryujinx/LICENSE.txt)) |
 | `src/common/network/`, `src/nx/hle/services/network/` | Eden and yuzu | GPL-3.0-or-later, GPL-2.0-or-later |
 | `src/common/network/net_room.c` (an Eden room's protocol) | Eden, yuzu and Citra (`src/network/room.cpp`, `room_member.cpp`, `packet.cpp`) | GPL-3.0-or-later, GPL-2.0-or-later |
 | `src/nx/gpu/video/vp9_rebuild.cpp`, `src/nx/gpu/video/vic.comp` and `vic_compose.glsl` (compiled into SPIR-V at build time) | Eden and yuzu | GPL-3.0-or-later, GPL-2.0-or-later |

@@ -45,7 +45,7 @@ extern const unsigned char snx_rtlib_bitcode[];
 extern const unsigned long snx_rtlib_bitcode_size;
 
 /* instructions per code unit (an LLVM module): whole functions until a unit reaches it, as the
-   game workflow splits them (SNX_CHUNK_INSTRUCTIONS) */
+   game workflow's default splits them (the setting unit_instructions) */
 #ifdef __ANDROID__
 #define CHUNK_INSTRUCTIONS 20000
 #else

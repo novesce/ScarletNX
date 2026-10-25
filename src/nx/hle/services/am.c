@@ -580,7 +580,12 @@ static int nn_am_service_IApplicationFunctions_UnpopToUserChannel(SvcObj* self, 
     R_THROW(AM_OUT_OF_MEMORY);
 }
 
-/* -1: the game was launched by the system, not by another of its programs (ExecuteProgram is not followed here) */
+/* nn::oe::ExecuteProgram (am's command 120) switches to another program of the same application: on the console the
+   process manager launches the program the game names, and the previous one waits for it. Eden follows it by loading
+   the program at the index it is given and restarting its emulation (core.cpp's Load with program_index). ScarletNX
+   builds one program per game folder, so the command is a stub, GetPreviousProgramIndex answers -1, and a launcher
+   that starts its sub-games through it stays on the loading screen it shows meanwhile. */
+/* -1: the game was launched by the system, not by another of its programs */
 static int nn_am_service_IApplicationFunctions_GetPreviousProgramIndex(SvcObj* self, i32* index) {
     (void)self;
     *index = -1;

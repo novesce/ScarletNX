@@ -184,7 +184,8 @@ typedef struct {
     uint64_t* position; /* per section: offset inside its kind */
     /* the object's own veneers (snx_elf_veneer), right after its code where all of it reaches them: their count,
        which the caller sets before snx_elf_layout, and the island's offset in the code, which it computes. The AOT
-       linker gives each object an island; the JIT loader keeps one for the whole load */
+       linker and the JIT loader give each object an island once the code passes SNX_ELF_VENEER_TEXT; below it the
+       loader keeps one stub area for the whole load */
     size_t veneers;
     uint64_t island;
 } SnxElfObject;
@@ -244,6 +245,11 @@ long snx_elf_riscv_hi20(const Elf64_Rela* rela, size_t n, uint64_t offset);
    alignment; an object with veneers gets its island right after its code, of its machine's veneers (AArch64's
    SNX_ELF_VENEER_SIZE, PowerPC64's SNX_ELF_PPC_VENEER_SIZE) */
 void snx_elf_layout(SnxElfObject* objs, size_t count, uint64_t* kind_size, uint64_t* kind_align);
+/* The objects' code with each section's alignment added, no less than what snx_elf_layout places before islands */
+uint64_t snx_elf_text_size(const SnxElfObject* objs, size_t count);
+/* Below this much code (snx_elf_text_size) every AArch64 B and BL of a module or load reaches its target (128 MiB, with
+   room for the islands and stubs), and no object needs veneers of its own */
+#define SNX_ELF_VENEER_TEXT ((uint64_t)120 << 20)
 
 /* Writes relocation type of machine at p, the place at address P with room bytes left in its section: S the symbol's
    address, A the addend, got the GOT's address and slot the address of the symbol's GOT slot (GOT relocations only).

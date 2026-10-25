@@ -5,18 +5,23 @@
    SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project (GPL-2.0-or-later) */
 /* pl:u and pl:s, the shared fonts: six TrueType fonts in one shared memory, each behind the 8 byte header the SDK
    reads its size from. A font comes from the game folder's fonts/<Name>.bfttf (the console's file, decrypted here)
-   or fonts/<Name>.ttf, and otherwise from the stand-ins compiled in (cmake/shared_fonts.cmake), the standard one
-   placed once for the five slots that share it */
+   or fonts/<Name>.ttf, and otherwise from the stand-ins compiled in (cmake/shared_fonts.cmake): Noto Sans JP, SC,
+   TC and KR, one per script the six slots name, and yuzu's controller button glyphs for FontNintendoExtended. Each
+   Noto subset covers its script's standard character set (JIS X 0208, GB 2312, Big5, KS X 1001) and ASCII, so the
+   five together stay inside the 0x1100000 bytes the SDK maps */
 #include "nx/hle/services/services_int.h"
 #include "nx/hle/hle.h"
 #include "nx/hle/filesystem/fs.h"
+#include "nx/hle/services/pl_font.h"
 
 #include "hle/services/pl.swipc.inc"
 
-extern const unsigned char snx_font_standard[], snx_font_extended[];
-extern const size_t snx_font_standard_size, snx_font_extended_size;
+extern const unsigned char snx_font_japanese[], snx_font_chinese_simplified[], snx_font_chinese_traditional[],
+    snx_font_korean[], snx_font_extended[];
+extern const size_t snx_font_japanese_size, snx_font_chinese_simplified_size, snx_font_chinese_traditional_size,
+    snx_font_korean_size, snx_font_extended_size;
 
-#define PL_SHM_SIZE   0x1100000u
+#define PL_SHM_SIZE   0x1100000u /* what the SDK maps, and the fonts have to fit in */
 #define PL_MAGIC      0x36f81a1eu /* the first word of a .bfttf, big-endian */
 #define PL_DECRYPTED  0x7f9a0218u /* what it decrypts to: its key is the two XORed */
 #define PL_LOADED     1           /* nn::pl::LoadState */
@@ -79,10 +84,20 @@ static int pl_place(u8* shm, u32 shm_size, u32* at, const u8* font, u64 size, in
     return 1;
 }
 
+/* a stand-in with the console fonts' private-use characters answered (pl_font.c), its own font if that fails */
+static int pl_place_stand_in(u8* shm, u32 shm_size, u32* at, const u8* font, u64 size, int slot, const char* which) {
+    u64 covered = 0;
+    u8* patched = pl_font_cover(font, size, &covered);
+    int ok = pl_place(shm, shm_size, at, patched ? patched : font, patched ? covered : size, slot);
+    if (patched && ok) LOG("pl: the %s stand-in answers for the console font's private-use characters\n", which);
+    free(patched);
+    return ok;
+}
+
 /* the six fonts into shm, and where each is into pl */
 static void fonts_fill(u8* shm, u32 shm_size) {
     u32 at = 0;
-    int i, standard = -1; /* the slot the standard stand-in went into first */
+    int i;
     memset(g_hle.pl.font_off, 0, sizeof g_hle.pl.font_off);
     memset(g_hle.pl.font_size, 0, sizeof g_hle.pl.font_size);
     for (i = 0; i < PL_FONTS; i++) {
@@ -96,13 +111,34 @@ static void fonts_fill(u8* shm, u32 shm_size) {
             free(own);
             if (g_hle.pl.font_size[i]) continue;
         }
-        if (i == PL_FONTS - 1)
-            pl_place(shm, shm_size, &at, snx_font_extended, snx_font_extended_size, i);
-        else if (standard >= 0) {
-            g_hle.pl.font_off[i] = g_hle.pl.font_off[standard];
-            g_hle.pl.font_size[i] = g_hle.pl.font_size[standard];
-        } else if (pl_place(shm, shm_size, &at, snx_font_standard, snx_font_standard_size, i))
-            standard = i;
+        switch (i) {
+        case 0:
+            pl_place_stand_in(shm, shm_size, &at, snx_font_japanese, snx_font_japanese_size, i, "Japanese");
+            break;
+        case 1:
+            pl_place_stand_in(shm, shm_size, &at, snx_font_chinese_simplified,
+                              snx_font_chinese_simplified_size, i, "Chinese simplified");
+            break;
+        case 2: /* extended simplified Chinese is the simplified font's glyphs */
+            if (g_hle.pl.font_size[1]) {
+                g_hle.pl.font_off[i] = g_hle.pl.font_off[1];
+                g_hle.pl.font_size[i] = g_hle.pl.font_size[1];
+            } else {
+                pl_place_stand_in(shm, shm_size, &at, snx_font_chinese_simplified,
+                                  snx_font_chinese_simplified_size, i, "Chinese simplified");
+            }
+            break;
+        case 3:
+            pl_place_stand_in(shm, shm_size, &at, snx_font_chinese_traditional,
+                              snx_font_chinese_traditional_size, i, "Chinese traditional");
+            break;
+        case 4:
+            pl_place_stand_in(shm, shm_size, &at, snx_font_korean, snx_font_korean_size, i, "Korean");
+            break;
+        default:
+            pl_place_stand_in(shm, shm_size, &at, snx_font_extended, snx_font_extended_size, i, "extended");
+            break;
+        }
     }
 }
 

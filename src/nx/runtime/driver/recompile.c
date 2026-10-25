@@ -41,8 +41,9 @@ static void usage(void) {
          "  --title-keys FILE      title.keys for a dump, found the same way (optional)");
     puts("  --KEY=VALUE            A recompile setting: opt, aot_threads, unit_cache_gb, llvm_pass_<pass>=0\n"
          "                         (scarletnx --settings=recompile lists them)");
-    printf("  --chunk N              Instructions per code unit, whole functions batched (default: %d)\n",
-           SNX_CHUNK_INSTRUCTIONS);
+    printf("  --chunk N              Instructions per code unit, whole functions batched (default: %d), the setting\n"
+           "                         unit_instructions\n",
+           g_settings.unit_size);
     puts("  --target auto|linux|win64  The host only: modules are built for the machine that builds them\n"
          "  --target ios           A pack of objects for the iOS app, which loads them into JIT memory (docs/APPLE.md)\n"
          "  --no-build             Stage data/INI only, generate no code\n"
@@ -369,7 +370,6 @@ int snx_recompile_game(int argc, char** argv, const SnxPaths* paths) {
     memset(&gen, 0, sizeof(gen));
     memset(&program, 0, sizeof(program));
     memset(&llvm, 0, sizeof(llvm));
-    gen.chunk_instrs = SNX_CHUNK_INSTRUCTIONS;
 #ifdef _WIN32
     host_win = 1;
 #endif
@@ -462,8 +462,9 @@ int snx_recompile_game(int argc, char** argv, const SnxPaths* paths) {
             } else if (!strcmp(arg, "--jit-cache")) {
                 jit_cache = value;
             } else {
-                gen.chunk_instrs = number(value, INT_MAX);
-                if (!gen.chunk_instrs) return snx_error("--chunk %s: not a whole number of instructions from 1", value);
+                g_settings.unit_size = (int)number(value, INT_MAX);
+                if (!g_settings.unit_size)
+                    return snx_error("--chunk %s: not a whole number of instructions from 1", value);
             }
         } else if (!input)
             input = arg;
@@ -480,6 +481,7 @@ int snx_recompile_game(int argc, char** argv, const SnxPaths* paths) {
     if (strlen(g_settings.optimization_level) != 1 || !strchr("0123sz", g_settings.optimization_level[0]))
         return snx_error("opt = %s: not 0, 1, 2, 3, s or z", g_settings.optimization_level);
     compile.opt = g_settings.optimization_level;
+    gen.chunk_instrs = (size_t)g_settings.unit_size;
     compile.jobs = g_settings.aot_threads > 0 ? (unsigned)g_settings.aot_threads : snx_cpu_count();
     if (!strcmp(target, "win64"))
         compile.target_win = 1;

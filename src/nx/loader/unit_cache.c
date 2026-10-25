@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
    Copyright 2026 the ScarletNX contributors */
 #include "nx/loader/unit_cache.h"
+#include "common/cpu/recompiler/llvm/link.h"
 #include <llvm-c/BitWriter.h>
 #include <llvm/Config/llvm-config.h>
 #include <openssl/evp.h>
@@ -32,6 +33,8 @@ struct SnxUnitCache {
     SnxU64 left_bytes, trimmed_bytes, reserve;
     unsigned said; /* the reasons said, each its UNIT_SAID_ bit */
     char stale_why[256];
+    /* the keys of the objects the caller reads back (snx_unit_cache_object's key), which room() never removes */
+    SnxLinkNames held;
     size_t folder_size, identity_size;
     char bytes[];
 };
@@ -90,6 +93,7 @@ SnxUnitCache* snx_unit_cache_open(const char* folder, const SnxUnitIdentity* ide
     cache->said = 0;
     cache->left_bytes = cache->trimmed_bytes = cache->reserve = 0;
     cache->stale_why[0] = 0;
+    memset(&cache->held, 0, sizeof cache->held);
     cache->folder_size = folder_size;
     cache->identity_size = identity_size;
     memcpy(cache->bytes, folder, folder_size);
@@ -120,6 +124,7 @@ void snx_unit_cache_close(SnxUnitCache* cache) {
 #else
     pthread_mutex_destroy(&cache->lock);
 #endif
+    snx_link_names_free(&cache->held);
     free(cache);
 }
 
@@ -225,8 +230,8 @@ int snx_unit_cache_keep(const SnxUnitCache* cache, const char* key, const unsign
     return rc;
 }
 
-static int trim_files(const char* folder, SnxU64 limit, SnxU64 at_least, const char* why, SnxUnitTrim* trim,
-                      char* error, size_t error_size);
+static int trim_files(const char* folder, SnxU64 limit, SnxU64 at_least, const char* why, const SnxLinkNames* held,
+                      SnxUnitTrim* trim, char* error, size_t error_size);
 #define GB(bytes) ((double)(bytes) / 1e9)
 #define MB(bytes) ((double)(bytes) / 1e6)
 /* a unit of size bytes not cached: counted for the close */
@@ -242,8 +247,8 @@ static int first_said(SnxUnitCache* cache, unsigned reason) {
     return 1;
 }
 /* room for a kept object of size bytes on the cache's disk, which always keeps a tenth of itself free: the cache's
-   oldest objects removed for it when it is short. 0 to keep it; -1 when there is none, each reason said for the first
-   unit it stops and the units counted for the close */
+   oldest objects removed for it when it is short, never one the caller reads back (held). 0 to keep it; -1 when there
+   is none, each reason said for the first unit it stops and the units counted for the close */
 static int room(SnxUnitCache* cache, SnxU64 size) {
     const char* folder = snx_unit_cache_folder(cache);
     SnxU64 free_bytes = 0, total = 0, reserve, need;
@@ -259,7 +264,7 @@ static int room(SnxUnitCache* cache, SnxU64 size) {
     reserve = total / 10;
     if (free_bytes >= reserve + size) return 0;
     need = reserve + size - free_bytes;
-    if (trim_files(folder, 0, need, "the disk's tenth kept free", &trim, error, sizeof error)) {
+    if (trim_files(folder, 0, need, "the disk's tenth kept free", &cache->held, &trim, error, sizeof error)) {
         if (first_said(cache, UNIT_SAID_TRIM)) snx_error("unit cache: %s: units are not cached", error);
         not_cached(cache, size);
         return -1;
@@ -278,8 +283,41 @@ static int room(SnxUnitCache* cache, SnxU64 size) {
     return 0;
 }
 
-int snx_unit_cache_object(SnxUnitCache* cache, SnxIr* ir, unsigned char** data, size_t* size, int* reused, char* error,
-                          size_t error_size) {
+/* key's object held for the caller to read back: room(), on any unit's thread, removes it no more */
+static void hold(SnxUnitCache* cache, const char* key) {
+#ifdef _WIN32
+    EnterCriticalSection(&cache->lock);
+#else
+    pthread_mutex_lock(&cache->lock);
+#endif
+    snx_link_insert(&cache->held, key, 0);
+#ifdef _WIN32
+    LeaveCriticalSection(&cache->lock);
+#else
+    pthread_mutex_unlock(&cache->lock);
+#endif
+}
+
+unsigned char* snx_unit_cache_read(const SnxUnitCache* cache, const char* key, size_t* size, char* error,
+                                   size_t error_size) {
+    char *name = snx_format("%s.o", key), *path = snx_path_join(snx_unit_cache_folder(cache), name), why[512];
+    size_t file_size = 0, object_size = 0;
+    unsigned char* file = snx_read_file(path, &file_size);
+    if (!file)
+        snprintf(error, error_size, "cannot read %s: %s", path, snx_os_error(why, sizeof why));
+    else if (whole(file, file_size, key, &object_size, why, sizeof why)) {
+        snprintf(error, error_size, "%s is not a whole object (%s)", path, why);
+        free(file);
+        file = NULL;
+    } else
+        *size = object_size;
+    free(path);
+    free(name);
+    return file;
+}
+
+int snx_unit_cache_object(SnxUnitCache* cache, SnxIr* ir, unsigned char** data, size_t* size, int* reused, char* kept,
+                          char* error, size_t error_size) {
     char key[65], why[512], reason[256], *triple, *cpu, *features, *name, *path;
     LLVMMemoryBufferRef bitcode;
     unsigned char* file;
@@ -289,6 +327,7 @@ int snx_unit_cache_object(SnxUnitCache* cache, SnxIr* ir, unsigned char** data, 
     *data = NULL;
     *size = 0;
     *reused = 0;
+    if (kept) kept[0] = 0;
     /* snx_ir_object refuses a unit with an instruction no emitter covers, which nothing is looked up for */
     if (ir->fallbacks) return snx_ir_object(ir, cache->opt, data, size, error, error_size);
     bitcode = LLVMWriteBitcodeToMemoryBuffer(ir->mod);
@@ -309,12 +348,14 @@ int snx_unit_cache_object(SnxUnitCache* cache, SnxIr* ir, unsigned char** data, 
     }
     name = snx_format("%s.o", key);
     path = snx_path_join(snx_unit_cache_folder(cache), name);
+    if (kept) hold(cache, key); /* before it is read, so that it is still there when it is read back */
     file = snx_read_file(path, &file_size);
     if (!file) snx_os_error(reason, sizeof reason);
     if (file && !whole(file, file_size, key, &object_size, why, sizeof why)) {
         *data = file;
         *size = object_size;
         *reused = 1;
+        if (kept) memcpy(kept, key, sizeof key);
         /* the size limit removes the objects reused longest ago first */
         if (snx_set_file_time(path, (SnxU64)time(NULL))) {
             snx_os_error(reason, sizeof reason);
@@ -346,10 +387,14 @@ int snx_unit_cache_object(SnxUnitCache* cache, SnxIr* ir, unsigned char** data, 
 #else
         pthread_mutex_lock(&cache->lock);
 #endif
-        if (!room(cache, (SnxU64)*size + SNX_UNIT_TRAILER) &&
-            snx_unit_cache_keep(cache, key, *data, *size, why, sizeof why)) {
-            if (first_said(cache, UNIT_SAID_KEEP)) snx_error("unit cache: %s: this run's units are not cached", why);
-            not_cached(cache, (SnxU64)*size + SNX_UNIT_TRAILER);
+        if (!room(cache, (SnxU64)*size + SNX_UNIT_TRAILER)) {
+            if (!snx_unit_cache_keep(cache, key, *data, *size, why, sizeof why)) {
+                if (kept) memcpy(kept, key, sizeof key);
+            } else {
+                if (first_said(cache, UNIT_SAID_KEEP))
+                    snx_error("unit cache: %s: this run's units are not cached", why);
+                not_cached(cache, (SnxU64)*size + SNX_UNIT_TRAILER);
+            }
         }
 #ifdef _WIN32
         LeaveCriticalSection(&cache->lock);
@@ -385,9 +430,10 @@ static int older(const void* a, const void* b) {
 }
 
 /* the cache's files in folder held to limit bytes (0: none), or at_least bytes of them removed, the oldest first; why
-   names the removal in a failure's line. Nothing is removed when the files hold fewer than at_least */
-static int trim_files(const char* folder, SnxU64 limit, SnxU64 at_least, const char* why, SnxUnitTrim* trim,
-                      char* error, size_t error_size) {
+   names the removal in a failure's line. The objects of the keys in held (NULL: none) are left out, and nothing is
+   removed when the others hold fewer than at_least */
+static int trim_files(const char* folder, SnxU64 limit, SnxU64 at_least, const char* why, const SnxLinkNames* held,
+                      SnxUnitTrim* trim, char* error, size_t error_size) {
     char **names = NULL, reason[256];
     size_t count = 0, i;
     TrimFile* files;
@@ -401,7 +447,14 @@ static int trim_files(const char* folder, SnxU64 limit, SnxU64 at_least, const c
     files = (TrimFile*)snx_alloc((count ? count : 1) * sizeof *files);
     for (i = 0; i < count; ++i) {
         char* path;
+        size_t found;
         if (!cache_file(names[i])) continue;
+        if (held && !names[i][66]) {
+            char key[65];
+            memcpy(key, names[i], 64);
+            key[64] = 0;
+            if (snx_link_find(held, key, &found)) continue;
+        }
         path = snx_path_join(folder, names[i]);
         if (snx_is_file(path)) {
             files[trim->files].time = snx_file_time(path);
@@ -435,5 +488,5 @@ static int trim_files(const char* folder, SnxU64 limit, SnxU64 at_least, const c
 int snx_unit_cache_trim(const char* folder, SnxU64 limit, SnxUnitTrim* trim, char* error, size_t error_size) {
     char why[64];
     snprintf(why, sizeof why, "a size limit of %llu bytes", (unsigned long long)limit);
-    return trim_files(folder, limit, 0, why, trim, error, error_size);
+    return trim_files(folder, limit, 0, why, NULL, trim, error, error_size);
 }

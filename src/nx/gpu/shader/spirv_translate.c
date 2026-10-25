@@ -5646,7 +5646,7 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
             u32 bits = c->zero;
             u32 flags[4] = {VAR_FLAG, VAR_FLAG + 1, VAR_FLAG + 2, VAR_FLAG + 3}; /* z, s, c, o */
             for (u32 p = 0; p < (B(w, 40, 1) ? 4u : 7u); p++) {
-                u32 value = B(w, 40, 1) ? spv_emit_load(&c->emit, c->bool_type, flags[p]) : pred_read(c, p, 0);
+                u32 value = B(w, 40, 1) ? var_read(c, flags[p]) : pred_read(c, p, 0);
                 u32 bit = spv_emit_select(&c->emit, c->u32_type, value,
                                           spv_emit_constant_u32(&c->emit, c->u32_type, 1u << p), c->zero);
                 bits = spv_emit_bitwise_or_u32(&c->emit, c->u32_type, bits, bit);
@@ -5664,7 +5664,7 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
                 source = spv_emit_shift_right_u32(&c->emit, c->u32_type, source,
                                                   spv_emit_constant_u32(&c->emit, c->u32_type, B(w, 41, 2) * 8));
             u32 mask = integer_right(c, w, op - O_R2P_R);
-            u32 flags[4] = {c->cc_z, c->cc_s, c->cc_c, c->cc_o};
+            u32 flags[4] = {VAR_FLAG, VAR_FLAG + 1, VAR_FLAG + 2, VAR_FLAG + 3}; /* z, s, c, o */
             for (u32 p = 0; p < (B(w, 40, 1) ? 4u : 7u); p++) {
                 u32 enabled = spv_emit_i_not_equal(
                     &c->emit, c->bool_type,

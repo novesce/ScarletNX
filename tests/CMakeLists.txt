@@ -770,7 +770,7 @@ add_executable(snx-test-overlay overlay.c "${PROJECT_SOURCE_DIR}/src/nx/runtime/
     "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/fatal_screen.c"
     "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/prepare_screen.c"
     "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/vpad.c" "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/ui.c"
-    "${PROJECT_SOURCE_DIR}/src/nx/runtime/ini.c")
+    "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/stats.c" "${PROJECT_SOURCE_DIR}/src/nx/runtime/ini.c")
 snx_test_target(snx-test-overlay 11)
 target_link_libraries(snx-test-overlay PRIVATE scarletnx-common snx_splash m)
 include("${PROJECT_SOURCE_DIR}/cmake/gui_themes.cmake")
@@ -778,11 +778,27 @@ target_include_directories(snx-test-overlay PRIVATE "${CMAKE_BINARY_DIR}/generat
 add_test(NAME overlay COMMAND snx-test-overlay)
 
 add_executable(snx-test-vpad vpad.c "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/vpad.c"
-    "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/ui.c" "${PROJECT_SOURCE_DIR}/src/nx/runtime/ini.c")
+    "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/ui.c" "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/stats.c"
+    "${PROJECT_SOURCE_DIR}/src/nx/runtime/ini.c")
 snx_test_target(snx-test-vpad 11)
 target_link_libraries(snx-test-vpad PRIVATE scarletnx-common snx_splash m)
 target_include_directories(snx-test-vpad PRIVATE "${CMAKE_BINARY_DIR}/generated") # ui.c's theme
 add_test(NAME vpad COMMAND snx-test-vpad)
+
+add_executable(snx-test-hud hud.c "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/hud.c"
+    "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/ui.c")
+snx_test_target(snx-test-hud 11)
+target_link_libraries(snx-test-hud PRIVATE scarletnx-common snx_splash m)
+target_include_directories(snx-test-hud PRIVATE "${CMAKE_BINARY_DIR}/generated") # the theme's colours
+add_test(NAME hud COMMAND snx-test-hud)
+
+add_executable(snx-test-stats stats.c "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/stats.c"
+    "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/vpad.c" "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/ui.c"
+    "${PROJECT_SOURCE_DIR}/src/nx/runtime/ini.c")
+snx_test_target(snx-test-stats 11)
+target_link_libraries(snx-test-stats PRIVATE scarletnx-common snx_splash m)
+target_include_directories(snx-test-stats PRIVATE "${CMAKE_BINARY_DIR}/generated") # the theme's colours
+add_test(NAME stats COMMAND snx-test-stats)
 
 add_executable(snx-test-ini-deprecated ini_deprecated.c "${PROJECT_SOURCE_DIR}/src/nx/runtime/ini.c")
 snx_test_target(snx-test-ini-deprecated 11)
@@ -1307,27 +1323,43 @@ target_link_libraries(snx-test-thumb-emit PRIVATE snx_arm_llvm)
 option(SNX_TEST_ARM_DIFF "Compare A32 LLVM execution with Python unicorn 2.1.4" OFF)
 if(UNIX AND NOT CMAKE_CROSSCOMPILING)
     if(Python3_Interpreter_FOUND)
-        add_test(NAME arm_llvm_witnesses COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/arm_test.py"
+        # the ARM tests run emitted code and Unicorn in Python: -X faulthandler names where a crash in either was
+        add_test(NAME arm_llvm_witnesses COMMAND "${Python3_EXECUTABLE}" -X faulthandler
+            "${CMAKE_CURRENT_SOURCE_DIR}/arm_test.py"
             --emitter $<TARGET_FILE:snx-test-arm-emit> --runtime $<TARGET_FILE:snx_arm_rt> --cc "${CMAKE_C_COMPILER}")
-        add_test(NAME arm7tdmi_witnesses COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/arm7tdmi_test.py"
+        add_test(NAME arm7tdmi_witnesses COMMAND "${Python3_EXECUTABLE}" -X faulthandler
+            "${CMAKE_CURRENT_SOURCE_DIR}/arm7tdmi_test.py"
             --arm-emitter $<TARGET_FILE:snx-test-arm-emit> --thumb-emitter $<TARGET_FILE:snx-test-thumb-emit>
             --runtime $<TARGET_FILE:snx_arm_rt> --cc "${CMAKE_C_COMPILER}")
         if(SNX_TEST_ARM_DIFF)
-            add_test(NAME arm_llvm_differential COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/arm_test.py"
+            add_test(NAME arm_llvm_differential COMMAND "${Python3_EXECUTABLE}" -X faulthandler
+                "${CMAKE_CURRENT_SOURCE_DIR}/arm_test.py"
                 --emitter $<TARGET_FILE:snx-test-arm-emit> --runtime $<TARGET_FILE:snx_arm_rt> --cc "${CMAKE_C_COMPILER}" --unicorn)
             set_tests_properties(arm_llvm_differential PROPERTIES TIMEOUT 900)
             # VFP/NEON uses the same emitter plus the raw-bit FP and crypto runtime library.
             get_filename_component(snx_llvm_bin "${SNX_LLVM_CONFIG}" DIRECTORY)
             find_program(SNX_LLVM_MC llvm-mc HINTS "${snx_llvm_bin}" NO_DEFAULT_PATH)
             if(SNX_LLVM_MC)
-                add_test(NAME arm_llvm_vector COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/arm_vector_test.py"
+                add_test(NAME arm_llvm_vector COMMAND "${Python3_EXECUTABLE}" -X faulthandler
+                    "${CMAKE_CURRENT_SOURCE_DIR}/arm_vector_test.py"
                     --emitter $<TARGET_FILE:snx-test-arm-emit> --runtime $<TARGET_FILE:snx_arm_rt>
                     --mc "${SNX_LLVM_MC}" --cc "${CMAKE_C_COMPILER}")
                 set_tests_properties(arm_llvm_vector PROPERTIES TIMEOUT 1800)
-                add_test(NAME thumb_llvm COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/thumb_test.py"
+                add_test(NAME thumb_llvm COMMAND "${Python3_EXECUTABLE}" -X faulthandler
+                    "${CMAKE_CURRENT_SOURCE_DIR}/thumb_test.py"
                     --emitter $<TARGET_FILE:snx-test-thumb-emit> --runtime $<TARGET_FILE:snx_arm_rt> --mc "${SNX_LLVM_MC}"
                     --cc "${CMAKE_C_COMPILER}")
                 set_tests_properties(thumb_llvm PROPERTIES TIMEOUT 900)
+                # random encodings of every class, llvm-objdump keeping the A57's, from random FP and flag state
+                find_program(SNX_LLVM_OBJDUMP llvm-objdump HINTS "${snx_llvm_bin}" NO_DEFAULT_PATH)
+                if(SNX_LLVM_OBJDUMP)
+                    add_test(NAME arm_llvm_fuzz COMMAND "${Python3_EXECUTABLE}" -X faulthandler
+                        "${CMAKE_CURRENT_SOURCE_DIR}/arm_fuzz.py"
+                        --arm-emitter $<TARGET_FILE:snx-test-arm-emit> --thumb-emitter $<TARGET_FILE:snx-test-thumb-emit>
+                        --runtime $<TARGET_FILE:snx_arm_rt> --mc "${SNX_LLVM_MC}" --objdump "${SNX_LLVM_OBJDUMP}"
+                        --cc "${CMAKE_C_COMPILER}" --count 1500)
+                    set_tests_properties(arm_llvm_fuzz PROPERTIES TIMEOUT 1800)
+                endif()
             endif()
         endif()
     endif()
@@ -1489,7 +1521,7 @@ add_test(NAME nvn_control COMMAND snx-test-nvn-control)
 
 # the shared fonts pl.c hands out when a game folder has none: the stand-ins compiled in (cmake/shared_fonts.cmake)
 if(NOT SNX_TOOLS_ONLY)
-    add_executable(snx-test-pl-fonts pl_fonts.c "${CMAKE_BINARY_DIR}/generated/shared_fonts.c")
+    add_executable(snx-test-pl-fonts pl_fonts.c "${PROJECT_SOURCE_DIR}/src/nx/hle/services/pl_font.c" "${CMAKE_BINARY_DIR}/generated/shared_fonts.c")
     snx_test_target(snx-test-pl-fonts 23)
     snx_service_swipc(snx-test-pl-fonts hle/services/pl.swipc)
     add_test(NAME pl_fonts COMMAND snx-test-pl-fonts)
@@ -1531,7 +1563,8 @@ snx_test_target(snx-test-audren-host 23)
 add_test(NAME audren_host COMMAND snx-test-audren-host)
 
 add_executable(snx-test-render-enable render_enable.c "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/engines.c"
-    "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/maxwell3d.c" "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/write_pages.c")
+    "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/maxwell3d.c" "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/write_pages.c"
+    "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/draw_state.c")
 snx_test_target(snx-test-render-enable 23)
 add_test(NAME render_enable COMMAND snx-test-render-enable)
 
@@ -1540,12 +1573,14 @@ snx_test_target(snx-test-clear-flags 23)
 add_test(NAME clear_flags COMMAND snx-test-clear-flags)
 
 add_executable(snx-test-instance-array instance_array.c "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/engines.c"
-    "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/maxwell3d.c" "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/write_pages.c")
+    "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/maxwell3d.c" "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/write_pages.c"
+    "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/draw_state.c")
 snx_test_target(snx-test-instance-array 23)
 add_test(NAME instance_array COMMAND snx-test-instance-array)
 
 add_executable(snx-test-draw-texture draw_texture.c "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/engines.c"
-    "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/maxwell3d.c" "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/write_pages.c")
+    "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/maxwell3d.c" "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/write_pages.c"
+    "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/draw_state.c")
 snx_test_target(snx-test-draw-texture 23)
 add_test(NAME draw_texture COMMAND snx-test-draw-texture)
 
@@ -1554,6 +1589,7 @@ add_test(NAME draw_texture COMMAND snx-test-draw-texture)
 if(UNIX)
     add_executable(snx-test-gpu-park gpu_park.c "${PROJECT_SOURCE_DIR}/src/nx/gpu/gpu.c"
         "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/engines.c" "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/maxwell3d.c" "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/write_pages.c"
+        "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/draw_state.c"
         "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/mme.c" "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/mme_hle.c"
         "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/dma.c"
         support/dma_ref.c own_stub.c)
@@ -1619,6 +1655,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_test(NAME plat_cpus COMMAND snx-test-plat-cpus)
 endif()
 
+# the process's memory as common.c reads it, which memory_fit takes (process_memory.c)
+add_executable(snx-test-process-memory process_memory.c)
+snx_test_target(snx-test-process-memory 11)
+target_link_libraries(snx-test-process-memory PRIVATE scarletnx-common)
+add_test(NAME process_memory COMMAND snx-test-process-memory)
+
 # EAC worked examples and edenprobe's blocks from rEden's decode_eac test (eac_blocks.c)
 add_executable(snx-test-eac-blocks eac_blocks.c support/etc2.c)
 snx_test_target(snx-test-eac-blocks 23)
@@ -1672,6 +1714,9 @@ add_test(NAME depth_texel COMMAND snx-test-depth-texel)
 add_executable(snx-test-write-pages write_pages.c "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/write_pages.c")
 snx_test_target(snx-test-write-pages 23)
 add_test(NAME write_pages COMMAND snx-test-write-pages)
+add_executable(snx-test-draw-state-mx draw_state_mx.c "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/draw_state.c")
+snx_test_target(snx-test-draw-state-mx 99)
+add_test(NAME draw_state_mx COMMAND snx-test-draw-state-mx)
 add_executable(snx-test-pending-pages pending_pages.c "${PROJECT_SOURCE_DIR}/src/nx/gpu/vk/pending_pages.c")
 snx_test_target(snx-test-pending-pages 23)
 add_test(NAME pending_pages COMMAND snx-test-pending-pages)

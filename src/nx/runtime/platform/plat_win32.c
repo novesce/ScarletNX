@@ -7,6 +7,7 @@
 #include "nx/runtime/main.h"
 #include "nx/runtime/options.h"
 #include "nx/runtime/platform/log.h"
+#include <errno.h>
 #include <io.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -227,6 +228,26 @@ u64 plat_vm_page(void) {
     return page;
 }
 /* VirtualAlloc places a reservation at its 64 KiB allocation granularity, which covers SNX_HOST_PAGE up to that */
+int plat_address_space(u64* mapped, u64* largest_free) {
+    SYSTEM_INFO system;
+    MEMORY_BASIC_INFORMATION region;
+    const u8* at;
+    u64 total = 0, hole = 0;
+    GetSystemInfo(&system);
+    at = (const u8*)system.lpMinimumApplicationAddress;
+    while (at < (const u8*)system.lpMaximumApplicationAddress &&
+           VirtualQuery(at, &region, sizeof region) == sizeof region) {
+        if (region.State == MEM_FREE) {
+            if (region.RegionSize > hole) hole = region.RegionSize;
+        } else
+            total += region.RegionSize; /* reserved or committed */
+        at = (const u8*)region.BaseAddress + region.RegionSize;
+    }
+    if (!total) return 0;
+    *mapped = total;
+    *largest_free = hole;
+    return 1;
+}
 u8* plat_vm_reserve(u64 size) {
     void* p = NULL;
     if (!getenv("SNX_NO_WW")) p = VirtualAlloc(NULL, (SIZE_T)size, MEM_RESERVE | MEM_WRITE_WATCH, PAGE_NOACCESS);
@@ -235,7 +256,12 @@ u8* plat_vm_reserve(u64 size) {
         g_ww_size = size;
         return (u8*)p;
     }
-    return (u8*)VirtualAlloc(NULL, (SIZE_T)size, MEM_RESERVE, PAGE_NOACCESS);
+    p = VirtualAlloc(NULL, (SIZE_T)size, MEM_RESERVE, PAGE_NOACCESS);
+    if (!p) { /* the reason in errno, as mmap's */
+        DWORD why = GetLastError();
+        errno = why == ERROR_NOT_ENOUGH_MEMORY || why == ERROR_COMMITMENT_LIMIT ? ENOMEM : EINVAL;
+    }
+    return (u8*)p;
 }
 
 int plat_ww_scan(u8* p, u64 size, void (*cb)(u8* p, u64 size)) {

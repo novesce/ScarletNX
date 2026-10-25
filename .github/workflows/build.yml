@@ -132,9 +132,20 @@ jobs:
             echo "SNX_DEPS_CACHE=$ws/.cache/deps"
             echo "SNX_CCACHE_START=$(date +%s)"
           } >> "$GITHUB_ENV"
+      # Unicorn 2.1.4, the A32 and Thumb differentials' reference (SNX_TEST_ARM_DIFF), in a venv: Arch's Python takes no
+      # pip install of its own. PyPI drops a connection now and then, so it is tried 3 times, 5 s apart
+      - name: Install Unicorn
+        run: |
+          python -m venv --system-site-packages .cache/unicorn
+          for try in 1 2 3; do
+            .cache/unicorn/bin/pip install --quiet unicorn==2.1.4 && break
+            [ "$try" = 3 ] && exit 1
+            sleep 5
+          done
       - name: Build the runtime
         run: |
-          cmake --preset default -DSNX_TEST_VP9_VECTORS=ON -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+          cmake --preset default -DSNX_TEST_VP9_VECTORS=ON -DSNX_TEST_ARM_DIFF=ON \
+            -DPython3_EXECUTABLE="$PWD/.cache/unicorn/bin/python" -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cmake --build --preset default --parallel "$(getconf _NPROCESSORS_ONLN)"
           cmake --install build/default --prefix stage

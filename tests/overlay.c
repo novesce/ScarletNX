@@ -39,6 +39,11 @@ void fatal(const char* fmt, ...) {
     fputc('\n', stderr);
     abort();
 }
+/* settings.txt's Display table, which holds the menu's Stats, names options.c's setter of the game's language */
+void options_language_set(const IniOpt* o, const char* v) {
+    (void)o;
+    (void)v;
+}
 /* the platform's lock and the backend's touch screen, without either */
 void pm_lock(PMutex* m) { (void)m; }
 void pm_unlock(PMutex* m) { (void)m; }
@@ -228,14 +233,14 @@ int main(void) {
     overlay_toggle();
     assert(overlay_shown());
     /* letters half the screen's height at most, in whole steps, in the middle: a phone held wide, a small window. The
-       page is as tall as its items (three here, under three rows of head, over a blank one), at the scale of the
+       page is as tall as its items (four here, under three rows of head, over a blank one), at the scale of the
        tallest page, and as wide as three quarters of the picture hold, between 40 and 72 columns */
     overlay_place(SW, SH, &px, &py, &s);
     C = overlay_cols(SW, s);
-    assert(s == 2 && C == OVERLAY_COLS_MAX && px == (SW - C * 16) / 2 && py == (SH - 7 * 32) / 2);
+    assert(s == 2 && C == OVERLAY_COLS_MAX && px == (SW - C * 16) / 2 && py == (SH - 8 * 32) / 2);
     assert(overlay_cols(1280, 2) == 60 && overlay_cols(500, 1) == 46 && overlay_cols(400, 1) == OVERLAY_COLS &&
            overlay_cols(3840, 4) == OVERLAY_COLS_MAX);
-    overlay_place(500, 120, &x, &y, &sc);
+    overlay_place(500, 136, &x, &y, &sc);
     assert(sc == 1 && x == (500 - 46 * 8) / 2 && y == 4);
     /* a phone's display scale: the Poco F8 (408 dpi, 2510x1156) and the Pixel 9 (420 dpi) at 3x, where half the
        picture gave 2x; a 4K picture at 100% keeps the 4x half of it gives */
@@ -252,17 +257,23 @@ int main(void) {
     /* the first page: the title on a band of ink, the items under it, the focused one on a band; the page hides the
        game, whose text would show through it */
     draw();
-    assert(list.q[0].w == (float)(C * 16) && list.q[0].h == 7 * 32 && list.q[1].rgba == ink && list.q[1].h == 32);
+    assert(list.q[0].w == (float)(C * 16) && list.q[0].h == 8 * 32 && list.q[1].rgba == ink && list.q[1].h == 32);
     assert(list.q[0].rgba >> 24 == 0xFFu);
     assert(text_at(C - 2, 3, ">") && text_at(C - 2, 4, ">")); /* a page under each */
     assert(text_at(1, 0, "SCARLETNX  /  MENU") && text_at(1, 3, "\xFE On-screen controls") &&
-           text_at(1, 4, "\xFE Controllers") && text_at(1, 5, "\xFE Exit"));
+           text_at(1, 4, "\xFE Controllers") && text_at(1, 5, "\xFE Stats") && text_at(1, 6, "\xFE Exit"));
+    /* Stats: a tap turns it on and keeps it in the game's .ini, as F12 does, and again off */
+    assert(text_at(C - 4, 5, "Off") && !g_settings.stats);
+    assert(tap(2, 3) == OVERLAY_NONE && g_settings.stats && !strcmp(stored, "stats"));
+    draw();
+    assert(text_at(C - 3, 5, "On"));
+    assert(tap(2, 3) == OVERLAY_NONE && !g_settings.stats);
     /* a tap on Exit exits; on the title, nothing; outside the panel, it closes */
-    assert(tap(2, 3) == OVERLAY_EXIT && tap(-3, 3) == OVERLAY_NONE);
+    assert(tap(3, 3) == OVERLAY_EXIT && tap(-3, 3) == OVERLAY_NONE);
     assert(overlay_tap(5.0f, 5.0f, SW, SH) == OVERLAY_CLOSE);
     /* the focus goes round, from Exit to the first item and back over the top; Back from here closes */
     overlay_move(1);
-    overlay_move(-4);
+    overlay_move(-5);
     assert(overlay_select() == OVERLAY_EXIT && overlay_back() == OVERLAY_CLOSE);
 
     /* the controls' page: each setting shown with its value, changed and kept */
@@ -363,6 +374,8 @@ int main(void) {
            left stick past half way as one, goes on after a while, then on and on; with the menu closed, nothing, and
            a press held as it opens does not act */
         assert(overlay_controls(0, still, 1000) == OVERLAY_NONE); /* the focus back on Controllers */
+        assert(overlay_controls(0, down, 1000) == OVERLAY_NONE);  /* to Stats */
+        assert(overlay_controls(0, still, 1000) == OVERLAY_NONE); /* let go */
         assert(overlay_controls(0, down, 1000) == OVERLAY_NONE);  /* to Exit */
         assert(overlay_controls(0, down, 1000 + SNX_OVERLAY_REPEAT_DELAY - 1) == OVERLAY_NONE);
         assert(overlay_controls(1ull << 0, down, 1000 + SNX_OVERLAY_REPEAT_DELAY - 1) == OVERLAY_EXIT); /* not yet */
@@ -372,10 +385,11 @@ int main(void) {
         assert(text_at(1, 0, "SCARLETNX  /  CONTROLS"));
         assert(overlay_controls(1ull << 1, still, 2000) == OVERLAY_NONE);  /* B: back to the menu, on its first */
         assert(overlay_controls(1ull << 15, still, 2001) == OVERLAY_NONE); /* the D-pad down: Controllers */
-        assert(overlay_controls(1ull << 15, still, 2001 + SNX_OVERLAY_REPEAT_DELAY) == OVERLAY_NONE); /* Exit */
+        assert(overlay_controls(1ull << 15, still, 2001 + SNX_OVERLAY_REPEAT_DELAY) == OVERLAY_NONE); /* Stats */
         assert(overlay_controls(1ull << 15, still, 2001 + SNX_OVERLAY_REPEAT_DELAY + SNX_OVERLAY_REPEAT_MS - 1) ==
                OVERLAY_NONE);
-        assert(overlay_controls(1ull << 0, still, 3000) == OVERLAY_EXIT);
+        assert(overlay_controls(1ull << 0, still, 3000) == OVERLAY_NONE && g_settings.stats); /* A on it */
+        g_settings.stats = 0;
         assert(overlay_controls(1ull << 13, still, 3001) == OVERLAY_NONE &&
                overlay_controls(0, left, 3002) == OVERLAY_NONE);
         assert(overlay_controls(1ull << 1, still, 3003) == OVERLAY_CLOSE);

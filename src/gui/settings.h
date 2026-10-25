@@ -27,6 +27,7 @@ typedef struct {
     const char* fallback; /* the runtime's default for the .ini, as the row words it: what it shows while not picked */
     const char* def;      /* that default as the .ini writes it */
     int kind;             /* 0, GUI_SETTING_PAGE or GUI_SETTING_ALL */
+    int type_text;        /* the .ini's value is a text, often a folder: gui_settings_debug says its key alone */
     int first, count;     /* the rows a page opens, an All steps */
 } GuiSetting;
 typedef struct {
@@ -67,6 +68,11 @@ void gui_settings_sync(GuiSettings* settings);
 /* row's value as the Settings show it: a pick as it is, a row not picked its default and [default] ("Off
    [default]", "[default]" for an empty one), an All's [default] while none of its rows is picked */
 void gui_settings_shown(const GuiSettings* settings, int row, char* out, size_t size);
+/* the Debug section's settings not at their default for a run of the game whose .ini is at ini (NULL: none read): a
+   row's pick, else the file's value, else its default; then gdbstub when the launcher's row is on. With picks 0 the
+   file's alone, the picks and gdbstub left out. key=value between ", ", a text's by its key alone, as the game says
+   them over its picture (the runtime's options_debug): how many. out cut where it ends, NUL-terminated */
+int gui_settings_debug(const GuiSettings* settings, const char* ini, int picks, char* out, size_t size);
 /* the value picked for key, NULL for the .ini's or no such row */
 const char* gui_settings_value(const GuiSettings* settings, const char* key);
 /* argv's options for a run: --key=value for each setting picked; with launch the launcher's too, -S -s for the stub,

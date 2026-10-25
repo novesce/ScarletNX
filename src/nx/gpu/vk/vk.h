@@ -34,6 +34,7 @@
 #include "common/cpu/aarch64/cpu.h"
 #include "common/utilities/endian.h"
 #include "nx/gpu/gpu.h"
+#include "nx/gpu/draw_state.h"
 #include "nx/runtime/platform/tracy.h"
 #include "volk.h"
 #include "vk_mem_alloc.h"
@@ -653,8 +654,10 @@ int vk_tc_convert_vi(VkCommandBuffer cb, u32 fmt, u32 w, u32 rows, VkBuffer in, 
    another's, in buf at off (aligned for a storage buffer) once what rows recorded into cb is done. They are asked for
    a strip at a time, so a level is never all in memory at once. 0 when staging ran out (the level is left out, and
    the caller tries again later); rows returns 0 for that too. The caller ends rendering and moves t to
-   TRANSFER_DST_OPTIMAL first */
-typedef int (*VkAstcRows)(void* ctx, VkCommandBuffer cb, u32 z, u32 nz, u32 y, u32 n, VkBuffer* buf, u64* off);
+   TRANSFER_DST_OPTIMAL first. A guest read while staging lands GPU results, and landing can submit the frame's
+   command buffer, which ends the one cb names: rows then stores the buffer recording now through cb, and the caller
+   records the rest of the strip there */
+typedef int (*VkAstcRows)(void* ctx, VkCommandBuffer* cb, u32 z, u32 nz, u32 y, u32 n, VkBuffer* buf, u64* off);
 int vk_astc_upload(VkCommandBuffer cb, Surf* t, u32 w, u32 h, u32 depth, u32 level, u32 layer, VkAstcRows rows,
                    void* ctx);
 
@@ -880,9 +883,11 @@ void vk_pipeline_init(void);
    tessellation evaluation and geometry stages (ShaderInfo.rt_int_mask). clip: the clip distances the 3D engine
    enables, and SNX_SH_NOT_LAST (the stages before rasterization). The translator reads ch's bound constant buffers
    (ch->cbind) to resolve indirect branches. xfb: what transform feedback captures of the last stage before
-   rasterization's outputs (ShaderInfo.xfb), NULL for none */
-VkSh* vk_shader_get(const GpuChannel* ch, u64 gva, u64 gva_a, int stage, u64 int_mask, u64 sint_mask, u32 rt_int,
-                    u32 rt_sint, u32 clip, u64 dc_color, u32 dc_funcs, u32 unfed, const ShXfb* xfb);
+   rasterization's outputs (ShaderInfo.xfb), NULL for none. p: the programs' state that keys a fragment program (its
+   early fragment tests) and a geometry program (its passthrough mask), NULL for none */
+VkSh* vk_shader_get(const GpuChannel* ch, const DsPrograms* p, u64 gva, u64 gva_a, int stage, u64 int_mask,
+                    u64 sint_mask, u32 rt_int, u32 rt_sint, u32 clip, u64 dc_color, u32 dc_funcs, u32 unfed,
+                    const ShXfb* xfb);
 /* whether the constant buffer words s's translation read still hold in ch's bound buffers (vk_shader_get's check on
    a hit, for a caller that kept s) */
 int vk_shader_cb_hold(const GpuChannel* ch, const VkSh* s);
@@ -974,14 +979,12 @@ void vk_render_end(void); /* ends the dynamic rendering pass, if one is open */
    safe is the picture's part clear of the system's bars (gpu/vk/ui.c) */
 void vk_ui_draw(VkCommandBuffer cb, VkImage sc, const int safe[4]);
 void vk_ui_swapchain_gone(void); /* its images' views go before the swapchain does */
-void vk_render_clear(GpuChannel* ch, u32 v);
-VkViewport vk_render_viewport(const u32* r);
-VkViewport vk_render_viewport_at(const u32* r, u32 index);
-int vk_render_depth_clamp(const u32* r);
-VkFrontFace vk_render_front_face(const u32* r);
-void vk_render_draw_texture(GpuChannel* ch);
-void vk_render_draw(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count, u32 base_vertex, u32 base_instance,
-                    u32 instances);
+void vk_render_clear(const DrawState* ds, const DrawClear* c, GpuChannel* ch);
+/* viewport index of a draw's state with the resolution scale, and the facing its first viewport gives */
+VkViewport vk_viewport_from(const DsDynamic* d, const DsViewports* v, u32 index);
+VkFrontFace vk_render_front_face(const DsDynamic* d, const DsViewports* v);
+void vk_render_draw_texture(const DrawState* ds, const DrawTexture* t, GpuChannel* ch);
+void vk_render_draw(const DrawState* ds, const DrawCall* dc, GpuChannel* ch);
 /* a texture binding, for draws and compute: the view type a declaration takes, the view of t with the header's
    swizzle (VK_NULL_HANDLE when t is NULL or not of the number type num: 0 float, 1 unsigned, 2 signed integer), and
    the header's sampler with the declaration's comparison (integer textures unfiltered). The sampler's t and want,

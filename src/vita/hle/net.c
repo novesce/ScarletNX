@@ -34,7 +34,6 @@
 #define SCE_NP_MANAGER_ERROR_INVALID_ARGUMENT 0x80550503u
 #define SCE_NP_MANAGER_ERROR_INVALID_STATE 0x80550506u
 #define SCE_NP_UTIL_ERROR_INVALID_ARGUMENT 0x80550601u
-#define SCE_NP_UTIL_ERROR_INVALID_NP_ID  0x80550605u
 #define SCE_NP_UTIL_ERROR_NOT_MATCH      0x80550609u
 #define SCE_NET_CTL_ERROR_CALLBACK_MAX   0x80412103u
 #define SCE_NET_CTL_ERROR_INVALID_ADDR   0x80412107u
@@ -538,13 +537,14 @@ static uint32_t np_get_id(VitaProcess* p, VitaThread* t) {
     return 0;
 }
 /* sceNpCmpNpId(const SceNpId* a, const SceNpId* b): 0 for the same ID, the online IDs, the 4 bytes after them and the
-   platforms (unless neither names one) compared */
+   platforms (unless neither names one) compared. Whether an ID is valid (its byte at 0x1c) isn't: a game signed out
+   makes its own player's ID ("Offline_Player", every other byte zero), and its level data names creators the same way,
+   and it finds them by comparing those */
 static uint32_t np_compare_ids(VitaProcess* p, VitaThread* t) {
     uint32_t x = vita_arg(p, t, 0), y = vita_arg(p, t, 1);
     if (!x || !y || !vita_mapped(p, x, NP_ID_SIZE) || !vita_mapped(p, y, NP_ID_SIZE))
         return SCE_NP_UTIL_ERROR_INVALID_ARGUMENT;
     const unsigned char *a = vita_ptr(p, x), *b = vita_ptr(p, y);
-    if (!a[NP_ID_VALID] || !b[NP_ID_VALID]) return SCE_NP_UTIL_ERROR_INVALID_NP_ID;
     if (strncmp((const char*)a, (const char*)b, 16) || memcmp(a + 0x14, b + 0x14, 4))
         return SCE_NP_UTIL_ERROR_NOT_MATCH;
     if ((a[NP_ID_PLATFORM] || b[NP_ID_PLATFORM]) && memcmp(a + NP_ID_PLATFORM, b + NP_ID_PLATFORM, 4))

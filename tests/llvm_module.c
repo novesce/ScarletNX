@@ -415,6 +415,31 @@ int main(int argc, char** argv) {
     printf("x0=%llx x9=%llx d0=%llx v2=%llx:%llx\n", (unsigned long long)runs[0].cpu.x[0],
            (unsigned long long)runs[0].cpu.x[9], (unsigned long long)runs[0].cpu.v[0].d[0],
            (unsigned long long)runs[0].cpu.v[2].d[1], (unsigned long long)runs[0].cpu.v[2].d[0]);
+    /* the setting unit_instructions sizes the code units as --chunk does: one instruction makes a unit of each
+       function, a million one unit of them all */
+    for (b = 0; b < 2; ++b) {
+        char* dir = snx_path_join(root, b ? "units-whole" : "units-each");
+        k = 0;
+        args[k++] = argv[1];
+        args[k++] = "--repo";
+        args[k++] = argv[2];
+        args[k++] = "-r";
+        args[k++] = input;
+        args[k++] = "Program";
+        args[k++] = "--outdir";
+        args[k++] = dir;
+        args[k++] = "--runtime";
+        args[k++] = self;
+        args[k++] = b ? "--unit_instructions=1000000" : "--unit_instructions=1";
+        args[k] = NULL;
+        check(!snx_run(args, root, NULL, &text), "a build sized by unit_instructions");
+        if (text && !strstr(text, b ? "LLVM: 1 code unit and" : "code units and")) fprintf(stderr, "%s\n", text);
+        check(text && strstr(text, b ? "LLVM: 1 code unit and" : "code units and"),
+              b ? "a million instructions: one code unit" : "one instruction: a code unit of each function");
+        free(text);
+        text = NULL;
+        free(dir);
+    }
     if (g_stepper.ready) llvm_steps_end(&g_stepper.steps);
     check(!snx_remove_tree(root), "fixture cleanup");
     for (b = 0; b < 2; ++b) {

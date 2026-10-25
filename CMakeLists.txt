@@ -142,7 +142,7 @@ endif()
 # as their own programs instead of names of scarletnx, and only scarletnx has the client.
 if(SNX_TRACY AND SNX_MULTICALL)
     set(SNX_MULTICALL OFF)
-    foreach(name scarletnx-3ds scarletnx-gnuabi)
+    foreach(name scarletnx-3ds scarletnx-vita scarletnx-gnuabi)
         if(IS_SYMLINK "${CMAKE_BINARY_DIR}/${name}")
             file(REMOVE "${CMAKE_BINARY_DIR}/${name}") # a link of an earlier configure would be written through
         endif()
@@ -253,7 +253,7 @@ install(FILES LICENSE DESTINATION ${licenses})
 # FFmpeg's with the change made to it (cmake/ffmpeg-vp9-nvdec.patch), which its LGPL wants carried with the binaries
 install(FILES "${FFmpeg_SOURCE_DIR}/COPYING.LGPLv2.1" "${FFmpeg_SOURCE_DIR}/LICENSE.md" cmake/ffmpeg-vp9-nvdec.patch
         DESTINATION ${licenses}/FFmpeg)
-install(FILES dist/licenses/DejaVu/LICENSE DESTINATION ${licenses}/DejaVu) # the shared fonts' stand-in (pl.c)
+install(FILES dist/licenses/Noto/OFL.txt DESTINATION ${licenses}/Noto) # the shared fonts' stand-ins (pl.c)
 install(FILES dist/licenses/Montserrat/OFL.txt DESTINATION ${licenses}/Montserrat) # the 3DS shared font's stand-in
 install(FILES dist/licenses/Ryujinx/LICENSE.txt DESTINATION ${licenses}/Ryujinx) # the default Miis (misc.c)
 install(FILES "${Vulkan-Headers_SOURCE_DIR}/LICENSE.md" DESTINATION ${licenses}/Vulkan-Headers)

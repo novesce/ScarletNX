@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
    Copyright 2026 the ScarletNX contributors
-   Ported from Eden (src/core/file_sys/fsmitm_romfsbuild.cpp):
-   SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project */
+   Ported from Eden (src/core/file_sys/fsmitm_romfsbuild.cpp, system_archive/mii_model.cpp):
+   SPDX-FileCopyrightText: Copyright 2018, 2019 yuzu Emulator Project */
 /* fsp-srv over the game's indexed data folder: the RomFS (a romfs.bin, an image made up from the romfs/ folder, or
    the game's dump read in place), save data, the SD card and the system archives */
 #include "nx/hle/filesystem/fs.h"
@@ -418,7 +418,7 @@ void fs_init(const char* keys, const char* title_keys) {
        of opening them on demand like the save and SD card files. ExeFS first: each mapped file holds a descriptor
        (macOS allows 61440 a process), and a game with more files than that left its executables unmapped */
     static const char* const shared_paths[] = {"exefs", "romfs", "romfs.bin"};
-    unsigned shared = 0, failed = 0;
+    FsShare share = {.bytes = (uint64_t)g_settings.map_limit_mb << 20, .files = (unsigned)g_settings.map_limit_files};
     pm_lock(&g_hle.fs.tree.lock);
     /* the console empties the application's temporary storage when the application is launched, and a game finds it
        empty at first use */
@@ -433,12 +433,16 @@ void fs_init(const char* keys, const char* title_keys) {
         FsNode* node;
         if (g_hle.fs.dump.patch.found) break; /* an update's, read over the game's dump: the game's files unread */
         if (fs_tree_lookup(&g_hle.fs.tree, NULL, shared_paths[i], &node)) continue;
-        r = fs_tree_share(&g_hle.fs.tree, node, &shared, &failed);
+        r = fs_tree_share(&g_hle.fs.tree, node, &share);
         if (r != FS_TREE_OK) fatal("Could not map %s%s (error %d)", g_datadir, shared_paths[i], r);
     }
     pm_unlock(&g_hle.fs.tree.lock);
-    LOG("fs: %u RomFS/ExeFS files mapped for the whole run\n", shared);
-    if (failed) WARN("fs: %u RomFS/ExeFS files could not be mapped, they are read on demand\n", failed);
+    LOG("fs: %u RomFS/ExeFS files mapped for the whole run, %.1f MB\n", share.shared,
+        (double)share.mapped_bytes / 1048576.0);
+    if (share.skipped)
+        LOG("fs: %u RomFS/ExeFS files past map_limit_mb=%d or map_limit_files=%d are read on demand\n", share.skipped,
+            g_settings.map_limit_mb, g_settings.map_limit_files);
+    if (share.failed) WARN("fs: %u RomFS/ExeFS files could not be mapped, they are read on demand\n", share.failed);
 }
 
 /* Contents held in memory, read without the host: an injected file, or one mapped at startup */
@@ -1607,11 +1611,39 @@ static void ngword2_name(u32 i, char name[32]) {
         snprintf(name, 32, "version.dat");
 }
 static u32 ngword2_file_size(u32 i) { return i < NGWORD2_AC_COUNT ? NGWORD2_AC_SIZE : 4; }
-static const u8* ngword2_file_data(u32 i) { return i < NGWORD2_AC_COUNT ? ngword2_ac : ngword2_version; }
-/* the 52 files in a RomFS laid out like romfs_build's */
-static void ngword2rom_init(void) {
-    u8* m = g_hle.fs.ngword2rom;
-    u32 dbuckets = hcount(1), fbuckets = hcount(NGWORD2_FILES);
+static void ngword2_file_write(u32 i, u8* out) {
+    memcpy(out, i < NGWORD2_AC_COUNT ? ngword2_ac : ngword2_version, ngword2_file_size(i));
+}
+
+/* MiiModel, the Mii parts' shapes and textures, as a placeholder with no parts in it. The SDK's resource loader (as a
+   game links it, nn::mii::detail) reads each file whole and indexes it from its start, checking nothing of its
+   header: after 0xc bytes (a magic, NFTR for the textures and NFSR for the shapes as Eden's stand-in has them in
+   system_archive/mii_model.cpp, then a version), two arrays of a u32 per part type, each type's largest decompressed
+   part and its alignment, then a table of entries per type, {offset, decompressed size, compressed size, ...}: 28
+   bytes each from 0x64 in a texture file, 88 from 0x6c in a shape file, which two more tables follow (72 bytes per
+   hair type, then 36 per face type). A part whose decompressed size is 0 is absent and skipped, so all-nought tables
+   hold no part, and the files must be as long as the tables, or the loader reads past them */
+#define MIIMODEL_DATA_ID      0x0100000000000802ull
+#define MIIMODEL_FILES        6
+#define MIIMODEL_TEXTURE_SIZE 0x2428u  /* 0x64 + 327 entries of 28 bytes */
+#define MIIMODEL_SHAPE_SIZE   0x14dd4u /* 0x6c + 1027 entries of 88, 132 of 72, 12 of 36 */
+static void miimodel_name(u32 i, char name[32]) {
+    static const char* const names[MIIMODEL_FILES] = {"NXTextureLowLinear.dat", "NXTextureLowSRGB.dat",
+                                                      "NXTextureMidLinear.dat", "NXTextureMidSRGB.dat",
+                                                      "ShapeHigh.dat",          "ShapeMid.dat"};
+    snprintf(name, 32, "%s", names[i]);
+}
+static u32 miimodel_file_size(u32 i) { return i < 4 ? MIIMODEL_TEXTURE_SIZE : MIIMODEL_SHAPE_SIZE; }
+static void miimodel_file_write(u32 i, u8* out) {
+    memcpy(out, i < 4 ? "NFTR" : "NFSR", 4);
+    put32(out + 4, 1);
+}
+
+/* a synthesized archive's files, in a RomFS laid out like romfs_build's with every file in its root folder, into m
+   (cap bytes, nought where a file's writer leaves it); gives the bytes used */
+static u64 filesrom_init(u8* m, size_t cap, u32 count, void (*file_name)(u32, char[32]), u32 (*file_size)(u32),
+                         void (*file_write)(u32, u8*), const char* what) {
+    u32 dbuckets = hcount(1), fbuckets = hcount(count);
     u64 dhash = 0x50;
     u64 dtab = dhash + (u64)dbuckets * 4;
     u64 fhash = dtab + ROM_DIR_ENTRY;
@@ -1620,15 +1652,15 @@ static void ngword2rom_init(void) {
     u32 i;
     char name[32];
 
-    for (i = 0; i < NGWORD2_FILES; i++) {
-        ngword2_name(i, name);
+    for (i = 0; i < count; i++) {
+        file_name(i, name);
         fsize += entry_size(ROM_FILE_ENTRY, name);
         dsize = (dsize + 15) & ~(u64)15;
-        dsize += ngword2_file_size(i);
+        dsize += file_size(i);
     }
     fdata = (ftab + fsize + 0x1FF) & ~(u64)0x1FF;
-    if (fdata + dsize > sizeof g_hle.fs.ngword2rom) fatal("NgWord2: the synthesized archive does not fit\n");
-    memset(m, 0, sizeof g_hle.fs.ngword2rom);
+    if (fdata + dsize > cap) fatal("%s: the synthesized archive does not fit\n", what);
+    memset(m, 0, cap);
     memset(m + dhash, 0xFF, (size_t)dbuckets * 4);
     memset(m + fhash, 0xFF, (size_t)fbuckets * 4);
     /* the root folder, its files starting at table offset 0 */
@@ -1639,16 +1671,16 @@ static void ngword2rom_init(void) {
     put32(m + dtab + 12, 0);
     put32(m + dtab + 16, ROM_NONE);
     put32(m + dtab + 20, 0);
-    for (i = 0; i < NGWORD2_FILES; i++) {
+    for (i = 0; i < count; i++) {
         u32 len, b;
-        u64 size = ngword2_file_size(i);
+        u64 size = file_size(i);
         u8* e;
-        ngword2_name(i, name);
+        file_name(i, name);
         len = (u32)strlen(name);
         data = (data + 15) & ~(u64)15;
         e = m + ftab + off;
         put32(e, 0); /* the root folder */
-        put32(e + 4, i + 1 < NGWORD2_FILES ? (u32)(off + entry_size(ROM_FILE_ENTRY, name)) : ROM_NONE);
+        put32(e + 4, i + 1 < count ? (u32)(off + entry_size(ROM_FILE_ENTRY, name)) : ROM_NONE);
         put64(e + 8, data);
         put64(e + 16, size);
         b = rhash(0, name) % fbuckets;
@@ -1656,7 +1688,7 @@ static void ngword2rom_init(void) {
         put32(m + fhash + (u64)b * 4, (u32)off);
         put32(e + 28, len);
         memcpy(e + ROM_FILE_ENTRY, name, len);
-        memcpy(m + fdata + data, ngword2_file_data(i), (size_t)size);
+        file_write(i, m + fdata + data);
         data += size;
         off += entry_size(ROM_FILE_ENTRY, name);
     }
@@ -1670,7 +1702,7 @@ static void ngword2rom_init(void) {
     put64(m + 56, ftab);
     put64(m + 64, fsize);
     put64(m + 72, fdata);
-    g_hle.fs.ngword2rom_size = fdata + data;
+    return fdata + data;
 }
 /* save data folders, by SaveDataType */
 static const char* const g_save_kinds[] = {"system", "user", "bcat", "device", "temp", "cache", "sysbcat"};
@@ -1879,6 +1911,12 @@ static int nn_fssrv_sf_IFileSystemProxy_OpenDataStorageByDataId(SvcObj* self, nn
         if (data_id == NGWORD2_DATA_ID) {
             r = fs_tree_add_virtual(&g_hle.fs.tree, p, g_hle.fs.ngword2rom, g_hle.fs.ngword2rom_size, &node);
             if (!r) LOG("fs: provided synthesized NgWord2 system archive %016llx\n", (unsigned long long)data_id);
+        } else if (data_id == MIIMODEL_DATA_ID) {
+            r = fs_tree_add_virtual(&g_hle.fs.tree, p, g_hle.fs.miimodelrom, g_hle.fs.miimodelrom_size, &node);
+            if (!r)
+                LOG("fs: provided placeholder MiiModel system archive %016llx: no Mii parts in it, so Miis draw "
+                    "without faces (your firmware's goes in system/archives)\n",
+                    (unsigned long long)data_id);
         } else {
             r = fs_tree_add_virtual(&g_hle.fs.tree, p, g_hle.fs.emptyrom, sizeof g_hle.fs.emptyrom, &node);
             if (!r) LOG("fs: provided empty system archive %016llx\n", (unsigned long long)data_id);
@@ -1936,7 +1974,10 @@ static SvcObj* new_fspldr(void) { return nn_fssrv_sf_IFileSystemProxyForLoader_n
 
 void svc_fs_init(void) {
     emptyrom_init();
-    ngword2rom_init();
+    g_hle.fs.ngword2rom_size = filesrom_init(g_hle.fs.ngword2rom, sizeof g_hle.fs.ngword2rom, NGWORD2_FILES,
+                                             ngword2_name, ngword2_file_size, ngword2_file_write, "NgWord2");
+    g_hle.fs.miimodelrom_size = filesrom_init(g_hle.fs.miimodelrom, sizeof g_hle.fs.miimodelrom, MIIMODEL_FILES,
+                                              miimodel_name, miimodel_file_size, miimodel_file_write, "MiiModel");
     nn_fssrv_sf_IFileSystemProxy_register(new_fsp);
     nn_fssrv_sf_IProgramRegistry_register(new_fsppr);
     nn_fssrv_sf_IFileSystemProxyForLoader_register(new_fspldr);

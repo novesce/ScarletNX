@@ -675,24 +675,31 @@ FsTreeResult fs_tree_mtime(FsTree* tree, const FsNode* node, uint64_t* unix_ms) 
 #endif
     return FS_TREE_OK;
 }
-FsTreeResult fs_tree_share(FsTree* tree, FsNode* node, unsigned* shared, unsigned* failed) {
+FsTreeResult fs_tree_share(FsTree* tree, FsNode* node, FsShare* share) {
     if (!belongs_to(tree, node)) return FS_TREE_NOTFOUND;
     node->readonly = 1;
     if (node->is_dir) {
         for (FsNode* child = node->children; child; child = child->next) {
-            FsTreeResult rc = fs_tree_share(tree, child, shared, failed);
+            FsTreeResult rc = fs_tree_share(tree, child, share);
             if (rc) return rc;
         }
         return FS_TREE_OK;
     }
     if (node->is_virtual || node->fd >= 0) return FS_TREE_OK;
+    if ((share->files && share->shared >= share->files) ||
+        (share->bytes && node->size > share->bytes - share->mapped_bytes)) {
+        share->skipped++;
+        return FS_TREE_OK;
+    }
     char path[FS_TREE_PATH_MAX];
     FsTreeResult rc = fs_tree_path(tree, node, path, sizeof path);
     if (rc) return rc;
     if (plat_file_share(path, node->size, &node->fd, &node->map))
-        (*failed)++;
-    else
-        (*shared)++;
+        share->failed++;
+    else {
+        share->shared++;
+        share->mapped_bytes += node->size;
+    }
     return FS_TREE_OK;
 }
 

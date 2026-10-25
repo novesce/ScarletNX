@@ -3,6 +3,8 @@
 /* guest threads (each on a host thread of its own), the thread table, process exit, and the four cores the threads
    take turns on */
 #include "nx/hle/kernel/kernel_int.h"
+#include <errno.h>
+#include <string.h>
 #include "nx/runtime/arm.h"
 #include "nx/runtime/loader.h"
 #include "nx/runtime/main.h"
@@ -298,9 +300,8 @@ KThread* kthread_create(u64 entry, u64 arg, u64 stack_top, int prio, int core) {
     return t;
 }
 
-/* the host thread's stack: the recompiled code makes each guest call a host call, so it has to hold as many frames as
-   the guest's stack does, and more bytes for each */
-#define HOST_STACK ((size_t)32 << 20)
+/* the host thread's stack is thread_stack_mb's: the recompiled code makes each guest call a host call, so it has to
+   hold as many frames as the guest's stack does, and more bytes for each */
 /* A guest RET sets the pc and returns, and a call whose return address isn't that pc returns too (codegen.c checks
    c->pc against pc + 4 after each BL), so a return past the host frames, like libnx's exit resetting the stack and
    returning to the LR crt0 saved, comes back here with the pc where the guest goes on. Only 0, the entry's own return
@@ -327,8 +328,20 @@ void kthread_start(KThread* t) {
     pm_unlock(&g_hle.kernel.klock);
     LOGV("StartThread %llu entry=%llx prio=%d core=%d\n", (unsigned long long)t->id, (unsigned long long)t->entry,
          t->prio, t->core);
-    if (plat_thread(thread_main, t, HOST_STACK))
-        fatal("Could not start a host thread for guest thread %llu", (unsigned long long)t->id);
+    {
+        size_t stack = (size_t)g_settings.thread_stack_mb << 20;
+        if (plat_thread(thread_main, t, stack)) {
+            int reason = errno; /* plat_thread's */
+            u64 mapped = 0, hole = 0;
+            if (plat_address_space(&mapped, &hole))
+                LOG("thread: a host thread of a %llu MiB stack (thread_stack_mb) could not start, %llu MiB of the "
+                    "address space mapped, its largest free run %llu MiB\n",
+                    (unsigned long long)(stack >> 20), (unsigned long long)(mapped >> 20),
+                    (unsigned long long)(hole >> 20));
+            fatal("Could not start a host thread for guest thread %llu: %s", (unsigned long long)t->id,
+                  strerror(reason));
+        }
+    }
 }
 /* svcExitThread: the thread's waiters (joins) are woken, and its core goes to the next thread. Then its host thread
    lets go of it: its last use of the KThread, which may be freed with that reference */

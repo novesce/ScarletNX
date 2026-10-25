@@ -204,6 +204,16 @@ static int nn_account_baas_IManagerForApplication_GetAccountId(SvcObj* self, nn_
     *id = u->uid[0] ^ u->uid[1];
     R_SUCCEED();
 }
+static int nn_account_baas_IManagerForApplication_GetNintendoAccountUserResourceCacheForApplication(SvcObj* self,
+                                                                                                   IpcBuf base,
+                                                                                                   IpcBuf extra,
+                                                                                                   u64* id) {
+    memset(GP(base.addr), 0, (size_t)base.size);
+    memset(GP(extra.addr), 0, (size_t)extra.size);
+    /* the online account's id (`NintendoAccountId`), which a console keeps apart from the network service account's:
+       the same one here, as there is no account behind either */
+    return nn_account_baas_IManagerForApplication_GetAccountId(self, id);
+}
 static int nn_account_baas_IManagerForApplication_EnsureIdTokenCacheAsync(SvcObj* self, SvcObj** context) {
     (void)self;
     *context = nn_account_detail_IAsyncContext_new();

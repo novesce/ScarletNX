@@ -7,6 +7,7 @@
    are bare KThreads; each one that has to wait for a core waits on a host thread of its own */
 #include "nx/hle/kernel/thread.c"
 #include "nx/hle/hle.c"
+#include <setjmp.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <time.h>
@@ -21,16 +22,28 @@ const SnxArmModule* g_arm_mod; /* a 64-bit game */
 const SnxArmRt g_arm_rt;
 void arm_thread_run(KThread* t) { (void)t; }
 __thread void* tls_thread;
+/* fatal ends the test, but where the test catches it (fatal_jump set): its message kept, back to the test; the last
+   line logged kept too */
+static jmp_buf* fatal_jump;
+static char fatal_said[256], logged[256];
 void fatal(const char* fmt, ...) {
     va_list a;
     va_start(a, fmt);
+    if (fatal_jump) {
+        vsnprintf(fatal_said, sizeof fatal_said, fmt, a);
+        va_end(a);
+        longjmp(*fatal_jump, 1);
+    }
     vfprintf(stderr, fmt, a);
     va_end(a);
     abort();
 }
 void logf_(int lvl, const char* fmt, ...) {
+    va_list a;
     (void)lvl;
-    (void)fmt;
+    va_start(a, fmt);
+    vsnprintf(logged, sizeof logged, fmt, a);
+    va_end(a);
 }
 u32 h_new(KObj* o) {
     (void)o;
@@ -60,11 +73,25 @@ int mem_map(u64 addr, u64 size, u32 state, u32 perm) {
 u64 mem_total(void) { return 0; }
 u64 used_memory(void) { return 0; }
 void plat_exit_now(int code) { exit(code); }
+/* a guest thread's host thread, never run here: the stack it was asked with; thread_fails makes the system refuse
+   it, as one out of room does */
+static size_t started_stack;
+static int starts, thread_fails;
 int plat_thread(PThreadFn fn, void* arg, size_t stack) {
     (void)fn;
     (void)arg;
-    (void)stack;
-    return -1;
+    started_stack = stack;
+    ++starts;
+    if (thread_fails) {
+        errno = EAGAIN;
+        return -1;
+    }
+    return 0;
+}
+int plat_address_space(u64* mapped, u64* largest_free) {
+    *mapped = (u64)1000 << 20;
+    *largest_free = (u64)20 << 20;
+    return 1;
 }
 void plat_thread_exit(void) { pthread_exit(NULL); }
 void save_hints(void) {}
@@ -384,6 +411,25 @@ int main(void) {
     core_leave(a);
     core_leave(b);
 
+    /* a host thread the system refuses: the fatal says why, and the log the stack it asked and what the address space
+       holds */
+    {
+        KThread* t = kthread_create(0x1000, 0, 0x2000, 44, 0);
+        jmp_buf here;
+        g_settings.thread_stack_mb = 16;
+        thread_fails = 1;
+        fatal_jump = &here;
+        if (!setjmp(here)) kthread_start(t);
+        fatal_jump = NULL;
+        thread_fails = 0;
+        CHECK(strstr(fatal_said, strerror(EAGAIN)) != NULL, "the fatal says the reason: %s", fatal_said);
+        CHECK(strstr(logged, "a 16 MiB stack (thread_stack_mb) could not start, 1000 MiB of the address space mapped, "
+                             "its largest free run 20 MiB") != NULL,
+              "the log says the address space: %s", logged);
+        t->state = 2; /* exited, as one that started would be */
+        thread_destroy(&t->o);
+    }
+
     /* the thread pool: KTHREAD_MAX (256) slots, filled by as many threads; an exited thread keeps its slot (the live
        count leaves it out) until its last reference goes, and then a new thread takes that slot. A full pool is a bound
        below what a game uses, asserted, so no thread is left out */
@@ -402,6 +448,12 @@ int main(void) {
         t = kthread_create(0x1000, 0, 0x2000, 44, 0);
         CHECK(t == first[7] && t->id == first[KTHREAD_MAX - 1]->id + 1 && kthread_live_count() == KTHREAD_MAX,
               "the freed slot holds the new thread, %llu", (unsigned long long)t->id);
+        /* its host thread starts on thread_stack_mb's stack */
+        int before = starts;
+        g_settings.thread_stack_mb = 8;
+        kthread_start(t);
+        CHECK(starts == before + 1 && started_stack == (size_t)8 << 20, "%d started, a stack of %zu bytes",
+              starts - before, started_stack);
     }
 
     printf("%u checks, %u failed\n", checks, failures);

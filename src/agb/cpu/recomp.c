@@ -223,11 +223,24 @@ static void discover(AgbRecomp* recomp, AgbBoard* board, uint32_t pc, int thumb)
         }                                                                                                            \
     } while (0)
         if (start.thumb) {
+            uint32_t prefix_at = 1, prefix = 0; /* the last BL prefix's address (none: odd) and the LR it sets */
             for (uint32_t p = start.pc, n = 0; n < AGB_BLOCK_MAX / 2; ++n) {
                 uint16_t hw1 = agb_read16(board, p), hw2 = agb_read16(board, p + 2);
                 SnxThumb t;
                 unsigned len = snx_thumb_decode_profile(agb_codegen.profile, hw1, hw2, &t);
                 if (!len) break;
+                if (t.shape == TH_LEGACY_BL) { /* the ARM7TDMI's BL, two halves */
+                    if (!t.op) {
+                        prefix = p + 4 + (uint32_t)((int32_t)((uint32_t)t.imm << 21) >> 9);
+                        prefix_at = p;
+                        p += 2;
+                        continue;
+                    }
+                    /* the suffix calls through LR: known here when the prefix is just before it, else at run time */
+                    if (prefix_at + 2 == p) PUSH(prefix + (t.imm << 1), 1);
+                    PUSH(p + 2, 1);
+                    break;
+                }
                 if (t.shape == TH_BRANCH) {
                     int32_t target = thumb_target(p, hw1, hw2, t.op);
                     int fallthrough = t.op == BR_BL || t.op == BR_BLX_IMM || t.op == BR_BCOND || t.op == BR_CBZ ||

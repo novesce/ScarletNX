@@ -122,21 +122,27 @@ SnxA32Kind snx_a32_decode_profile(SnxArmProfile profile, uint32_t w) {
     }
 }
 unsigned snx_thumb_decode_profile(SnxArmProfile profile, uint16_t h, uint16_t h2, SnxThumb* o) {
-    if (profile == SNX_ARM_PROFILE_A57 || profile == SNX_ARM_PROFILE_ARM7TDMI) return snx_thumb_decode(h, h2, o);
+    if (profile == SNX_ARM_PROFILE_A57) return snx_thumb_decode(h, h2, o);
     if (profile == SNX_ARM_PROFILE_A9) return a9_thumb(h, h2, o);
     memset(o, 0, sizeof *o);
-    if (profile != SNX_ARM_PROFILE_ARM11) return 0;
-    /* ARMv6K Thumb BL is two separately executable 16-bit instructions. Its
+    if (profile != SNX_ARM_PROFILE_ARM11 && profile != SNX_ARM_PROFILE_ARM7TDMI) return 0;
+    int v6 = profile == SNX_ARM_PROFILE_ARM11; /* the ARM7TDMI's ARMv4T has none of ARMv5's and ARMv6's additions */
+    /* ARMv6K's and ARMv4T's Thumb BL is two separately executable 16-bit instructions. Its
        signed high offset is NOT Thumb-2's S/J1/J2 encoding. LR is observable
-       after the prefix, and execution may enter directly at a suffix. */
+       after the prefix, and execution may enter directly at a suffix (a GBA game's call through LR). BLX's suffix is
+       ARMv5's */
     unsigned top = h & 0xf800;
-    if (top == 0xf000 || top == 0xf800 || (top == 0xe800 && !(h & 1))) {
+    if (top == 0xf000 || top == 0xf800 || (v6 && top == 0xe800 && !(h & 1))) {
         o->shape = TH_LEGACY_BL;
         o->len = TH_F16;
         o->op = top == 0xf000 ? 0 : top == 0xf800 ? 1 : 2;
         o->imm = h & 0x7ff;
         return TH_F16;
     }
+    /* ARMv4T's 1011 group is ADD/SUB SP, PUSH and POP alone: CBZ, the extends, CPS, REV, BKPT, IT and the hints came
+       later */
+    if (!v6 && (h & 0xf000) == 0xb000 && (h & 0xff00) != 0xb000 && (h & 0xfe00) != 0xb400 && (h & 0xfe00) != 0xbc00)
+        goto invalid;
     if (top == 0x4800) {
         o->shape = TH_LOAD;
         o->len = TH_F16;
@@ -163,8 +169,12 @@ unsigned snx_thumb_decode_profile(SnxArmProfile profile, uint16_t h, uint16_t h2
     }
     if (top >= 0xe800 || !snx_thumb_decode(h, h2, o)) goto invalid;
     if (o->shape == TH_IT || o->shape == TH_HINT ||
-        (o->shape == TH_BRANCH && (o->op == BR_CBZ || o->op == BR_CBNZ || (o->op == BR_BLX_REG && o->rm == 15))))
+        (o->shape == TH_BRANCH &&
+         (o->op == BR_CBZ || o->op == BR_CBNZ || (o->op == BR_BLX_REG && (!v6 || o->rm == 15))))) /* BLX is v5's */
         goto invalid;
+    /* the forms ARMv6 makes UNPREDICTABLE (a base in an LDM or STM's list, an empty list, CMP of two low registers)
+       run on the ARM7TDMI as it runs them, which its profile's emitter follows */
+    if (!v6) return TH_F16;
     if (o->shape == TH_HI && o->op == 1 && (o->rd == 15 || o->rm == 15 || (o->rd < 8 && o->rm < 8))) goto invalid;
     if (o->shape == TH_PUSHPOP && !o->imm && !o->ra) goto invalid;
     if (o->shape == TH_LDMSTM) {

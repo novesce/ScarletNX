@@ -218,8 +218,8 @@ bool snx_ctr_romfs_open(FsTree* tree, SnxCtrRomfs** out) {
     r->dirs = m.dirs;
     r->files = m.files;
     r->meta_size = (size_t)meta_size;
-    unsigned shared = 0, failed = 0;
-    if (fs_tree_share(tree, root, &shared, &failed)) {
+    FsShare share = {0};
+    if (fs_tree_share(tree, root, &share)) {
         free(r);
         goto fail;
     }

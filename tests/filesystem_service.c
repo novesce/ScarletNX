@@ -828,6 +828,57 @@ static void test_virtual_services(SvcObj* fs, SvcObj* proxy) {
         }
         svcobj_unref(ngword);
     }
+
+    /* MiiModel (0100000000000802), with none in system/archives: a placeholder with no parts, the six resource files
+       each a magic (NFTR for the textures, NFSR for the shapes) and version 1, then nought as long as the SDK's
+       loader reads its tables: 0x2428 bytes of a texture file, 0x14dd4 of a shape file */
+    {
+        static const char* const names[6] = {"NXTextureLowLinear.dat", "NXTextureLowSRGB.dat",
+                                             "NXTextureMidLinear.dat", "NXTextureMidSRGB.dat",
+                                             "ShapeHigh.dat",          "ShapeMid.dat"};
+        Request a;
+        unsigned i;
+        request(&a, 202);
+        argument64(&a, 8, 0x0100000000000802ull);
+        dispatch(proxy, &a, 0);
+        CHECK(a.c.nout_objs == 1);
+        SvcObj* model = a.c.out_objs[0];
+        u64 model_size = get_size(model);
+        CHECK(model_size > 4 * 0x2428 + 2 * 0x14dd4 && model_size <= 0x34000);
+        test_storage_contracts(model, model_size);
+        /* the RomFS header and tables, then each file in pieces the test's guest memory holds */
+        u8 tables[0x400];
+        request(&a, 0);
+        argument64(&a, 0, 0);
+        argument64(&a, 8, sizeof tables);
+        output_buffer(&a, sizeof tables);
+        dispatch(model, &a, 0);
+        memcpy(tables, GP(0x5000), sizeof tables);
+        u64 header[10];
+        memcpy(header, tables, sizeof header);
+        snx_le64_array(header, 10);
+        CHECK(header[0] == 0x50 && header[9] <= sizeof tables && header[9] < model_size);
+        for (i = 0; i < 6; i++) {
+            u32 entry = romfs_find(tables, header, 0, 0, names[i]);
+            u64 offset, size, done;
+            CHECK(entry != UINT32_MAX);
+            offset = snx_ld_le64(tables + header[7] + entry + 8);
+            size = snx_ld_le64(tables + header[7] + entry + 16);
+            CHECK(size == (i < 4 ? 0x2428u : 0x14dd4u) && header[9] + offset + size <= model_size);
+            for (done = 0; done < size; done += 0x8000) {
+                u64 n = size - done < 0x8000 ? size - done : 0x8000, j;
+                const u8* piece = GP(0x5000);
+                request(&a, 0);
+                argument64(&a, 0, header[9] + offset + done);
+                argument64(&a, 8, n);
+                output_buffer(&a, n);
+                dispatch(model, &a, 0);
+                if (!done) CHECK(!memcmp(piece, i < 4 ? "NFTR\1\0\0\0" : "NFSR\1\0\0\0", 8));
+                for (j = done ? 0 : 8; j < n; j++) CHECK(piece[j] == 0);
+            }
+        }
+        svcobj_unref(model);
+    }
     puts("PASS HLE readonly virtual files and synthetic system archive");
 }
 

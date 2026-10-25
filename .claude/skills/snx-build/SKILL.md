@@ -130,7 +130,7 @@ packages. Inside an AppImage argv[0] points into its mount: anything that finds 
 through `g_exedir`, which `main.c` takes from `$APPIMAGE`.
 
 `cmake --install` puts the license files in `share/licenses/scarletnx`: `LICENSE`, then a folder per library or
-ported code built into the runtime or the driver (those with no license file of their own, like DejaVu Sans and
+ported code built into the runtime or the driver (those with no license file of their own, like Noto Sans and
 Ryujinx's default Miis, from `dist/licenses/`). The AppImage copies that folder and adds the licenses of
 the Arch packages it bundles, with their list in `share/licenses/bundled-packages.txt`, and the CI artifacts are the
 install tree. A new package means a new `install(...)` line for its license in `CMakeLists.txt`.

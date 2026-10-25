@@ -31,6 +31,7 @@
 #include "nx/runtime/rtapi.h"
 #include "nx/runtime/startup.h"
 #include "nx/runtime/platform/backend.h"
+#include "nx/runtime/platform/hud.h"
 #include "nx/runtime/platform/log.h"
 #include "nx/runtime/platform/prepare_screen.h"
 #include "nx/runtime/platform/plat.h"
@@ -168,29 +169,35 @@ static const char* program_path(const char* argv0) {
 
 #ifdef MODULE_PACK
 /* The pack's objects loaded into an arena of the JIT loader's, after the runtime library this app embeds (the pack has
-   none: its host had none for this machine). The arena holds the pack with room to spare, since the objects' sections
-   take their alignment and a GOT. The module's descriptor is its one export. A debugger the arena needs is asked for
-   by the loader, which says what to enable when there is none */
+   none: its host had none for this machine). Each of the arena's regions is what the two loads take of it
+   (snx_code_need), not a share of twice the file: a pack whose code passes five eighths of that fits, and an arena
+   whose every page is prepared (ios_arena's debugger) costs the memory the code uses. The module's descriptor is its
+   one export. A debugger the arena needs is asked for by the loader, which says what to enable when there is none */
 static const SnxModule* load_pack(const char* path) {
     SnxLinkInput rtlib, *inputs;
     SnxCodeLoader* loader;
     const char* names[1];
     SnxU64 address = 0;
     ModuleFn get;
-    size_t size = 0, count = 0, reserve;
+    size_t size = 0, count = 0, need[3], rtlib_need[3], k;
     unsigned char* data = (unsigned char*)snx_read_file(path, &size);
     char error[1024];
     if (!data) fatal("%s could not be read", path);
     inputs = snx_objects_unpack(data, size, "game code", &count);
     if (!inputs) fatal("%s is not a pack of recompiled code: recompile the game with --target ios", path);
-    /* at least 64 MiB, and twice the objects' size up to the 2 GiB an arena holds */
-    reserve = size < ((size_t)1 << 25) ? ((size_t)1 << 26) : size < ((size_t)1 << 30) ? size * 2 : ((size_t)1 << 31);
-    loader = snx_code_loader_new(reserve, error, sizeof(error));
-    if (!loader) fatal("The game's code cannot be loaded: %s", error);
     memset(&rtlib, 0, sizeof(rtlib));
     rtlib.data = snx_rtlib_object;
     rtlib.size = snx_rtlib_object_size;
     rtlib.name = "rtlib";
+    if (snx_code_need(&rtlib, 1, rtlib_need, error, sizeof(error)) ||
+        snx_code_need(inputs, count, need, error, sizeof(error)))
+        fatal("The game's code cannot be loaded: %s", error);
+    for (k = 0; k < 3; ++k) need[k] += rtlib_need[k];
+    LOG("game: a code arena of %.1f MiB of code, %.1f MiB of read-only data and %.1f MiB of data for its %.1f MB of "
+        "objects\n",
+        (double)need[0] / 1048576.0, (double)need[1] / 1048576.0, (double)need[2] / 1048576.0, (double)size / 1e6);
+    loader = snx_code_loader_new_regions(need, error, sizeof(error));
+    if (!loader) fatal("The game's code cannot be loaded: %s", error);
     names[0] = "snx_module";
     if (snx_code_load(loader, &rtlib, 1, NULL, 0, NULL, error, sizeof(error)) ||
         snx_code_load(loader, inputs, count, names, 1, &address, error, sizeof(error)))
@@ -826,6 +833,9 @@ int snx_main(int argc, char** argv) {
     }
     /* the game's errors in its log, where a fatal's "the line before" is: a game's process on Android has no stderr */
     snx_error_sink(log_error_line);
+    /* the guest's address space before the game's code, which would take a share of a small one: a pack's arena with its
+       write alias leaves an iOS app's 13 GiB or so no run of the 5 GiB the guest needs */
+    mem_reserve();
     /* the code before anything is written: a mistyped --game leaves no .ini and no log behind */
     mod = load_module(module);
     if (mod->abi != SNX_ABI) {
@@ -873,6 +883,11 @@ int snx_main(int argc, char** argv) {
         plat_system_info(sys, sizeof sys);
         LOG("system: %s\n", sys);
     }
+    {
+        char list[HUD_DEBUG_MAX];
+        if (options_debug(INI_CHANGED_DEFAULT, list, sizeof list))
+            LOG("debug: %s; shown at the top of the picture while the game runs\n", list);
+    }
     /* after the header, so the client's own lines do not come before it and a capture that cannot start still leaves
        a log: it is asked for by a setting, and a run without it is better than no run */
     if (snx_tracy_init(title)) WARN("tracy: no capture this run; it goes on without one\n");
@@ -895,6 +910,10 @@ int snx_main(int argc, char** argv) {
     g_settings.log_level = 2; /* a phone's log is the only way to see what a run did: everything, until it is steadier */
 #endif
     mem_init();
+    if (g_settings.memory_fit) { /* before the game allocates: what the process holds is the runtime's alone */
+        SnxU64 available = 0, footprint = snx_footprint();
+        mem_fit(snx_memory_available(&available) && footprint, available, footprint);
+    }
     kernel_init();
     dispatch_init();
     if (g_arm_mod) arm_dispatch_init();

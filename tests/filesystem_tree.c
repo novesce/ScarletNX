@@ -63,19 +63,20 @@ void pm_lock(PMutex* m) { pthread_mutex_lock(&m->l); }
 void pm_unlock(PMutex* m) { pthread_mutex_unlock(&m->l); }
 int plat_mkdir(const char* path) { return mkdir(path, 0777); }
 #endif
+/* the tree suite shares files in test_share_limits alone: a descriptor of its own count for each, nothing mapped */
+static int sharing, shares;
 int plat_file_share(const char* path, u64 size, int* fd, const u8** data) {
     (void)path;
     (void)size;
-    (void)fd;
-    (void)data;
-    CHECK(!"the tree suite never shares files");
-    return -1;
+    CHECK(sharing && "the tree suite shares files in test_share_limits alone");
+    *fd = 1000 + shares++;
+    *data = NULL;
+    return 0;
 }
 void plat_file_unshare(int fd, const u8* data, u64 size) {
-    (void)fd;
     (void)data;
     (void)size;
-    CHECK(!"the tree suite never shares files");
+    CHECK(sharing && fd >= 1000);
 }
 
 static void host_path(const char* relative, char* out) {
@@ -483,6 +484,48 @@ static void test_graft(const char* scratch) {
     puts("PASS a graft reads its own folder, readonly, and the rest stays in the data directory");
 }
 
+/* fs_tree_share maps what its limits let it, in bytes and in files; the rest is left to be read on demand, counted
+   apart from what failed */
+static void test_share_limits(const char* scratch) {
+    static const char* const files[][2] = {
+        {"a.bin", "12345"}, {"b.bin", "12345"}, {"big.bin", "12345678901234567890"}, {"sub/d.bin", "12345"}};
+    const FsShare limits[] = {{.bytes = 12}, {.files = 2}, {0}};
+    for (size_t k = 0; k < sizeof limits / sizeof *limits; ++k) {
+        char base[FS_TREE_PATH_MAX], path[FS_TREE_PATH_MAX];
+        FsShare share = limits[k];
+        FsTree other;
+        FsNode *romfs = NULL, *big = NULL;
+        CHECK(snprintf(base, sizeof base, "%s/share-%zu", scratch, k) < (int)sizeof base && !plat_mkdir(base));
+        CHECK(snprintf(path, sizeof path, "%s/romfs", base) < (int)sizeof path && !plat_mkdir(path));
+        CHECK(snprintf(path, sizeof path, "%s/romfs/sub", base) < (int)sizeof path && !plat_mkdir(path));
+        for (size_t i = 0; i < sizeof files / sizeof *files; ++i) {
+            FILE* f;
+            CHECK(snprintf(path, sizeof path, "%s/romfs/%s", base, files[i][0]) < (int)sizeof path);
+            f = fopen(path, "wb");
+            CHECK(f != NULL && fwrite(files[i][1], 1, strlen(files[i][1]), f) == strlen(files[i][1]) && !fclose(f));
+        }
+        scans_allowed = 1;
+        OK(fs_tree_init(&other, base));
+        scans_allowed = 0;
+        pm_lock(&other.lock);
+        OK(fs_tree_lookup(&other, NULL, "romfs", &romfs));
+        OK(fs_tree_lookup(&other, NULL, "romfs/big.bin", &big));
+        sharing = 1;
+        OK(fs_tree_share(&other, romfs, &share));
+        CHECK(!share.failed && share.shared + share.skipped == 4 && big->readonly);
+        if (k == 0) /* 12 bytes: two files of five, the twenty past it */
+            CHECK(share.shared == 2 && share.mapped_bytes == 10 && big->fd < 0);
+        else if (k == 1)
+            CHECK(share.shared == 2 && share.skipped == 2);
+        else
+            CHECK(share.shared == 4 && share.mapped_bytes == 35 && big->fd >= 1000);
+        fs_tree_destroy(&other);
+        sharing = 0;
+        pm_unlock(&other.lock);
+    }
+    puts("PASS a share maps what its limits let it, the rest read on demand and counted apart");
+}
+
 int main(int argc, char** argv) {
     CHECK(argc == 3);
     CHECK(strstr(argv[1], "scarletnx-fs-tree-") != NULL);
@@ -518,6 +561,7 @@ int main(int argc, char** argv) {
     test_missing_root(argv[1]);
     test_failed_initialization(argv[1]);
     test_graft(argv[1]);
+    test_share_limits(argv[1]);
     CHECK(!host_chdir(argv[1]));
     printf("PASS %u checks; native enumeration was restricted to initialization (%u opens)\n", checks, scan_count);
     return 0;

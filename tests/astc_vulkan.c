@@ -214,8 +214,9 @@ typedef struct {
     const u8* bl;
     u32 bh, bd;
 } Level;
-static int level_rows(void* ctx, VkCommandBuffer cb, u32 z, u32 nz, u32 y, u32 n, VkBuffer* buf, u64* off) {
+static int level_rows(void* ctx, VkCommandBuffer* pcb, u32 z, u32 nz, u32 y, u32 n, VkBuffer* buf, u64* off) {
     const Level* l = ctx;
+    VkCommandBuffer cb = *pcb;
     if (l->bl) {
         VkBlMove m = {l->nx * 16, l->ny, l->bh, l->bd, y, n, z, nz, l->nx * 16};
         u64 lo, hi, at, cap;

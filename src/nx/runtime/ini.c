@@ -92,6 +92,44 @@ void ini_format(const IniOpt* o, char* out, size_t n) {
         snprintf(out, n, "%s", (const char*)o->var);
 }
 
+int ini_changed(const IniOpt* table, int flags, char* out, size_t n) {
+    size_t at = 0;
+    int count = 0;
+    if (n) out[0] = 0;
+    for (; table->key; ++table) {
+        char value[64];
+        const char* shown = value;
+        int same;
+        if (!table->def) continue;
+        if (table->type == INI_TEXT) {
+            shown = (const char*)table->var;
+            same = !strcmp(shown, table->def);
+        } else {
+            double def = strtod(table->def, NULL);
+            if (table->type == INI_INT)
+                same = __atomic_load_n((const int*)table->var, __ATOMIC_RELAXED) == (int)def;
+            else {
+                float f;
+                __atomic_load((const float*)table->var, &f, __ATOMIC_RELAXED);
+                same = f == (float)def;
+            }
+            ini_format(table, value, sizeof value);
+        }
+        if (same) continue;
+        if (at < n) {
+            if (table->type == INI_TEXT && (flags & INI_CHANGED_NO_TEXT))
+                at += (size_t)snprintf(out + at, n - at, "%s%s", count ? ", " : "", table->key);
+            else
+                at += (size_t)snprintf(out + at, n - at, "%s%s=%s", count ? ", " : "", table->key, shown);
+        }
+        if (at < n && (flags & INI_CHANGED_DEFAULT))
+            at += (size_t)snprintf(out + at, n - at, table->type == INI_TEXT ? " (default \"%s\")" : " (default %s)",
+                                   table->def);
+        ++count;
+    }
+    return count;
+}
+
 static int step_of(const IniOpt* o) { return o->step > 0 ? o->step : 1; }
 void ini_word(const IniOpt* o, int v, char* out, size_t n) {
     const char* w = o->words;

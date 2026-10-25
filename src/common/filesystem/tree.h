@@ -79,9 +79,16 @@ FsTreeResult fs_tree_rename(FsTree* tree, FsNode* scope, const char* src, const 
 /* Copies the contents. Missing parent directories are virtual, writable placeholders. Injected files are readonly. */
 FsTreeResult fs_tree_add_virtual(FsTree* tree, const char* relative_path, const void* data, uint64_t size,
                                  FsNode** out);
+/* What fs_tree_share maps at most, bytes and files (0: no limit on either), and what it did: shared files of
+   mapped_bytes, skipped past a limit, failed that could not be mapped */
+typedef struct {
+    uint64_t bytes, mapped_bytes;
+    unsigned files, shared, skipped, failed;
+} FsShare;
 /* Startup only: opens and maps every regular file under node (plat_file_share) and makes the subtree readonly, so no
-   mapped file is ever truncated, replaced or renamed. A file that can't be mapped keeps fd -1 and is read on demand. */
-FsTreeResult fs_tree_share(FsTree* tree, FsNode* node, unsigned* shared, unsigned* failed);
+   mapped file is ever truncated, replaced or renamed. A file past share's limits, or that can't be mapped, keeps fd -1
+   and is read on demand. */
+FsTreeResult fs_tree_share(FsTree* tree, FsNode* node, FsShare* share);
 void fs_tree_retain(FsNode* node);
 void fs_tree_release(FsNode* node);
 

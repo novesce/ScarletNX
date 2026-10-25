@@ -106,6 +106,10 @@ typedef struct KTmem {
 } KTmem;
 
 void kernel_init(void);
+/* memory_fit's measure, as the game starts: what the system can still give the process (available) and what the process
+   holds (footprint), when measured says the system told both. The game is told no more than mem_fit_budget's */
+void mem_fit(int measured, u64 available, u64 footprint);
+u64 mem_fit_budget(u64 available, u64 footprint);
 u32 h_new(KObj* o); /* a new handle to o, which takes a reference */
 void kobj_ref(KObj* o);
 void kobj_unref(KObj* o);

@@ -13,6 +13,7 @@ The NX runtime runs 32-bit programs with it. The recompiler compiles a 32-bit pr
 - `llvm.h`, `llvm.c`, `llvm_vector.inc`, `llvm_thumb.inc`: `snx_arm_llvm_block(module, name, words, count, pc, &consumed)` and `snx_thumb_llvm_block(module, name, halfwords, count, pc, &consumed)` emit `void name(SnxArmCPU*)` into a **host-target** LLVM module.
 - `tests/arm_emit.c`, `tests/thumb_emit.c`: object generators demonstrating module creation, verification, optimization and native object emission.
 - `tests/arm_test.py`, `tests/arm_vector_test.py`, `tests/thumb_test.py`: native execution witnesses and optional independent Unicorn comparisons.
+- `tests/arm_fuzz.py`: random encodings of each class, A32 and Thumb, against Unicorn from random FP and flag state (`--only ISA:HEX` replays one).
 
 Input words are host integers decoded from little-endian guest code (A32 words, or Thumb halfwords). A block consumes at most `count` instructions (or halfwords for Thumb) and stops at a control transfer, including a conditional transfer. `consumed` reports the compiled length. Bad input returns NULL before changing the module.
 
@@ -41,7 +42,9 @@ Programs linking blocks link `snx_arm_rt`. The executor (`exec.h`, built into `s
 
 ## Thumb32 instructions with A32 twins
 
-Many Thumb32 instructions are A32 ones with their fields elsewhere: coprocessor, VFP and Advanced SIMD (the same bits, or the top byte moved), LDM/STM and PUSH.W/POP.W, the exclusives and acquire/release, barriers, MRS/MSR, long multiplies and divides, REV/RBIT/CLZ and the extends with add. `thumb_decode.c` decodes them to `TH_A32`, the A32 word and its kind, and the A32 emitter runs them reading Thumb's PC. A doubleword exclusive's second register, which Thumb names freely, comes with it. LDRD/STRD (`TH_DUAL`) are Thumb's own, as their register pair and offset are.
+Many Thumb32 instructions are A32 ones with their fields elsewhere: coprocessor, VFP and Advanced SIMD (the same bits, or the top byte moved), LDM/STM and PUSH.W/POP.W, the exclusives and acquire/release, barriers, MRS/MSR, long multiplies and divides, REV/RBIT/CLZ and the extends with add. `thumb_decode.c` decodes them to `TH_A32`, the A32 word and its kind, and the A32 emitter runs them reading Thumb's PC. A doubleword exclusive's second register, which Thumb names freely, comes with it, as does the offset T1's LDREX and STREX add to their base. LDRD/STRD (`TH_DUAL`) are Thumb's own, as their register pair and offset are.
+
+An IT block's conditions are its block's, decided when the block compiles: an instruction that traps under a condition that fails lets the block go on. A block the code ends inside an IT block (callers give the rest of the code, so only at its end), or an SVC or BKPT inside one, leaves ITSTATE in CPSR, and a Thumb block entered with ITSTATE there stops with `SNX_ARM_IT_ENTRY`, the ITSTATE its syndrome. A block compiled again from the halfwords it consumed is the same block, which the AOT compilers check.
 
 ## Opt-in ARM11 profile and checked memory
 
@@ -248,6 +251,9 @@ CPSR, FPSCR and guest memory for 1,490 encodings over 80 initial states each at 
 comparisons per level), including FP edge cases (NaNs, denormals, infinities, rounding-mode and FPSCR
 combinations) and SIMD saturation/shift boundaries. The Thumb suite compares all GPRs, CPSR and guest memory
 for 141 instruction/IT sequences at O0 and O2, covering Thumb16 and Thumb32 data processing, loads/stores,
-branches, bitfield and IT blocks. Decode tests check both accepted and rejected encodings
+branches, bitfield and IT blocks, and witnesses blocks that end or begin around an IT block. `arm_fuzz.py` draws
+encodings at random from each class, keeps those llvm-objdump decodes for the Cortex-A57, and fails on any
+difference in state; what it reports besides (missing, extra, faults) is mostly UNPREDICTABLE encodings, and
+QEMU 5's missing alignment checks. Decode tests check both accepted and rejected encodings
 against llvm-objdump on cortex-a57. Unicorn's ARMv8-capable AArch32 model is the reference, not Cortex-A57
 hardware. Tests use no game assets.

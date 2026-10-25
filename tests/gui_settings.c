@@ -90,8 +90,8 @@ int main(int argc, char** argv) {
                       words(&s.keys[3]) == 2 && strstr(s.keys[3].about, "PATH")));
     assert(!gui_settings_extract(&s)); /* off: a dump read in place */
     /* the recompiler's: none passed until picked, then --key=value; the optimization level takes 0 to 3 and z, the
-       AOT threads a number (0 the cores), the unit cache limit a number of GB (0 none), and LLVM Internals is a page of
-       its own */
+       AOT threads a number (0 the cores), the unit size a number of instructions, the unit cache limit a number of GB
+       (0 none), and LLVM Internals is a page of its own */
     assert(!strcmp(s.keys[opt].section, "Launch") && !strcmp(s.keys[opt].key, "Optimization level") &&
            !strcmp(s.values[opt].key, "opt") && words(&s.keys[opt]) == 7 && !gui_settings_recompile(&s, options));
     assert(gui_settings_set(&s, "opt", "z") && gui_settings_recompile(&s, options) == 1 && !strcmp(options[0], "--opt=z"));
@@ -99,13 +99,18 @@ int main(int argc, char** argv) {
            gui_settings_set(&s, "aot_threads", "4"));
     assert(gui_settings_recompile(&s, options) == 2 && !strcmp(options[0], "--opt=s") &&
            !strcmp(options[1], "--aot_threads=4"));
-    assert(!strcmp(s.keys[opt + 2].section, "Launch") && !strcmp(s.keys[opt + 2].key, "Unit cache limit") &&
-           !strcmp(s.values[opt + 2].key, "unit_cache_gb") && strstr(s.keys[opt + 2].about, "0 = no limit"));
-    assert(!strcmp(s.values[opt + 2].def, "0") && strstr(s.keys[opt + 2].about, "a tenth of its disk free")); /* no limit */
+    assert(!strcmp(s.keys[opt + 2].section, "Launch") && !strcmp(s.keys[opt + 2].key, "Unit size") &&
+           !strcmp(s.values[opt + 2].key, "unit_instructions") && !strcmp(s.values[opt + 2].def, "90000"));
+    assert(gui_settings_set(&s, "unit_instructions", "20000") && gui_settings_recompile(&s, options) == 3 &&
+           !strcmp(options[2], "--unit_instructions=20000") && gui_settings_set(&s, "unit_instructions", ""));
+    assert(!strcmp(s.keys[opt + 3].section, "Launch") && !strcmp(s.keys[opt + 3].key, "Unit cache limit") &&
+           !strcmp(s.values[opt + 3].key, "unit_cache_gb") && strstr(s.keys[opt + 3].about, "0 = no limit"));
+    assert(!strcmp(s.values[opt + 3].def, "0") &&
+           strstr(s.keys[opt + 3].about, "a tenth of its disk free")); /* no limit */
     assert(gui_settings_set(&s, "unit_cache_gb", "50") && gui_settings_recompile(&s, options) == 3 &&
            !strcmp(options[2], "--unit_cache_gb=50") && gui_settings_set(&s, "unit_cache_gb", ""));
-    assert(!strcmp(s.keys[opt + 3].section, "Launch") && s.values[opt + 3].kind == GUI_SETTING_PAGE &&
-           !strcmp(s.keys[opt + 3].key, "LLVM Internals"));
+    assert(!strcmp(s.keys[opt + 4].section, "Launch") && s.values[opt + 4].kind == GUI_SETTING_PAGE &&
+           !strcmp(s.keys[opt + 4].key, "LLVM Internals"));
     assert(gui_settings_set(&s, "opt", ".ini") && gui_settings_set(&s, "aot_threads", "") &&
            !gui_settings_recompile(&s, options));
     /* a game's setting alone, as R's recompile takes Debug's SLP vectorizer: once picked, and never a launcher's own */
@@ -381,6 +386,32 @@ int main(int argc, char** argv) {
         assert(page > 0 && s.values[page].count == 1 + 17 && !strcmp(s.keys[page + 2].key, "L"));
         gui_settings_free(&s);
         free(output);
+    }
+    /* the Debug settings a run of a game takes off their default: its .ini's, a pick over it, a text by its key alone,
+       the GDB stub; another section's never */
+    {
+        static const char debug[] = "Display\tfullscreen\t0\tint\t0\t1\tWhole screen\tFullscreen\t0=Off|1=On\n"
+                                    "Debug\tlog\t1\tint\t0\t2\tLog detail\t\t0=0|1=1|2=2\n"
+                                    "Debug\tvk_budget_mb\t0\tint\t0\t2147483647\tBudget\tVulkan memory budget\t\n"
+                                    "Debug\trenderdoc\t\ttext\t0\t0\tCaptures\tRenderDoc captures\t";
+        static const char file[] =
+            "[Display]\nfullscreen=1\n[Debug]\nlog=1\nvk_budget_mb=512\nrenderdoc=/home/someone/caps\n";
+        char *dir = snx_temp_dir(NULL), *ini = snx_path_join(dir, "game.ini"), out[256];
+        assert(!gui_settings_read(&s, debug));
+        assert(gui_settings_debug(&s, NULL, 1, out, sizeof out) == 0 && !out[0]);
+        assert(!snx_write_file(ini, file, strlen(file)));
+        assert(gui_settings_debug(&s, ini, 0, out, sizeof out) == 2 && !strcmp(out, "vk_budget_mb=512, renderdoc"));
+        assert(gui_settings_set(&s, "log", "2") && gui_settings_set(&s, "vk_budget_mb", "0"));
+        assert(gui_settings_debug(&s, ini, 0, out, sizeof out) == 2); /* the file's alone: the picks left out */
+        assert(gui_settings_debug(&s, ini, 1, out, sizeof out) == 2 && !strcmp(out, "log=2, renderdoc"));
+        assert(gui_settings_set(&s, "gdbstub", "on"));
+        assert(gui_settings_debug(&s, NULL, 1, out, sizeof out) == 2 && !strcmp(out, "log=2, gdbstub"));
+        assert(gui_settings_debug(&s, ini, 1, out, 8) == 3 && !strcmp(out, "log=2, ")); /* cut, every one counted */
+        assert(gui_settings_debug(&s, "/nonexistent/game.ini", 0, out, sizeof out) == 0);
+        gui_settings_free(&s);
+        assert(!snx_remove_tree(dir));
+        free(ini);
+        free(dir);
     }
     puts("GUI settings: the runtime's list, picks and a run's options passed");
     return 0;

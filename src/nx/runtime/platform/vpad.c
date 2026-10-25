@@ -152,14 +152,17 @@ int vpad_ini(const char* key, const char* value) {
 }
 void vpad_set_store(void (*store)(const char* key, const char* value)) { g_store = store; }
 void vpad_store(const int* setting) {
-    char v[64];
     const IniOpt* o;
     for (o = g_vpad_ini; o < g_vpad_ini + FIRST_PLACE; ++o)
         if (o->var == setting) {
-            ini_format(o, v, sizeof v);
-            if (g_store) g_store(o->key, v);
+            vpad_store_opt(o);
             return;
         }
+}
+void vpad_store_opt(const IniOpt* o) {
+    char v[64];
+    ini_format(o, v, sizeof v);
+    if (g_store) g_store(o->key, v);
 }
 void vpad_store_control(int control) {
     char v[64];
@@ -489,13 +492,19 @@ static const float SHOWCASE[SNX_VPAD_COUNT][3] = {
     [SNX_VPAD_B] = {0.80f, 0.72f, 0.13f}};
 #define SHOWCASE_BOX 0.30f /* the box's height, of safe's shorter side; its gap to the corner a fifteenth of that */
 
-void vpad_showcase_corner_set(const IniOpt* o, const char* v) {
+int vpad_corner(const char* word) {
     int i;
     for (i = 0; i < 4; ++i)
-        if (!strcmp(v, CORNERS[i])) {
-            __atomic_store_n(&g_corner, i, __ATOMIC_RELAXED); /* the renderer's thread reads it */
-            return;
-        }
+        if (!strcmp(word, CORNERS[i])) return i;
+    return -1;
+}
+const char* vpad_corner_word(int corner) { return CORNERS[corner & 3]; }
+void vpad_showcase_corner_set(const IniOpt* o, const char* v) {
+    int i = vpad_corner(v);
+    if (i >= 0) {
+        __atomic_store_n(&g_corner, i, __ATOMIC_RELAXED); /* the renderer's thread reads it */
+        return;
+    }
     i = __atomic_load_n(&g_corner, __ATOMIC_RELAXED);
     LOG("settings: showcase_corner=%s is not tl, tr, bl or br: it keeps %s\n", v, CORNERS[i]);
     snprintf((char*)o->var, o->size, "%s", CORNERS[i]);
@@ -525,15 +534,26 @@ int vpad_showcase_fps(u32 presents, u64 now_ns) {
     }
     return fps;
 }
+int vpad_showcase_box(const int safe[4], float box[4]) {
+    float shorter = (float)(safe[2] < safe[3] ? safe[2] : safe[3]), h = SHOWCASE_BOX * shorter, w = h * 5 / 3;
+    int corner = __atomic_load_n(&g_corner, __ATOMIC_RELAXED);
+    if (!__atomic_load_n(&g_settings.showcase, __ATOMIC_RELAXED)) return -1;
+    box[0] = corner & 1 ? (float)(safe[0] + safe[2]) - h / 15 - w : (float)safe[0] + h / 15;
+    box[1] = corner & 2 ? (float)(safe[1] + safe[3]) - h / 15 - h : (float)safe[1] + h / 15;
+    box[2] = w;
+    box[3] = h;
+    return corner;
+}
 void vpad_showcase_draw(SnxUiList* l, const int safe[4], int fps) {
     const u32 alpha = 230;
-    float shorter = (float)(safe[2] < safe[3] ? safe[2] : safe[3]), h = SHOWCASE_BOX * shorter, w = h * 5 / 3;
-    float x0, y0, r[4];
-    int corner = __atomic_load_n(&g_corner, __ATOMIC_RELAXED), c, scale;
+    float box[4], x0, y0, w, h, r[4];
+    int c, scale;
     char text[24];
-    if (!__atomic_load_n(&g_settings.showcase, __ATOMIC_RELAXED)) return;
-    x0 = corner & 1 ? (float)(safe[0] + safe[2]) - h / 15 - w : (float)safe[0] + h / 15;
-    y0 = corner & 2 ? (float)(safe[1] + safe[3]) - h / 15 - h : (float)safe[1] + h / 15;
+    if (vpad_showcase_box(safe, box) < 0) return;
+    x0 = box[0];
+    y0 = box[1];
+    w = box[2];
+    h = box[3];
     ui_fill(l, x0, y0, w, h, 0x80000000u);
     for (c = 0; c < SNX_VPAD_COUNT; ++c) {
         const unsigned short* sp = snx_controls_sprites[INFO[c].sprite];

@@ -11,6 +11,7 @@
 #include "nx/loader/module_abi.h"
 #include "common/cpu/arm/llvm.h"
 #include "common/cpu/recompiler/llvm/link.h"
+#include "snx_settings.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -580,7 +581,7 @@ int snx_build_module_arm(SnxProgram* loaded, const SnxCodegenOptions* options, c
     qsort(d.blocks, d.count, sizeof(*d.blocks), compare_block);
     if (!options->quiet) printf("AArch32: %lu blocks found (%.1f s)\n", (unsigned long)d.count, snx_seconds() - start);
     /* units of whole blocks, by the code they cover, as module_llvm.c's chunks of whole functions */
-    limit = options->chunk_instrs ? options->chunk_instrs : SNX_CHUNK_INSTRUCTIONS;
+    limit = options->chunk_instrs ? options->chunk_instrs : (size_t)g_settings.unit_size;
     q.units = (Unit*)snx_alloc((d.count + 1) * sizeof(*q.units));
     memset(q.units, 0, (d.count + 1) * sizeof(*q.units));
     for (first = 0; first < d.count; first = last) {

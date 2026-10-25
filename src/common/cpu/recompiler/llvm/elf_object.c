@@ -232,6 +232,15 @@ void snx_elf_layout(SnxElfObject* objs, size_t count, uint64_t* kind_size, uint6
         }
 }
 
+uint64_t snx_elf_text_size(const SnxElfObject* objs, size_t count) {
+    uint64_t size = 0;
+    size_t i, j;
+    for (i = 0; i < count; ++i)
+        for (j = 0; j < objs[i].eh->e_shnum; ++j)
+            if (objs[i].kind[j] == SNX_ELF_TEXT) size += objs[i].sh[j].sh_size + objs[i].sh[j].sh_addralign;
+    return size;
+}
+
 /* ---- AArch64 instruction fields. Everything in uint64_t: a negative displacement is its two's complement, which
    the masks cut to the field as the instruction wants it, with no signed shift or overflow on the way ---- */
 

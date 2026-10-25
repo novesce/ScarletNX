@@ -1207,6 +1207,10 @@ msgid "Open Cheats Folder"
 msgstr ""
 
 #: src/gui/main.c
+msgid "  (Debug on)"
+msgstr ""
+
+#: src/gui/main.c
 #, c-format
 msgid "Not added: %s is not a folder of this device's storage"
 msgstr ""
@@ -1598,6 +1602,11 @@ msgstr ""
 
 #: src/gui/main.c
 msgid "R on another game: it joins the queue"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "Debug on: %s"
 msgstr ""
 
 #: src/gui/main.c
@@ -4127,6 +4136,14 @@ msgstr ""
 
 #: src/nx/runtime/settings.txt
 msgid "The threads compiling the game's code when it is recompiled: 0 = one for each of the computer's cores"
+msgstr ""
+
+#: src/nx/runtime/settings.txt
+msgid "Unit size"
+msgstr ""
+
+#: src/nx/runtime/settings.txt
+msgid "The instructions a code unit takes, whole functions at a time, when the game is recompiled: each is compiled on its own, and a smaller one takes less memory at once, which a phone needs (Android's allocator ran out at 90000 on several threads, and iOS ends an app at its limit). A game made already keeps its units until it is recompiled"
 msgstr ""
 
 #: src/nx/runtime/settings.txt

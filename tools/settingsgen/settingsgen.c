@@ -27,6 +27,7 @@
 #define MAX_ITEMS    64
 #define MAX_SECTIONS 32
 #define MAX_INCLUDES 16
+#define DEF_IFS      4 /* a setting's default-if lines */
 #define LEVELS       "0123sz"
 
 enum { T_INT, T_FLOAT, T_TEXT };
@@ -35,7 +36,9 @@ enum { S_RUNTIME, S_LAUNCHER, S_RECOMPILE, S_LLVM };
 enum { L_NONE, L_PASS, L_BUILDER, L_MACHINE };
 
 typedef struct {
-    char *name, *member, *key, *label, *help, *words, *set, *lo, *hi, *def, *def_if, *def_if_value;
+    char *name, *member, *key, *label, *help, *words, *set, *lo, *hi, *def;
+    char *def_if[DEF_IFS], *def_if_value[DEF_IFS]; /* default-if's, the first that holds taken */
+    int def_ifs;
     int type, size, once, startup, in_game, recompile, step, shift, list, repeat, block, table, line;
     /* LLVM's: its kind, its ID (a pass's name, a setter's suffix), the pipelines' levels a pass is in (bit per LEVELS
        character), the setter's argument type (LLVMBool, int or unsigned) */
@@ -479,8 +482,9 @@ static void read_spec(const char* path) {
         } else if (!strcmp(word, "default-if")) {
             char* macro = split(rest, &rest);
             if (!*macro || !*rest) fail(number, "default-if MACRO VALUE");
-            s->def_if = dup(macro);
-            s->def_if_value = dup(strcmp(rest, "\"\"") ? rest : "");
+            if (s->def_ifs == DEF_IFS) fail(number, "a setting takes at most %d default-if", DEF_IFS);
+            s->def_if[s->def_ifs] = dup(macro);
+            s->def_if_value[s->def_ifs++] = dup(strcmp(rest, "\"\"") ? rest : "");
         } else if (!strcmp(word, "once")) {
             s->once = 1;
         } else if (!strcmp(word, "words")) {
@@ -518,7 +522,7 @@ static void read_spec(const char* path) {
         if (!s->def) fail(s->line, "%s has no default", s->name);
         if (s->repeat && !strstr(s->key, "<N>")) fail(s->line, "a repeated setting's key has <N>");
         if (s->list >= 0 && !strstr(s->key, "<ID>")) fail(s->line, "an each setting's key has <ID>");
-        if (s->recompile && (tables[s->table].scope != S_RUNTIME || s->repeat || s->list >= 0 || s->def_if || s->set))
+        if (s->recompile && (tables[s->table].scope != S_RUNTIME || s->repeat || s->list >= 0 || s->def_ifs || s->set))
             fail(s->line, "%s: recompile takes a game's setting of one value, without default-if or set", s->name);
     }
 }
@@ -844,10 +848,13 @@ static void write_c(const char* dir) {
     outs("#include \"snx_settings.h\"\n\n");
     for (i = 0; i < nsettings; i++) {
         const Setting* s = &settings[i];
-        if (!s->def_if) continue;
-        out("#ifdef %s\n#define SETTING_INIT_%s ", s->def_if, s->member);
-        out_init(s, s->def_if_value);
-        out("\n#else\n#define SETTING_INIT_%s ", s->member);
+        if (!s->def_ifs) continue;
+        for (int k = 0; k < s->def_ifs; k++) {
+            out("#%s defined(%s)\n#define SETTING_INIT_%s ", k ? "elif" : "if", s->def_if[k], s->member);
+            out_init(s, s->def_if_value[k]);
+            outs("\n");
+        }
+        out("#else\n#define SETTING_INIT_%s ", s->member);
         out_init(s, s->def);
         outs("\n#endif\n");
     }
@@ -855,7 +862,7 @@ static void write_c(const char* dir) {
     for (i = 0; i < nsettings; i++) {
         const Setting* s = &settings[i];
         outs("    ");
-        if (s->def_if)
+        if (s->def_ifs)
             out("SETTING_INIT_%s", s->member);
         else
             out_init(s, s->def);
@@ -882,7 +889,7 @@ static void out_row(const Setting* s, int index, const char* key, const char* la
     out("    {");
     out_string(key);
     outs(", ");
-    if (s->def_if && def) {
+    if (s->def_ifs && def) {
         outs("SETTING_DEF_");
         outs(s->member);
     } else
@@ -990,10 +997,13 @@ static void write_defs(int runtime) {
     int i;
     for (i = 0; i < nsettings; i++) {
         const Setting* s = &settings[i];
-        if (!s->def_if || s->once || is_runtime(s) != runtime) continue;
-        out("#ifdef %s\n#define SETTING_DEF_%s ", s->def_if, s->member);
-        out_string(s->def_if_value);
-        out("\n#else\n#define SETTING_DEF_%s ", s->member);
+        if (!s->def_ifs || s->once || is_runtime(s) != runtime) continue;
+        for (int k = 0; k < s->def_ifs; k++) {
+            out("#%s defined(%s)\n#define SETTING_DEF_%s ", k ? "elif" : "if", s->def_if[k], s->member);
+            out_string(s->def_if_value[k]);
+            outs("\n");
+        }
+        out("#else\n#define SETTING_DEF_%s ", s->member);
         out_string(s->def);
         outs("\n#endif\n");
     }

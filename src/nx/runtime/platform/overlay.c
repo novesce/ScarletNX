@@ -15,7 +15,7 @@
 
 enum { FIRST = 3, VISIBLE = OVERLAY_ROWS - FIRST - 1 }; /* the items' first row, and how many show at once */
 enum { PAGE_MAIN, PAGE_CONTROLS, PAGE_BUTTONS, PAGE_PADS, PAGE_MAP };
-enum { M_CONTROLS, M_PADS, M_EXIT, M_COUNT };                                          /* the first page's items */
+enum { M_CONTROLS, M_PADS, M_STATS, M_EXIT, M_COUNT };                                 /* the first page's items */
 enum { P_PLAYER, P_SWAP, P_DEADZONE, P_RUMBLE, P_BACKGROUND, P_MAP, P_BACK, P_COUNT }; /* the gamepads' page's */
 /* the controls page's items */
 enum {
@@ -87,6 +87,7 @@ static int all_shown(void) {
 static int clamp(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 /* the setting an item is, NULL for an action */
 static const IniOpt* setting(int i) {
+    if (page == PAGE_MAIN) return i == M_STATS ? ini_find(g_display_ini, "stats") : NULL;
     if (page == PAGE_CONTROLS) return ini_find(i == C_TOUCH ? g_backend_ini : g_vpad_ini, CONTROLS[i]);
     if (page == PAGE_PADS && i == P_PLAYER) return NULL;
     if (page == PAGE_PADS && pad_player && (i == P_SWAP || i == P_RUMBLE)) { /* the player's own */
@@ -111,7 +112,7 @@ static void label(int i, char* text, size_t size, char* value, size_t vsize) {
         return;
     }
     if (page == PAGE_MAIN) {
-        static const char* const main_items[M_COUNT] = {SNX_VPAD_PAGE, SNX_GAMEPAD_PAGE, "Exit"};
+        static const char* const main_items[M_COUNT] = {SNX_VPAD_PAGE, SNX_GAMEPAD_PAGE, "Stats", "Exit"};
         snprintf(text, size, "%s", main_items[i]);
         if (i != M_EXIT) snprintf(value, vsize, ">");
         return;
@@ -246,6 +247,9 @@ static int act(int i, int step) {
         else if (page == PAGE_BUTTONS) {
             *v = to;
             vpad_store_shown(i - 1);
+        } else if (page == PAGE_MAIN) { /* stats: the renderer's thread reads it */
+            __atomic_store_n(v, to, __ATOMIC_RELAXED);
+            vpad_store_opt(o);
         } else {
             *v = to;
             if (page == PAGE_PADS)

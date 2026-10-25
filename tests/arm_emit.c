@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
    Copyright 2026 the ScarletNX contributors */
 /* arm_emit WORDS OUTPUT.o [OPT [a57|arm11|arm7tdmi [flat|checked]]]: PC followed by up to 64
-   hexadecimal words. Exports block_0, block_1, ... with the SnxArmBlock ABI. */
+   hexadecimal words. Exports block_0, block_1, ... with the SnxArmBlock ABI. A PC written ~PC makes its
+   block optional: one the compiler refuses is left out (a fuzzer's random words) instead of failing. */
 #include "common/cpu/arm/llvm.h"
 #include <llvm-c/Analysis.h>
 #include <llvm-c/Target.h>
@@ -55,8 +56,10 @@ int main(int argc, char** argv) {
         uint32_t words[64], pc;
         size_t n = 0, consumed;
         char name[32], *token = strtok(line, " \t\r\n");
+        int lenient;
         if (!token) continue;
-        pc = (uint32_t)strtoul(token, NULL, 16);
+        lenient = *token == '~';
+        pc = (uint32_t)strtoul(token + lenient, NULL, 16);
         while ((token = strtok(NULL, " \t\r\n")) != NULL) {
             if (n == 64) return 2;
             words[n++] = (uint32_t)strtoul(token, NULL, 16);
@@ -64,7 +67,10 @@ int main(int argc, char** argv) {
         snprintf(name, sizeof(name), "block_%u", index++);
         LLVMValueRef fn = argc >= 5 ? snx_arm_llvm_block_ex(mod, name, words, n, pc, &consumed, &codegen)
                                     : snx_arm_llvm_block(mod, name, words, n, pc, &consumed);
-        if (!fn || !consumed) return 2;
+        if (!fn || !consumed) {
+            if (lenient) continue;
+            return 2;
+        }
     }
     fclose(input);
     if (LLVMVerifyModule(mod, LLVMReturnStatusAction, &error)) goto fail;

@@ -55,7 +55,7 @@ check "$probe/Probe_code.so" -H
 check "$probe/games/Other_code.so" --game="$probe/games/Other"
 # Started bare it opens the launcher, which needs everything it runs beside it (the launcher itself can't be run
 # here: without a display SDL may fall back to an offscreen one and keep it open)
-for program in scarletnx-3ds scarletnx-gnuabi; do
+for program in scarletnx-3ds scarletnx-vita scarletnx-agb scarletnx-gnuabi; do
     if [ ! -e "$APPDIR/bin/$program" ]; then
         echo "The AppImage has no bin/$program, which the launcher runs" >&2
         exit 1

@@ -25,7 +25,8 @@ typedef enum {
     SNX_ARM_ENDIAN_UNSUPPORTED,
     SNX_ARM_BACKEND_UNSUPPORTED,
     SNX_ARM_PREFETCH_ABORT,
-    SNX_ARM_CODE_CHANGED
+    SNX_ARM_CODE_CHANGED,
+    SNX_ARM_IT_ENTRY /* a Thumb block entered with ITSTATE in CPSR, inside an IT block: the syndrome is the ITSTATE */
 } SnxArmExit;
 
 struct SnxArmRt;
@@ -159,11 +160,12 @@ typedef enum {
     TH_TABLE,     /* TBB/TBH */
     TH_IT,        /* If-Then */
     TH_HINT,      /* NOP/YIELD/WFE/WFI/SEV */
-    TH_LEGACY_BL, /* ARM11 only: separate Thumb BL prefix / BL or BLX suffix */
+    TH_LEGACY_BL, /* ARM11 and ARM7TDMI: separate Thumb BL prefix / BL or (ARM11) BLX suffix */
     TH_REV,       /* ARM11 Thumb REV/REV16/REVSH */
     TH_A32,       /* a Thumb32 instruction that is an A32 one in another encoding: .imm is the A32 word (condition
                      AL) and .op its SnxA32Kind, emitted by the A32 emitter with Thumb's PC. .ra is a doubleword
-                     exclusive's second register + 1 (A32's is the first + 1), else 0. Coprocessor, VFP and Advanced
+                     exclusive's second register + 1 (A32's is the first + 1), else 0, and .rd the offset T1's LDREX
+                     and STREX add to the base (A32's have none). Coprocessor, VFP and Advanced
                      SIMD, LDM/STM, exclusives, barriers, MRS/MSR, long multiplies and divides, REV and CLZ */
     TH_DUAL       /* LDRD/STRD: .op 1 to load, .rd and .rm the pair, .imm the offset, P/U/W in .flags */
 } SnxThumbShape;
