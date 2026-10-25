@@ -68,13 +68,35 @@ const char* gui_android_libraries(void) {
     return folder[0] ? folder : NULL;
 }
 
-/* MainActivity's method, with its arguments (none for a "()V" one, which leaves them unread) */
+/* what the exception thrown says (its toString), in out, the exception cleared: "" when none was */
+static void thrown_text(JNIEnv* env, char* out, size_t size) {
+    jthrowable thrown = (*env)->ExceptionOccurred(env);
+    jclass kind;
+    jmethodID said;
+    jstring text = NULL;
+    const char* chars = NULL;
+    out[0] = 0;
+    if (!thrown) return;
+    (*env)->ExceptionClear(env);
+    kind = (*env)->GetObjectClass(env, thrown);
+    said = kind ? (*env)->GetMethodID(env, kind, "toString", "()Ljava/lang/String;") : NULL;
+    if (said) text = (jstring)(*env)->CallObjectMethod(env, thrown, said);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env); /* toString's own: the class's name is all there is */
+    if (text) chars = (*env)->GetStringUTFChars(env, text, NULL);
+    snprintf(out, size, "%s", chars ? chars : snx_tr("an exception that says nothing"));
+    if (chars) (*env)->ReleaseStringUTFChars(env, text, chars);
+    if (text) (*env)->DeleteLocalRef(env, text);
+    if (kind) (*env)->DeleteLocalRef(env, kind);
+    (*env)->DeleteLocalRef(env, thrown);
+}
+/* MainActivity's method, with its arguments (none for a "()V" one, which leaves them unread); what it threw, if it did,
+   in the message */
 static int call(const char* method, const char* signature, const jvalue* args, char* message, size_t size) {
     JNIEnv* env = (JNIEnv*)SDL_GetAndroidJNIEnv();
     jobject activity = (jobject)SDL_GetAndroidActivity();
     jclass activity_class;
     jmethodID id;
-    int ok;
+    char thrown[512];
     if (!env || !activity) {
         snprintf(message, size, "%s", snx_tr("No Android activity to ask."));
         return 0;
@@ -82,12 +104,15 @@ static int call(const char* method, const char* signature, const jvalue* args, c
     activity_class = (*env)->GetObjectClass(env, activity);
     id = (*env)->GetMethodID(env, activity_class, method, signature);
     if (id) (*env)->CallVoidMethodA(env, activity, id, args);
-    ok = id && !(*env)->ExceptionCheck(env);
-    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    thrown_text(env, thrown, sizeof thrown); /* GetMethodID's NoSuchMethodError too */
     (*env)->DeleteLocalRef(env, activity_class);
     (*env)->DeleteLocalRef(env, activity);
-    if (!ok) snprintf(message, size, snx_tr("MainActivity.%s did not run."), method);
-    return ok;
+    if (id && !thrown[0]) return 1;
+    if (thrown[0])
+        snprintf(message, size, snx_tr("MainActivity.%s did not run: %s"), method, thrown);
+    else
+        snprintf(message, size, snx_tr("MainActivity.%s did not run."), method);
+    return 0;
 }
 
 int gui_android_play(const char* const* argv, char* message, size_t size) {
@@ -124,6 +149,16 @@ int gui_android_share(const char* path, char* message, size_t size) {
 }
 int gui_android_background(char* message, size_t size) { return call("toBack", "()V", NULL, message, size); }
 int gui_android_open_data(char* message, size_t size) { return call("openData", "()V", NULL, message, size); }
+int gui_android_open_folder(const char* path, char* message, size_t size) {
+    JNIEnv* env = (JNIEnv*)SDL_GetAndroidJNIEnv();
+    jvalue arg;
+    int ok;
+    if (!env) return call("openFolder", "", NULL, message, size);
+    arg.l = (*env)->NewStringUTF(env, path);
+    ok = call("openFolder", "(Ljava/lang/String;)V", &arg, message, size);
+    (*env)->DeleteLocalRef(env, arg.l);
+    return ok;
+}
 
 static SDL_DialogFileCallback folder_done;
 static void* folder_data;

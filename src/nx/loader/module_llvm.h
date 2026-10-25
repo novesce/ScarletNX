@@ -29,6 +29,8 @@ typedef struct {
     /* when set, the snx_aot_ wrappers the descriptor got: one per entry when the profile cache's units link (they call
        them), else none */
     size_t* wrappers;
+    /* when set, the instructions the analysis found and the module makes ahead of time (0 with --jit-only) */
+    size_t* found;
 } SnxLlvmBuild;
 /* g_settings' LLVM Internals (settings.txt's llvm table) for -O<opt>: the pipeline with the passes turned off cut
    out, the options set. Static, made again at each call. NULL with the reason in error when nothing at all is left

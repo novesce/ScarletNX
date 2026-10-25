@@ -10,6 +10,7 @@
 #include "common/cpu/aarch64/cpu.h"
 #include "common/utilities/common.h"
 #include "common/utilities/endian.h"
+#include "common/utilities/mods.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -107,13 +108,13 @@ int snx_state_fits(const SnxStateHeader* h, uint64_t title, const char* stamp, c
 }
 void snx_state_stamp(const char* program, char* out, size_t size) {
     char* path = snx_format("%s.abi", program);
-    FILE* f = path ? snx_fopen(path, "rb") : NULL;
-    size_t n = 0;
-    if (f) {
-        n = fread(out, 1, size - 1, f);
-        fclose(f);
-    }
+    size_t got = 0, n;
+    char* text = path ? (char*)snx_read_file(path, &got) : NULL;
     free(path);
+    n = text ? snx_game_stamp_size(text, got) : 0; /* the made line after it says how the code was made, not what */
+    if (n > size - 1) n = size - 1;
+    if (n) memcpy(out, text, n);
+    free(text);
     out[n] = 0;
     while (n && (out[n - 1] == '\n' || out[n - 1] == '\r')) out[--n] = 0;
 }

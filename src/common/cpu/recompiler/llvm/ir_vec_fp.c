@@ -12,8 +12,8 @@
    halves (FEAT_FP16) as on singles and doubles. Every lane is the architecture's: FPCR (FZ, FZ16, DN, AHP, RMode),
    NaN propagation and FPSR's cumulative flags are the soft-float helpers' (helpers/fp.c), one call per lane. The
    common single and double operations first try the host's IEEE arithmetic on whole vectors, behind the guards
-   ir_fpu.c's scalar fast paths use, checked in every lane: no NaN, infinity or denormal operand, a finite result
-   above the smallest normal or an exact zero, round to nearest, and IXC computed exactly or already set. */
+   ir_fpu.c's scalar fast paths use, checked in every lane: round to nearest without FZ, a finite result above the
+   smallest normal or an exact zero, and IXC computed exactly or already set. */
 #include "common/cpu/recompiler/llvm/ir_vec.h"
 #include "common/cpu/aarch64/cpu.h"
 
@@ -221,9 +221,6 @@ static V magnitude_in(SnxIr* ir, unsigned width, V bits, SnxU64 lo, SnxU64 hi) {
     return LLVMBuildICmp(B, LLVMIntULT, offset, K(ir, bits, hi - lo), "");
 }
 static V is_denormal(SnxIr* ir, unsigned width, V bits) { return magnitude_in(ir, width, bits, 1, min_normal(width)); }
-static V tame(SnxIr* ir, unsigned width, V bits) {
-    return either(ir, is_zero(ir, width, bits), magnitude_in(ir, width, bits, min_normal(width), inf_bits(width)));
-}
 static V roomy(SnxIr* ir, unsigned width, V bits) {
     return magnitude_in(ir, width, bits, min_normal(width) + 1, inf_bits(width));
 }
@@ -258,15 +255,28 @@ typedef struct {
     LLVMBasicBlockRef fast_end, join;
     V fast;
 } Split;
-static void split_begin(SnxIr* ir, V ok, V fast, V inexact, Split* s) {
+/* quick (NULL: none) implies ok and is cheaper: where it holds, ok's own test is skipped, which sink then takes out
+   of the fast path */
+static void split_begin(SnxIr* ir, V quick, V ok, V fast, V inexact, Split* s) {
     LLVMBasicBlockRef on = ir_block(ir, "vfp_fast"), off = ir_block(ir, "vfp_slow");
     s->join = ir_block(ir, "vfp_join");
     s->fast = fast;
+    if (quick) {
+        LLVMBasicBlockRef check = ir_block(ir, "vfp_check");
+        ir_likely(ir, LLVMBuildCondBr(B, quick, on, check));
+        LLVMPositionBuilderAtEnd(B, check);
+    }
     ir_likely(ir, LLVMBuildCondBr(B, ok, on, off));
     LLVMPositionBuilderAtEnd(B, on);
+    /* only while IXC is clear: it is sticky, and LLVM sinks the inexactness test into that block */
     if (inexact) {
+        LLVMBasicBlockRef clear = ir_block(ir, "vfp_ixc"), done = ir_block(ir, "vfp_ixc_done");
+        ir_unlikely(ir, LLVMBuildCondBr(B, LLVMBuildNot(B, ixc_set(ir), ""), clear, done));
+        LLVMPositionBuilderAtEnd(B, clear);
         V bit = LLVMBuildShl(B, LLVMBuildZExt(B, inexact, ir->t_i32, ""), ir_i32(ir, 4), "");
         ir_cpu_store(ir, LLVMBuildOr(B, fpsr(ir), bit, ""), offsetof(CPU, fpsr));
+        LLVMBuildBr(B, done);
+        LLVMPositionBuilderAtEnd(B, done);
     }
     s->fast_end = LLVMGetInsertBlock(B);
     LLVMBuildBr(B, s->join);
@@ -290,6 +300,7 @@ static V split_end(SnxIr* ir, Split* s, V slow) {
 
 typedef struct {
     V value, ok, inexact; /* ok, inexact: i1 over all lanes; inexact NULL when IXC must already be set */
+    V quick;              /* NULL, or an i1 that implies ok and costs less: every lane above the smallest normal */
 } Fast;
 
 /* a op b, op SNX_FP_ADD, SUB, MUL (MULX: the same without infinities), DIV */
@@ -334,22 +345,27 @@ static void fast_binary(SnxIr* ir, unsigned op, unsigned width, V a, V b, Fast* 
             }
             break;
     }
-    ok = both(ir, both(ir, tame(ir, width, a), tame(ir, width, b)), either(ir, roomy(ir, width, rb), exact_zero));
+    ok = either(ir, roomy(ir, width, rb), exact_zero);
     if (cut) ok = both(ir, ok, cut);
     f->value = rb;
-    f->ok = both(ir, fpcr_clear(ir, FPCR_RMODE), ir_vec_all(ir, ok));
+    f->ok = both(ir, fpcr_clear(ir, FPCR_RMODE | FPCR_FZ), ir_vec_all(ir, ok));
     f->inexact = inexact ? ir_vec_any(ir, inexact) : NULL;
     if (!inexact) f->ok = both(ir, f->ok, ixc_set(ir));
+    f->quick = NULL;
+    if (!cut) {
+        f->quick = both(ir, fpcr_clear(ir, FPCR_RMODE | FPCR_FZ), ir_vec_all(ir, roomy(ir, width, rb)));
+        if (!inexact) f->quick = both(ir, f->quick, ixc_set(ir));
+    }
 }
 
 /* add + n * m rounded once, on hosts with FMA, once IXC is set */
 static void fast_fma(SnxIr* ir, unsigned width, V add, V n, V m, Fast* f) {
     V r = as_bits(ir, fma3(ir, as_float(ir, n, width), as_float(ir, m, width), as_float(ir, add, width)), width);
     V zero_product = either(ir, is_zero(ir, width, n), is_zero(ir, width, m));
-    V operands = both(ir, tame(ir, width, add), both(ir, tame(ir, width, n), tame(ir, width, m)));
     V result = either(ir, roomy(ir, width, r), both(ir, is_zero(ir, width, r), zero_product));
     f->value = r;
-    f->ok = both(ir, both(ir, fpcr_clear(ir, FPCR_RMODE), ixc_set(ir)), ir_vec_all(ir, both(ir, operands, result)));
+    f->ok = both(ir, both(ir, fpcr_clear(ir, FPCR_RMODE | FPCR_FZ), ixc_set(ir)), ir_vec_all(ir, result));
+    f->quick = both(ir, both(ir, fpcr_clear(ir, FPCR_RMODE | FPCR_FZ), ixc_set(ir)), ir_vec_all(ir, roomy(ir, width, r)));
     f->inexact = NULL;
 }
 
@@ -361,16 +377,16 @@ static void fast_step(SnxIr* ir, unsigned width, unsigned rsqrt, V a, V b, Fast*
     r = fma3(ir, fa, as_float(ir, b, width), KF(ir, width, lanes, rsqrt ? 3.0 : 2.0));
     if (rsqrt) r = LLVMBuildFMul(B, r, KF(ir, width, lanes, 0.5), "");
     f->value = as_bits(ir, r, width);
-    f->ok = both(ir, both(ir, fpcr_clear(ir, FPCR_RMODE), ixc_set(ir)),
-                 ir_vec_all(ir, both(ir, both(ir, tame(ir, width, a), tame(ir, width, b)),
-                                     roomy(ir, width, f->value))));
+    f->ok = both(ir, both(ir, fpcr_clear(ir, FPCR_RMODE | FPCR_FZ), ixc_set(ir)),
+                 ir_vec_all(ir, roomy(ir, width, f->value)));
     f->inexact = NULL;
+    f->quick = NULL;
 }
 
 static void fast_sqrt(SnxIr* ir, unsigned width, V a, Fast* f) {
     V fa = as_float(ir, a, width), r = ir_intrinsic(ir, "llvm.sqrt", LLVMTypeOf(fa), &fa, 1);
     V rb = as_bits(ir, r, width), zero = is_zero(ir, width, a), ok, inexact = NULL;
-    ok = both(ir, tame(ir, width, a), either(ir, roomy(ir, width, rb), zero));
+    ok = either(ir, roomy(ir, width, rb), zero);
     if (width == 32)
         inexact = float_ne(ir, widen_f(ir, fa), LLVMBuildFMul(B, widen_f(ir, r), widen_f(ir, r), ""));
     else if (host_fma(ir)) {
@@ -378,9 +394,10 @@ static void fast_sqrt(SnxIr* ir, unsigned width, V a, Fast* f) {
         ok = both(ir, ok, either(ir, zero, magnitude_in(ir, 64, a, RESIDUAL_FLOOR, inf_bits(64))));
     }
     f->value = rb;
-    f->ok = both(ir, fpcr_clear(ir, FPCR_RMODE), ir_vec_all(ir, ok));
+    f->ok = both(ir, fpcr_clear(ir, FPCR_RMODE | FPCR_FZ), ir_vec_all(ir, ok));
     f->inexact = inexact ? ir_vec_any(ir, inexact) : NULL;
     if (!inexact) f->ok = both(ir, f->ok, ixc_set(ir));
+    f->quick = NULL;
 }
 
 /* FMAX, FMIN and the NM forms without a NaN or a flushed denormal: the larger or smaller operand, of equal ones
@@ -395,6 +412,15 @@ static void fast_minmax(SnxIr* ir, unsigned width, unsigned minimum, V n, V m, F
     f->ok = both(ir, both(ir, no_nan(ir, width, n), no_nan(ir, width, m)),
                  both(ir, unflushed(ir, width, n), unflushed(ir, width, m)));
     f->inexact = NULL;
+    f->quick = NULL;
+}
+
+/* without FPSR's flags (snx_ir_fpsr_flags): the host's lanes wherever none is a NaN (ir_fpu.c's relax) */
+static void relax(SnxIr* ir, unsigned width, Fast* f) {
+    if (snx_ir_fpsr_exact()) return;
+    f->ok = both(ir, fpcr_clear(ir, FPCR_RMODE | FPCR_FZ), no_nan(ir, width, f->value));
+    f->quick = NULL;
+    f->inexact = NULL;
 }
 
 /* ---- the operations, fast where they can be ---- */
@@ -406,14 +432,16 @@ static V binary(SnxIr* ir, unsigned op, unsigned width, V a, V b) {
         Fast f;
         Split s;
         fast_binary(ir, op, width, a, b, &f);
-        split_begin(ir, f.ok, f.value, f.inexact, &s);
+        relax(ir, width, &f);
+        split_begin(ir, f.quick, f.ok, f.value, f.inexact, &s);
         return split_end(ir, &s, map(ir, &o, a, b, NULL, width));
     }
     if (width != 16 && host_fma(ir) && (op == SNX_FP_RECPS || op == SNX_FP_RSQRTS)) {
         Fast f;
         Split s;
         fast_step(ir, width, op == SNX_FP_RSQRTS, a, b, &f);
-        split_begin(ir, f.ok, f.value, NULL, &s);
+        relax(ir, width, &f);
+        split_begin(ir, f.quick, f.ok, f.value, NULL, &s);
         return split_end(ir, &s, map(ir, &o, a, b, NULL, width));
     }
     return map(ir, &o, a, b, NULL, width);
@@ -425,7 +453,8 @@ static V fma_lanes(SnxIr* ir, unsigned width, V add, V n, V m) {
         Fast f;
         Split s;
         fast_fma(ir, width, add, n, m, &f);
-        split_begin(ir, f.ok, f.value, NULL, &s);
+        relax(ir, width, &f);
+        split_begin(ir, f.quick, f.ok, f.value, NULL, &s);
         return split_end(ir, &s, map(ir, &o, add, n, m, width));
     }
     return map(ir, &o, add, n, m, width);
@@ -439,7 +468,7 @@ static V minmax(SnxIr* ir, unsigned width, unsigned minimum, unsigned numeric, V
         Fast f;
         Split s;
         fast_minmax(ir, width, minimum, n, m, &f);
-        split_begin(ir, f.ok, f.value, NULL, &s);
+        split_begin(ir, f.quick, f.ok, f.value, NULL, &s);
         return split_end(ir, &s, map(ir, &o, n, m, NULL, width));
     }
     return map(ir, &o, n, m, NULL, width);
@@ -452,7 +481,8 @@ static V unary(SnxIr* ir, unsigned op, unsigned width, V a) {
         Fast f;
         Split s;
         fast_sqrt(ir, width, a, &f);
-        split_begin(ir, f.ok, f.value, f.inexact, &s);
+        relax(ir, width, &f);
+        split_begin(ir, f.quick, f.ok, f.value, f.inexact, &s);
         return split_end(ir, &s, map(ir, &o, a, NULL, NULL, width));
     }
     return map(ir, &o, a, NULL, NULL, width);
@@ -483,7 +513,7 @@ static V compare(SnxIr* ir, unsigned cmp, unsigned width, V a, V b, int abs) {
         ok = both(ir, ir_vec_all(ir, LLVMBuildFCmp(B, LLVMRealORD, fa, fb, "")),
                   both(ir, unflushed(ir, width, a), unflushed(ir, width, b)));
         fast = LLVMBuildSExt(B, LLVMBuildFCmp(B, predicates[cmp], fa, fb, ""), LLVMTypeOf(a), "");
-        split_begin(ir, ok, fast, NULL, &s);
+        split_begin(ir, NULL, ok, fast, NULL, &s);
         return split_end(ir, &s, compare_slow(ir, &o, cmp, a, b));
     }
     return compare_slow(ir, &o, cmp, a, b);
@@ -500,7 +530,7 @@ static V round_lanes(SnxIr* ir, unsigned width, unsigned rm, unsigned exact, V a
         static const char* const names[] = {"llvm.roundeven", "llvm.ceil", "llvm.floor", "llvm.trunc", "llvm.round"};
         V fa = as_float(ir, a, width), r = ir_intrinsic(ir, names[rm], LLVMTypeOf(fa), &fa, 1);
         Split s;
-        split_begin(ir, both(ir, no_nan(ir, width, a), unflushed(ir, width, a)), as_bits(ir, r, width), NULL, &s);
+        split_begin(ir, NULL, both(ir, no_nan(ir, width, a), unflushed(ir, width, a)), as_bits(ir, r, width), NULL, &s);
         return split_end(ir, &s, map(ir, &o, a, NULL, NULL, width));
     }
     return map(ir, &o, a, NULL, NULL, width);
@@ -531,7 +561,7 @@ static V from_int(SnxIr* ir, unsigned width, unsigned uns, unsigned fbits, V v) 
             f = LLVMBuildSIToFP(B, v, type, "");
         if (fbits) f = LLVMBuildFMul(B, f, KF(ir, width, lanes, 1.0 / (double)((SnxU64)1 << (fbits - 1)) / 2.0), "");
         ok = either(ir, ir_vec_all(ir, fits), both(ir, fpcr_clear(ir, FPCR_RMODE), ixc_set(ir)));
-        split_begin(ir, ok, as_bits(ir, f, width), NULL, &s);
+        split_begin(ir, NULL, ok, as_bits(ir, f, width), NULL, &s);
         return split_end(ir, &s, map(ir, &o, v, NULL, NULL, width));
     }
     return map(ir, &o, v, NULL, NULL, width);
@@ -565,7 +595,7 @@ static V to_int(SnxIr* ir, unsigned width, unsigned integer, unsigned uns, unsig
         fast = uns ? LLVMBuildFPToUI(B, rounded, type, "") : LLVMBuildFPToSI(B, rounded, type, "");
         if (rm == 3)
             rounded = uns ? LLVMBuildUIToFP(B, fast, LLVMTypeOf(f), "") : LLVMBuildSIToFP(B, fast, LLVMTypeOf(f), "");
-        split_begin(ir, ok, fast, ir_vec_any(ir, float_ne(ir, rounded, f)), &s);
+        split_begin(ir, NULL, ok, fast, ir_vec_any(ir, float_ne(ir, rounded, f)), &s);
         return split_end(ir, &s, map(ir, &o, a, NULL, NULL, integer));
     }
     return map(ir, &o, a, NULL, NULL, integer);
@@ -582,7 +612,7 @@ static V convert(SnxIr* ir, unsigned from, unsigned to, int odd, V a) {
     if (from == 32 && to == 64) {
         Split s;
         V wide = as_bits(ir, widen_f(ir, as_float(ir, a, 32)), 64);
-        split_begin(ir, both(ir, no_nan(ir, 32, a), unflushed(ir, 32, a)), wide, NULL, &s);
+        split_begin(ir, NULL, both(ir, no_nan(ir, 32, a), unflushed(ir, 32, a)), wide, NULL, &s);
         return split_end(ir, &s, map(ir, &o, a, NULL, NULL, to));
     }
     if (from == 64 && to == 32 && !odd) {
@@ -591,7 +621,7 @@ static V convert(SnxIr* ir, unsigned from, unsigned to, int odd, V a) {
         bits = as_bits(ir, narrowed, 32);
         ok = either(ir, roomy(ir, 32, bits), is_zero(ir, 64, a));
         ok = both(ir, fpcr_clear(ir, FPCR_RMODE), ir_vec_all(ir, both(ir, not1(ir, is_nan(ir, 64, a)), ok)));
-        split_begin(ir, ok, bits, ir_vec_any(ir, float_ne(ir, widen_f(ir, narrowed), fa)), &s);
+        split_begin(ir, NULL, ok, bits, ir_vec_any(ir, float_ne(ir, widen_f(ir, narrowed), fa)), &s);
         return split_end(ir, &s, map(ir, &o, a, NULL, NULL, to));
     }
     return map(ir, &o, a, NULL, NULL, to);

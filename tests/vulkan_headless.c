@@ -7,6 +7,10 @@
 #include "nx/gpu/maxwell/draw_state.h"
 #include "nx/gpu/renderer.h"
 #include "nx/gpu/vk/vk.h"
+#include "nx/gpu/maxwell/kepler_compute_regs.h"
+#include "nx/gpu/maxwell/engines_int.h"
+#include "nx/gpu/maxwell/maxwell_3d_regs.h"
+#include "nx/gpu/maxwell/gob.h"
 #include "nx/gpu/video/vic.h"
 #include "nx/memory/mem.h"
 #include "nx/memory/own.h"
@@ -1005,7 +1009,7 @@ static int check_blit(void) {
 }
 
 /* a block linear A8B8G8R8 target of w by h at gva (blocks 2^bh GOBs high) cleared to red or blue */
-static void rt_clear(GpuChannel* ch, u64 gva, u32 w, u32 h, u32 bh, int blue) {
+static void rt_clear_format(GpuChannel* ch, u64 gva, u32 w, u32 h, u32 bh, int blue, u32 format) {
     u32* r = ch->r3d;
     const float color[4] = {blue ? 0.0f : 1.0f, 0, blue ? 1.0f : 0.0f, 1};
     r[0x487] = 1;
@@ -1013,13 +1017,16 @@ static void rt_clear(GpuChannel* ch, u64 gva, u32 w, u32 h, u32 bh, int blue) {
     r[0x201] = (u32)gva;
     r[0x202] = w;
     r[0x203] = h;
-    r[0x204] = 0xD5;
+    r[0x204] = format;
     r[0x205] = bh << 4;
     r[0x206] = 1;
     r[0x207] = 0;
     memcpy(&r[0x360], color, sizeof color);
     engine_clear(ch, 15 << 2);
     vk_render_end();
+}
+static void rt_clear(GpuChannel* ch, u64 gva, u32 w, u32 h, u32 bh, int blue) {
+    rt_clear_format(ch, gva, w, h, bh, blue, 0xD5);
 }
 /* n bytes at p all blue pixels */
 static int all_blue(const u8* p, u32 n) {
@@ -1039,11 +1046,17 @@ static int all_bytes(const u8* p, u32 n, u8 v) {
    128 to 159 of every row). The newer one's pixels are on top in a DMA copy of it, and in guest memory once both are
    written back, together or the newer one alone. A target reaching past a copy's range is one whose memory a smaller
    surface took over: the copy takes what the program wrote there since */
+static void rt_cpu_fence(GpuChannel* ch, u32 id) {
+    maxwell3d_method(ch, MAXWELL3D_SYNC_INFO, (1u << 20) | (1u << 16) | id, 1);
+    g_renderer->release_retire(id);
+}
 static int check_rt_overlap(void) {
     GpuChannel* ch = calloc(1, sizeof *ch);
     GpuDmaOp o;
     u64 readbacks;
     CHECK(ch);
+    u32 fence = syncpt_alloc();
+    CHECK(fence < SYNCPT_N);
     memset(&o, 0, sizeof o);
     o.multi = 1;
     o.width = o.line_in = o.line_out = 160 * 4;
@@ -1064,11 +1077,43 @@ static int check_rt_overlap(void) {
     CHECK(all_blue(GP(DMA_A), 0x14000));
     /* a 160 by 256 target, the program's own bytes over its memory after it, and a copy of the 160 by 128 surface */
     rt_clear(ch, DMA_GA, 160, 256, 4, 1);
+    rt_cpu_fence(ch, fence);
     memset(GP(DMA_A), 0x11, 0x28000);
     readbacks = g_vk_rt_readbacks;
     CHECK(g_renderer->dma_copy(&o));
-    CHECK(g_vk_rt_readbacks == readbacks + 1);
     CHECK(all_bytes(GP(DMA_A + 0x40000), 160 * 128 * 4, 0x11));
+    /* A correct copy is not enough: flushing the larger old image must not
+       restore its pixels over the memory the CPU has already reused. */
+    CHECK(all_bytes(GP(DMA_A), 0x28000, 0x11));
+    CHECK(g_vk_rt_readbacks == readbacks);
+    /* The GPU's completed image and a later CPU update share one allocation.
+       Keep the update across a page boundary, while retaining the GPU's
+       untouched pixels. Exercise both direct writeback and a wholly contained
+       buffer copy, where pending image pixels are overlaid on the GPU. */
+    for (u32 overlay = 0; overlay < 2; overlay++) {
+        const u32 changed = 0xffc, count = 24, size = 0x28000;
+        memset(GP(DMA_A), 0x29, size);
+        g_renderer->mem_may_have_changed();
+        rt_clear(ch, DMA_GA, 160, 256, 4, 1);
+        rt_cpu_fence(ch, fence);
+        memset(GP(DMA_A + changed), 0x73, count);
+        g_renderer->mem_may_have_changed();
+        if (overlay) {
+            o.src = pitch_side(DMA_GA, size);
+            o.dst = pitch_side(DMA_GA + 0x40000, size);
+            o.width = o.line_in = o.line_out = size;
+            o.lines = 1;
+            CHECK(g_renderer->dma_copy(&o));
+            const u8* copied = GP(DMA_A + 0x40000);
+            CHECK(all_blue(copied, changed));
+            CHECK(all_bytes(copied + changed, count, 0x73));
+            CHECK(all_blue(copied + changed + count, size - changed - count));
+        }
+        g_renderer->rt_flush(DMA_GA);
+        CHECK(all_blue(GP(DMA_A), changed));
+        CHECK(all_bytes(GP(DMA_A + changed), count, 0x73));
+        CHECK(all_blue(GP(DMA_A + changed + count), size - changed - count));
+    }
     /* A render target and a newer buffer can use different GPU aliases of the
        same memory. A later partial read of the image must not restore its old
        pixels over the buffer written through the other alias. */
@@ -1097,11 +1142,75 @@ static int check_rt_overlap(void) {
     CHECK(g_renderer->dma_copy(&o));
     CHECK(all_bytes(GP(DMA_B), 0x28000, 0x37));
     CHECK(all_bytes(GP(DMA_A + 0x40000), 512, 0x37));
+    /* Physical aliases publish in draw order without losing untouched bytes. */
+    gmmu_map(alias, DMA_A, DMA_SPAN);
+    for (u32 reverse = 0; reverse < 2; reverse++) {
+        if (reverse) rt_clear(ch, alias + 0x10000, 64, 64, 3, 0);
+        rt_clear(ch, DMA_GA, 160, 256, 4, 1);
+        if (!reverse) rt_clear(ch, alias + 0x10000, 64, 64, 3, 0);
+        rt_cpu_fence(ch, fence);
+        if (own_traps()) CHECK(own_lookup(DMA_A, 0x28000, NULL, 0) > 0);
+        const u8* pixels = GP(DMA_A);
+        CHECK(all_blue(pixels, 0x10000));
+        static const u8 red[4] = {255, 0, 0, 255};
+        if (reverse)
+            CHECK(all_blue(pixels + 0x10000, 0x4000));
+        else
+            for (u32 at = 0x10000; at < 0x14000; at += 4) CHECK(!memcmp(pixels + at, red, 4));
+        CHECK(all_blue(pixels + 0x14000, 0x14000));
+    }
+    /* A tiled image's two GPU pages need not be adjacent in guest RAM. */
+    const u64 sparse = 0x1a000000, first_page = DMA_A + 0xa0000, second_page = DMA_A + 0xc0000;
+    gmmu_map(sparse, first_page, 0x1000);
+    gmmu_map(sparse + 0x1000, second_page, 0x1000);
+    memset(GP(first_page), 0x49, 0x21000);
+    rt_clear(ch, sparse, 64, 32, 2, 1);
+    rt_cpu_fence(ch, fence);
+    if (own_traps()) {
+        CHECK(own_lookup(first_page, 0x1000, NULL, 0) > 0);
+        CHECK(own_lookup(second_page, 0x1000, NULL, 0) > 0);
+    }
+    memset(GP(second_page + 16), 0x57, 16);
+    g_renderer->rt_flush(sparse);
+    CHECK(all_blue(GP(first_page), 0x1000));
+    CHECK(all_blue(GP(second_page), 16));
+    CHECK(all_bytes(GP(second_page + 16), 16, 0x57));
+    CHECK(all_blue(GP(second_page + 32), 0x1000 - 32));
+    CHECK(all_bytes(GP(first_page + 0x1000), 0x1f000, 0x49));
+    /* A draw's write-tracking baseline and freshness query must not acquire
+       CPU-readable pixels. Neither operation reads the image's contents. */
+    const u64 tracked = DMA_GA + 0xe0000, tracked_cpu = DMA_A + 0xe0000;
+    rt_clear(ch, tracked, 64, 64, 3, 1);
+    rt_cpu_fence(ch, fence);
+    vk_lock();
+    Surf* target = vk_rt_find(tracked);
+    CHECK(target);
+    if (own_traps()) CHECK(own_lookup(tracked_cpu, 0x4000, NULL, 0) > 0);
+    u64 landings = own_landings();
+    vk_rt_drawn_full(target);
+    (void)vk_rt_drawn_fresh(target);
+    CHECK(own_landings() == landings);
+    if (own_traps()) CHECK(own_lookup(tracked_cpu, 0x4000, NULL, 0) > 0);
+    vk_unlock();
+    memset(GP(tracked_cpu + 16), 0x39, 16);
+    g_renderer->mem_may_have_changed();
+    vk_lock();
+    /* without write tracking the first query takes the target's pixels unhashed (vk_rt_drawn_fresh), so only a host
+       that tracks writes sees the CPU's */
+    if (vk_written_since(GP(tracked_cpu), 0x4000, 0) >= 0) CHECK(!vk_rt_drawn_fresh(target));
+    vk_unlock();
+    syncpt_free(fence);
+    puts("Render target CPU fences: full reuse, partial edits, aliases and sparse mappings checked");
     free(ch);
     return 0;
 }
 
 #include "vulkan_shader_invalidate.inc"
+#include "vulkan_storage_formats.inc"
+#include "vulkan_storage_atomics.inc"
+#include "vulkan_surface_loads.inc"
+#include "vulkan_owned_readback.inc"
+#include "vulkan_mesh_inputs.inc"
 
 int main(int argc, char** argv) {
     const u32 w = 32, h = 16;
@@ -1130,8 +1239,13 @@ int main(int argc, char** argv) {
     }
     CHECK(!check_hash_copy());
     CHECK(!check_staging_overflow());
+    CHECK(!check_owned_readback());
     CHECK(!check_buffer_texture_rows());
+    CHECK(!check_storage_image_formats());
+    CHECK(!check_volume_surface_atomics());
+    CHECK(!check_layered_surface_loads());
     CHECK(!check_viewport_orientation());
+    CHECK(!check_mesh_inputs());
     CHECK(!check_packed_depth());
     CHECK(!check_depth_array());
     CHECK(!check_srgb_write());

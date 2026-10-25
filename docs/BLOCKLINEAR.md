@@ -39,6 +39,11 @@ the layout's first byte anywhere in the bound range (it wraps modulo 2^32, as th
 start inside a GOB: the row relative to the first moved wraps past `rows` for the rows above it, so one unsigned
 compare drops those and the ones past the end.
 
+A swizzle changes only valid row bytes. When the row width is not a multiple of 16, the final run merges its valid
+bytes with the destination using four word masks computed by the host. Full runs still perform one vector load and
+store. This preserves small mip levels' padding when their output is published as a GPU-owned buffer, which does
+not pass through the CPU's `bl_land` padding check. No two invocations own one run, so the merge needs no atomics.
+
 `gpu/texture/texconv.comp` (body `texconv.glsl`, host `vk/texconv.c`) converts linear rows: 2 byte RGBA texels, RGB32F
 (A becomes 1.0), packed depth and stencil (into a depth aspect and a stencil aspect, the float for
 `D32_SFLOAT_S8_UINT` when D24S8 isn't supported), ETC2 and EAC blocks (`tests/support/etc2.c` is the reference), BC1
@@ -90,7 +95,9 @@ conversion. Otherwise each row is copied into rows that do.
 
 - `blocklinear_glsl` and `texconv_glsl` run the bodies on the CPU (`tests/glsl/glsl.hpp`). The first checks moves
   both ways against `bl_offset` byte by byte, with random shapes, blocks, biases and moves starting inside a GOB, and
-  that nothing outside the moved runs is written. The second checks every 2 byte texel and vi pixel, every 24 bit
+  that nothing outside the valid swizzled row bytes is written. Every partial-run width is also checked explicitly.
+  Disabling the partial-run mask fails both this test and `vulkan_headless`'s selected-mip writeback test.
+  The second checks every 2 byte texel and vi pixel, every 24 bit
   depth, RGB32F, depth and stencil rows, and random ETC2, EAC and BCn blocks of every kind against `etc2.c` and
   `bcn.c` (`tests/support/`). `bcn_decode` checks `bcn.c` itself on blocks built by hand.
 - `tex_upload_rows` runs `texture.c` with a CPU model of the dispatches, which checks the barriers' order, and checks

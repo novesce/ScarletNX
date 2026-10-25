@@ -538,6 +538,15 @@ void pf_unseal(PFile* pf) {
     }
     pm_unlock(&pf->lock);
 }
+void pf_close(PFile* pf) {
+    pm_lock(&pf->lock);
+    if (pf->f) {
+        fclose(pf->f);
+        pf->f = NULL;
+    }
+    plat_file_unmap(&pf->view);
+    pm_unlock(&pf->lock);
+}
 void pf_seal(PFile* pf) {
     pm_lock(&pf->lock);
     if (pf->f) {

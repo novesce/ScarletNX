@@ -9,8 +9,8 @@
 
 # The ARM and Thumb recompiler of src/common/cpu/arm, the same one the other system types use.
 if(NOT TARGET snx_arm_llvm)
-    include("${CMAKE_SOURCE_DIR}/cmake/llvm.cmake")
-    add_subdirectory("${CMAKE_SOURCE_DIR}/src/common/cpu/arm" agb-arm-backend)
+    include("${PROJECT_SOURCE_DIR}/cmake/llvm.cmake")
+    add_subdirectory("${PROJECT_SOURCE_DIR}/src/common/cpu/arm" agb-arm-backend)
 endif()
 
 add_library(scarletnx-agb STATIC board/board.c board/memory.c board/dma.c board/timers.c board/save.c

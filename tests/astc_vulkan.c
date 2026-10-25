@@ -376,7 +376,7 @@ static void both_modes(u32 bw, u32 bh) {
 
 /* block linear bytes deswizzled and swizzled on the GPU (vk/blocklinear.c), compared with ref_bl: a surface of
    row_bytes x h x d in blocks of 2^bh x 2^bd GOBs, moved in bands of band rows (not GOB aligned, as ASTC's strips
-   aren't) of all slices, or a slice at a time. Swizzling leaves the bytes outside the moved 16 byte runs as they were,
+   aren't) of all slices, or a slice at a time. Swizzling leaves all bytes outside the valid row width as they were,
    and bl_land then lands exactly the surface's bytes over other guest memory */
 static void bl_case(u32 row_bytes, u32 h, u32 d, u32 bh, u32 bd, u32 band, int by_slice) {
     u32 pitch = (row_bytes + 15) & ~15u;
@@ -449,10 +449,10 @@ static void bl_case(u32 row_bytes, u32 h, u32 d, u32 bh, u32 bd, u32 band, int b
     u8* moved = calloc(hi, 1);
     for (u32 z = 0; z < d; z++)
         for (u32 y = 0; y < h; y++)
-            for (u32 x = 0; x < pitch; x++) {
+            for (u32 x = 0; x < row_bytes; x++) {
                 u64 o = ref_bl(x, y, z, row_bytes, h, bh, bd);
                 moved[o] = 1;
-                if (x < row_bytes && out[o] != lin[((u64)z * h + y) * pitch + x])
+                if (out[o] != lin[((u64)z * h + y) * pitch + x])
                     fatal("swizzle %ux%ux%u bh %u bd %u band %u: (%u, %u, %u) is %u, not %u\n", row_bytes, h, d, bh,
                           bd, band, x, y, z, out[o], lin[((u64)z * h + y) * pitch + x]);
             }
@@ -735,6 +735,7 @@ int main(int argc, char** argv) {
     }
     /* block linear moves: whole GOBs, rows not a multiple of 16 or 64 bytes, partial GOB rows and blocks, bands that
        start inside a GOB, volumes whose depth isn't a multiple of their blocks' */
+    for (u32 width = 1; width < 16; width++) bl_case(width, 3, 2, 0, 0, 2, 1);
     bl_case(64, 8, 1, 0, 0, 8, 0);
     bl_case(100, 37, 1, 2, 0, 37, 0);
     bl_case(100, 37, 1, 2, 0, 5, 0);

@@ -58,6 +58,9 @@ def main():
             storage_write,
             storage_atomic,
             *storage_arrays,
+            *(Path(directory) / f'storage_signed_{i}.spv' for i in range(9)),
+            *(Path(directory) / f'storage_volume_atomic_{i}.spv' for i in range(4)),
+            *(Path(directory) / f'storage_layer_load_{i}.spv' for i in range(8)),
             nro_raw,
             nro_ms,
             nro_ms_array,
@@ -86,6 +89,12 @@ def main():
         for fixture in storage_arrays:
             if ' 2D 0 1 0 2 ' not in disassemble(args.disassembler, fixture):
                 raise AssertionError('a 2D array surface must be an arrayed storage image')
+        for i in range(6):
+            signed_code = disassemble(args.disassembler, Path(directory) / f'storage_signed_{i}.spv')
+            if not re.search(r'OpTypeImage %int (2D|3D) 0 [01] 0 2 Unknown', signed_code):
+                raise AssertionError('a signed image store must declare a signed integer image')
+            if 'OpImageWrite' not in signed_code or 'OpBitcast %int' not in signed_code:
+                raise AssertionError('a signed image store must retain the register bits as signed integers')
         raw_code = disassemble(args.disassembler, nro_raw)
         if 'OpTypeImage %uint 2D 0 0 0 1 Unknown' not in raw_code or 'OpImageFetch %v4uint' not in raw_code:
             raise AssertionError('raw surface load must fetch an unsigned texel')

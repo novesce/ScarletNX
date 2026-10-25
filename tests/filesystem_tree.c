@@ -485,16 +485,17 @@ static void test_graft(const char* scratch) {
 }
 
 /* fs_tree_share maps what its limits let it, in bytes and in files; the rest is left to be read on demand, counted
-   apart from what failed */
+   apart from what failed. A lazy share maps nothing but makes the files readonly, and fs_tree_map maps each when
+   asked, within the same limits */
 static void test_share_limits(const char* scratch) {
     static const char* const files[][2] = {
         {"a.bin", "12345"}, {"b.bin", "12345"}, {"big.bin", "12345678901234567890"}, {"sub/d.bin", "12345"}};
-    const FsShare limits[] = {{.bytes = 12}, {.files = 2}, {0}};
+    const FsShare limits[] = {{.bytes = 12}, {.files = 2}, {0}, {.files = 2, .lazy = 1}};
     for (size_t k = 0; k < sizeof limits / sizeof *limits; ++k) {
         char base[FS_TREE_PATH_MAX], path[FS_TREE_PATH_MAX];
         FsShare share = limits[k];
         FsTree other;
-        FsNode *romfs = NULL, *big = NULL;
+        FsNode *romfs = NULL, *big = NULL, *a = NULL, *b = NULL;
         CHECK(snprintf(base, sizeof base, "%s/share-%zu", scratch, k) < (int)sizeof base && !plat_mkdir(base));
         CHECK(snprintf(path, sizeof path, "%s/romfs", base) < (int)sizeof path && !plat_mkdir(path));
         CHECK(snprintf(path, sizeof path, "%s/romfs/sub", base) < (int)sizeof path && !plat_mkdir(path));
@@ -510,14 +511,23 @@ static void test_share_limits(const char* scratch) {
         pm_lock(&other.lock);
         OK(fs_tree_lookup(&other, NULL, "romfs", &romfs));
         OK(fs_tree_lookup(&other, NULL, "romfs/big.bin", &big));
+        OK(fs_tree_lookup(&other, NULL, "romfs/a.bin", &a));
+        OK(fs_tree_lookup(&other, NULL, "romfs/b.bin", &b));
         sharing = 1;
         OK(fs_tree_share(&other, romfs, &share));
-        CHECK(!share.failed && share.shared + share.skipped == 4 && big->readonly);
+        if (share.lazy) { /* none mapped until asked, then two, the third past the limit, each once */
+            CHECK(!share.shared && !share.skipped && big->readonly && a->readonly && !fs_tree_mapped(a));
+            CHECK(!fs_tree_map(&other, a, &share) && fs_tree_mapped(a) && !fs_tree_map(&other, a, &share));
+            CHECK(!fs_tree_map(&other, b, &share) && fs_tree_map(&other, big, &share) == -1);
+            CHECK(share.shared == 2 && share.skipped == 1 && !fs_tree_mapped(big));
+            CHECK(fs_tree_map(&other, romfs, &share) == -1); /* a folder isn't mapped */
+        } else
+            CHECK(!share.failed && share.shared + share.skipped == 4 && big->readonly);
         if (k == 0) /* 12 bytes: two files of five, the twenty past it */
             CHECK(share.shared == 2 && share.mapped_bytes == 10 && big->fd < 0);
         else if (k == 1)
             CHECK(share.shared == 2 && share.skipped == 2);
-        else
+        else if (k == 2)
             CHECK(share.shared == 4 && share.mapped_bytes == 35 && big->fd >= 1000);
         fs_tree_destroy(&other);
         sharing = 0;

@@ -36,7 +36,7 @@ int snx_state_peek(const char* path, SnxStateHeader* h, uint8_t** thumb, char* w
 /* whether a state can be loaded into the game title whose program is stamped stamp (its .abi file, "" for none) by a
    runtime of this SNX_ABI: 0, or -1 with the reason */
 int snx_state_fits(const SnxStateHeader* h, uint64_t title, const char* stamp, char* why, size_t whysize);
-/* a program's stamp: its .abi file beside it (<program>.abi), the line it holds, "" without one */
+/* a program's stamp: its .abi file beside it (<program>.abi), what it holds before its made line, "" without one */
 void snx_state_stamp(const char* program, char* out, size_t size);
 /* a state file's name, program.slot.snxstate, as its program and slot: 1, or 0 for a name of no state */
 int snx_state_name(const char* name, char* program, size_t psize, char* slot, size_t ssize);

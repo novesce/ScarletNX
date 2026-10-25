@@ -81,7 +81,6 @@ GuiAppearanceDo gui_appearance_key(int* row, GuiKey key, int* step) {
         case GUI_DOWN: *row = (*row + 1) % GUI_APPEARANCE_ROWS; return GUI_APPEARANCE_STAY;
         case GUI_LEFT:
         case GUI_RIGHT:
-            if (*row == GUI_APPEARANCE_TEXT) return GUI_APPEARANCE_SIZES;
             if (*row == GUI_APPEARANCE_NEXT) return GUI_APPEARANCE_STAY;
             *step = key == GUI_LEFT ? -1 : 1;
             return GUI_APPEARANCE_CHANGE;

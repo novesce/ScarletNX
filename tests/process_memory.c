@@ -32,11 +32,14 @@ int main(void) {
            (unsigned long long)(before >> 20), (unsigned long long)(after >> 20), size >> 20,
            (unsigned long long)(available >> 20));
     free(block);
-    /* 20 ms of the processor's time, spent in a loop: a loaded machine takes longer, ten seconds at most */
+    /* 20 ms of the processor's time, spent in a loop: a loaded machine takes longer, ten seconds at most. Windows counts
+       it in the clock's ticks (15.6 ms): a process that has spent less than one reads 0, so the loop starts from the
+       first tick */
     {
-        SnxU64 start = snx_process_cpu_ns(), now = start;
         double give_up = snx_seconds() + 10;
         volatile unsigned spin = 0;
+        SnxU64 start, now;
+        while (!(start = snx_process_cpu_ns()) && snx_seconds() < give_up) ++spin;
         while ((now = snx_process_cpu_ns()) < start + 20000000u && snx_seconds() < give_up) ++spin;
         assert(start > 0 && now >= start + 20000000u);
         printf("process time: %llu ms, then %llu ms\n", (unsigned long long)(start / 1000000),

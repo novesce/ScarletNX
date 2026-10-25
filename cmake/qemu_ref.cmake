@@ -23,7 +23,7 @@ else()
         set(SNX_QEMU_REF_MISSING "no ld.lld on PATH (lld)")
     else()
         # Clang has to target AArch64 and link with LLD: a program with the runner's flags
-        set(probe "${CMAKE_BINARY_DIR}/qemu_ref_probe")
+        set(probe "${PROJECT_BINARY_DIR}/qemu_ref_probe")
         file(MAKE_DIRECTORY "${probe}")
         file(WRITE "${probe}/probe.c" "void _start(void);\nvoid _start(void) { for (;;) { } }\n")
         execute_process(COMMAND "${CMAKE_C_COMPILER}" ${snx_qemu_ref_flags} "${probe}/probe.c" -o "${probe}/probe"
@@ -47,7 +47,7 @@ function(snx_qemu_ref_runner)
         return()
     endif()
     set(dir "${PROJECT_SOURCE_DIR}/tests/qemu_ref")
-    set(runner "${CMAKE_BINARY_DIR}/qemu_ref_runner")
+    set(runner "${PROJECT_BINARY_DIR}/qemu_ref_runner")
     add_custom_command(OUTPUT "${runner}"
         COMMAND "${CMAKE_C_COMPILER}" ${snx_qemu_ref_flags} "${dir}/runner_start.S" "${dir}/runner.c" -o "${runner}"
         DEPENDS "${dir}/runner_start.S" "${dir}/runner.c" "${dir}/qemu_ref_proto.h"

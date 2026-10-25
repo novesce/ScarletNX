@@ -10,6 +10,7 @@
 #if defined(SNX_TRACY)
 int snx_tracy_enter(void) { return 0; }
 void snx_tracy_leave(void) {}
+void snx_tracy_thread_name(const char* name) { (void)name; }
 TracyCZoneCtx snx_tracy_zone_begin(const struct ___tracy_source_location_data* srcloc) {
     TracyCZoneCtx ctx = {0};
     (void)srcloc;

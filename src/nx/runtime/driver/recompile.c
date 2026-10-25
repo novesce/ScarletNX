@@ -361,7 +361,7 @@ int snx_recompile_game(int argc, char** argv, const SnxPaths* paths) {
     char *title = NULL, *game = NULL, *out = NULL, *folder = NULL, *base = NULL, *data = NULL, *code = NULL;
     char *ini = NULL, *ini_text = NULL, *run = NULL, *exe = NULL, *mods = NULL, *mods_off = NULL, *mods_stamp = NULL;
     char **mod_names = NULL, **mod_files = NULL;
-    size_t mod_count = 0;
+    size_t mod_count = 0, found = 0;
     char error[1024], option[64], why[256];
     const char* equal;
     size_t option_size;
@@ -650,6 +650,8 @@ int snx_recompile_game(int argc, char** argv, const SnxPaths* paths) {
         llvm.triple = ios ? SNX_IOS_TRIPLE : NULL;
         llvm.opt = compile.opt[0];
         snx_ir_slp_vectorizer(g_settings.slp_vectorizer);
+        snx_ir_fpsr_flags(g_settings.fpsr_flags);
+        snx_ir_volatile_memory(g_settings.volatile_load_stores);
         llvm.tuning = snx_llvm_tuning(llvm.opt, error, sizeof error);
         if (!llvm.tuning) {
             snx_error("%s", error);
@@ -658,6 +660,7 @@ int snx_recompile_game(int argc, char** argv, const SnxPaths* paths) {
         llvm.jobs = compile.jobs;
         llvm.quiet = compile.quiet;
         llvm.keep_ir = kept;
+        llvm.found = &found;
         {
             /* the user's cache folder, or a portable copy's: every game's recompile shares it */
             char* folder = snx_menu_dir(paths->repo, SNX_USER_CACHE);
@@ -703,8 +706,18 @@ int snx_recompile_game(int argc, char** argv, const SnxPaths* paths) {
     exe = snx_format("%s%s", base, compile.target_win ? ".exe" : "");
     if (snx_deploy_runtime(run, exe)) goto done;
     {
-        char *stamp = snx_format("%s.abi", base), *version = snx_game_stamp(mods_stamp);
-        i = snx_write_file(stamp, version, strlen(version));
+        /* what the launcher says the game was made with: the AArch64 analysis's instructions of the modules' code (a
+           32-bit game's blocks are counted otherwise: 0, unknown) */
+        SnxGameMade made = {compile.opt[0], !gen.interp_only, found, 0};
+        char *stamp = snx_format("%s.abi", base), *version = snx_game_stamp(mods_stamp), *line, *text;
+        size_t m;
+        for (m = 0; program.npdm.is64 && m < program.module_count; ++m) made.code += program.modules[m].text_size / 4;
+        if (made.found > made.code) made.found = made.code;
+        line = snx_game_made_line(&made);
+        text = snx_format("%s%s", version, line);
+        i = snx_write_file(stamp, text, strlen(text));
+        free(text);
+        free(line);
         free(stamp);
         free(version);
         if (i) {

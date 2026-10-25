@@ -160,8 +160,10 @@ enum {
 };
 #define MAXWELL3D_SHADOW_RAM_CONTROL_MASK 3u
 
-/* SyncInfo (Eden's Regs::SyncInfo): sync_point bits 0-15, condition bit 20 (RopWritesDone when set) */
+/* SyncInfo: sync_point bits 0-15, CLEAN_L2 bit 16, condition bit 20 (RopWritesDone when set).
+   CLEAN_L2 is also documented by NVIDIA's public Maxwell B class header. */
 static inline u32 sync_info_sync_point(u32 v) { return v & 0xFFFFu; }
+static inline int sync_info_clean_l2(u32 v) { return (v >> 16) & 1u; }
 static inline int sync_info_rop_writes_done(u32 v) { return (v >> 20) & 1u; }
 
 /* InvalidateShaderCache(NoWFI)'s instruction bit (bit 0) */

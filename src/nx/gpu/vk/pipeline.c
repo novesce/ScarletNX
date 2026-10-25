@@ -451,7 +451,7 @@ static u32* sh_spirv(VkSh* s, const u8* code, u64 h, int stage, const u32 mask[2
         if (image_slots > g_vk.props.limits.maxDescriptorSetStorageImages)
             image_slots = g_vk.props.limits.maxDescriptorSetStorageImages;
         int needs_unformatted = 0;
-        for (int i = 0; i < s->si.nimg; i++) needs_unformatted |= s->si.img[i].kind == 0;
+        for (int i = 0; i < s->si.nimg; i++) needs_unformatted |= s->si.img[i].kind != 1;
         /* a vertex program's stores need the device's vertexPipelineStoresAndAtomics */
         if ((stage != ST_FS && (stage != ST_VS || !g_vk.feat.vertexPipelineStoresAndAtomics)) ||
             (u32)s->si.nimg > image_slots || (needs_unformatted && !g_vk.feat.shaderStorageImageWriteWithoutFormat)) {
@@ -713,6 +713,10 @@ static struct {
        and the draws read the index once ship_ready says it no longer changes */
     PFile ship;
     char ship_path[1400];
+    /* the files the pass found nothing in (SHIP_NONE), kept across builds and drivers in a file of their own (scan,
+       <game>.vkscan) under the walk's version, which an update of either leaves: the ship file's are started over */
+    PFile scan;
+    char scan_path[1400];
     ShipIdx* idx; /* its shaders by hash, open addressing (icap a power of two) */
     u32 icap, nidx;
     u64* scans; /* the PF_SCAN records, scan_key's, open addressing (scap a power of two) */
@@ -877,8 +881,15 @@ static VkPipeline pipe_create(const Pipe* e) {
     VkPipelineCreationFeedback made = {0};
     VkPipelineCreationFeedbackCreateInfo fi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO,
                                                .pPipelineCreationFeedback = &made};
+    /* Select strict vertex bounds without enabling robustness2 globally for
+       storage/uniform buffers or compute pipelines. Per-pipeline selection
+       requires the feature to be supported, not enabled device-wide. */
+    VkPipelineRobustnessCreateInfoEXT robustness = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO_EXT,
+        .pNext = &fi,
+        .vertexInputs = VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2_EXT};
     VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-                                        .pNext = &fi,
+                                        .pNext = g_vk.has_vertex_robustness2 ? (void*)&robustness : (void*)&fi,
                                         .colorAttachmentCount = k->ncolor,
                                         .pColorAttachmentFormats = cf,
                                         .depthAttachmentFormat = (VkFormat)k->depth,
@@ -1494,9 +1505,9 @@ static void pf_key(char* out, size_t n, size_t* guest) {
                      (unsigned)sizeof(PfSource), (unsigned)sizeof(PfPipe), (unsigned)sizeof(ShXfb));
     *guest = g > 0 && (size_t)g < n ? (size_t)g : 0;
     if (*guest)
-        snprintf(out + *guest, n - *guest, " %s%s driver=%u api=%u uuid=%s ftz=%d sizes=%u,%u", snx_build_info(), exe,
+        snprintf(out + *guest, n - *guest, " %s%s driver=%u api=%u uuid=%s ftz=%d sizes=%u,%u vertex_bounds=%d", snx_build_info(), exe,
                  d->driverVersion, d->apiVersion, uuid, g_vk_ftz, (unsigned)sizeof(ShaderInfo),
-                 (unsigned)sizeof(PfShader));
+                 (unsigned)sizeof(PfShader), g_vk.has_vertex_robustness2);
 }
 
 /* ---- the shaders of the programs the game ships (gpu/shipped_pass.c finds them), translated before a draw asks */
@@ -1608,6 +1619,15 @@ static void pf_ship_rec(void* ctx, u32 type, const u8* p, u32 len, u64 at) {
         scan_add(w[0], w[1]);
     } else if (type == PF_SHADER && ship_record(p, len, &r) && ship_key_only_clip(r.mask))
         idx_add(r.hash, (int)r.stage, r.mask[6], r.clen, r.qh, r.clen_a, r.qh_a, at);
+}
+/* on the reading thread: a record of the scan file, into the scans' set */
+static void pf_scan_rec(void* ctx, u32 type, const u8* p, u32 len, u64 at) {
+    u64 w[2];
+    (void)ctx;
+    (void)at;
+    if (type != PF_SCAN || len != sizeof w) return;
+    memcpy(w, p, sizeof w);
+    if (w[0] == SHIP_NONE) scan_add(w[0], w[1]);
 }
 /* the shipped file's record that starts at at, into r, its check and its SPIR-V: NULL when it isn't one */
 static const u32* ship_payload(u64 at, PfShader* r, u64* check) {
@@ -1751,7 +1771,7 @@ static int ship_scanned(void* ctx, u32 what, u64 id) {
 }
 static void ship_mark(void* ctx, u32 what, u64 id) {
     (void)ctx;
-    pf_scan(&g_pf.ship, what, id);
+    pf_scan(what == SHIP_NONE ? &g_pf.scan : &g_pf.ship, what, id);
     scan_add(what, id);
 }
 /* the shipped file takes no more (a write failed, or it is full): the pass's translations would be thrown away. The
@@ -1778,9 +1798,14 @@ static void pf_ship_pass(void) {
     if (g_pf.ship.f && g_pf.ship.size + PF_REC + sizeof(PfShader) + 32 > (g_pf.ship.max ? g_pf.ship.max : PF_MAX))
         LOG("vulkan: %s is full, so the game's own shaders aren't looked for\n", g_pf.ship_path);
     else if (g_pf.ship.f) {
+        char key[64];
+        snprintf(key, sizeof key, "walk=%s", ship_walk_version());
+        pf_open_mapped(&g_pf.scan, g_pf.scan_path, key, pf_scan_rec, NULL);
+        pf_unseal(&g_pf.scan);
         __atomic_store_n(&g_pf.scanning, 1, __ATOMIC_RELAXED);
         int rc = ship_walk(&sink, &g_pf.progress, g_settings.prepare_shaders == 2);
         __atomic_store_n(&g_pf.scanning, 0, __ATOMIC_RELAXED);
+        pf_close(&g_pf.scan);
         LOG("vulkan: the game's own shaders: %u translated new, %u in %s, in %llu ms%s\n",
             __atomic_load_n(&g_pf.ship_new, __ATOMIC_RELAXED), g_pf.nidx, g_pf.ship_path,
             (unsigned long long)((plat_ns() - t0) / 1000000),
@@ -1853,6 +1878,7 @@ static void pf_load_thread(void* arg) {
 static void pf_start_load(void) {
     pm_init(&g_pf.file.lock);
     pm_init(&g_pf.ship.lock);
+    pm_init(&g_pf.scan.lock);
     pm_init(&g_pf.note_lock);
     pm_init(&g_pf.lock);
     pc_init(&g_pf.done);
@@ -1865,8 +1891,10 @@ static void pf_start_load(void) {
     null_fs(); /* made here, before the reading thread uses it */
     snprintf(g_pf.path, sizeof g_pf.path, "%s/%s.vkshaders", g_cache_dir, g_exename);
     snprintf(g_pf.ship_path, sizeof g_pf.ship_path, "%s/%s.vkshipped", g_cache_dir, g_exename);
+    snprintf(g_pf.scan_path, sizeof g_pf.scan_path, "%s/%s.vkscan", g_cache_dir, g_exename);
     snx_path_native(g_pf.path);
     snx_path_native(g_pf.ship_path);
+    snx_path_native(g_pf.scan_path);
     if (g_settings.prepare_shaders) ship_snapshot(); /* before the game's first thread writes its data */
     /* the translator's recursion wants the GPU thread's stack */
     if (plat_thread(pf_load_thread, &g_pf, (size_t)16 << 20)) pf_load(NULL); /* no thread: read here */

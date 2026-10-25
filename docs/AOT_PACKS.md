@@ -42,12 +42,18 @@ later session adds to it.
 ## Build from the launcher
 
 1. Open **Games**.
-2. Select the prepared Switch game. The side panel shows the cache it found:
+2. Select the prepared Switch game. The side panel shows how its code was made (its stamp's made line: the `-O`, and
+   the share of the modules' code the analysis made ahead of time, `?` for a game an older version made) and the cache
+   it found:
 
    ```
+   Made with: O2, AOT 81%
    JIT cache: 49 KB, O2
    AOT build: O2
    ```
+
+   `Needs Recompile` in the failure colour in the first line's place means another build made the game, or with other
+   mods: Play compiles it first.
 
    `levels differ` in the failure colour means the cache and the current AOT level do not match; the build is
    refused until they do. `JIT cache: none yet` means the game has not been played with the current runtime;

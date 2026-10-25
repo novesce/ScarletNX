@@ -6,6 +6,7 @@
 #include "common/cpu/aarch64/cpu.h"
 #include "nx/loader/module_abi.h"
 #include "nx/runtime/driver/recompile.h"
+#include "common/utilities/mods.h"
 #include <stdlib.h>
 #include <string.h>
 #ifdef _WIN32
@@ -220,12 +221,18 @@ int main(int argc, char** argv) {
             check(!rc, pass == 2 ? "--interp-only CLI build" : "AOT CLI build");
         data_file = snx_path_join(out, "Native Fixture/Native Fixture.abi");
         check(snx_is_file(data_file) == !rc, "ABI checkpoint published only after a successful build");
-        if (!rc) { /* what the driver takes for this build's: the ABI and the commit */
-            char* stamp = snx_game_stamp("");
+        if (!rc) { /* what the driver takes for this build's: the ABI and the commit; then how the code was made, the -O,
+                      ahead of time or JIT only (--interp-only), and the instructions the analysis found of the code's */
+            char *stamp = snx_game_stamp(""), *game = snx_path_join(out, "Native Fixture/Native Fixture");
+            SnxGameMade made;
             cached = (char*)snx_read_file(data_file, &cached_size);
-            check(cached && cached_size == strlen(stamp) && !memcmp(cached, stamp, cached_size) &&
-                      strchr(stamp, '\n') < stamp + strlen(stamp) - 1,
+            check(cached && snx_game_stamp_size(cached, cached_size) == strlen(stamp) &&
+                      !memcmp(cached, stamp, strlen(stamp)) && strchr(stamp, '\n') < stamp + strlen(stamp) - 1,
                   "the ABI checkpoint names the ABI and the build");
+            check(snx_game_made_read(game, &made) && made.opt == '2' && made.aot == (pass != 2) && made.code &&
+                      made.found <= made.code && (pass == 2 ? !made.found : made.found > 0),
+                  "the ABI checkpoint says how the code was made");
+            free(game);
             free(cached);
             free(stamp);
         }

@@ -234,8 +234,9 @@ setting Map limit (MB)
     default-if SNX_IOS 256
     startup
     words No limit|#
-    help The most of the game's files mapped into memory at start, in MB; 0 = no limit. A file past it is read from
-    help disk when the game asks, slower, which leaves address space for threads and graphics where a device has little
+    help The most of the game's files mapped into memory, in MB, as the game first reads them; 0 = no limit. A file past
+    help it is read from disk when the game asks, slower, which leaves address space for threads and graphics where a
+    help device has little
 setting Map limit (files)
     key map_limit_files
     int 0 1000000
@@ -243,8 +244,9 @@ setting Map limit (files)
     default-if SNX_IOS 2048
     startup
     words No limit|#
-    help The most of the game's files mapped at start; 0 = no limit. A file past it is read from disk when the game
-    help asks: each mapped file holds a descriptor, of which a device may give the whole app a few thousand
+    help The most of the game's files mapped, as the game first reads them; 0 = no limit. A file past it is read from
+    help disk when the game asks: each mapped file holds a descriptor, of which a device may give the whole app a few
+    help thousand
 setting Thread stack (MB)
     key thread_stack_mb
     int 1 256
@@ -582,6 +584,28 @@ setting SLP vectorizer
     help LLVM's SLP vectorizer, which packs scalar instructions into SIMD ones, in the recompile and the JIT. Off
     help while LLVM 23 can break a module with it and stop the recompile (llvm-project issue 231525). It applies to
     help the next recompile, and to the JIT's next run
+setting FPSR flags
+    key fpsr_flags
+    int 0 1
+    default 1
+    startup
+    words Off|On
+    recompile
+    help 1 = the game's code keeps FPSR's flags (floating point's inexact, underflow, overflow, division by zero and
+    help invalid, and the saturation flag QC) as the console raises them, which costs every such operation tests of
+    help its result. 0 = only the results are the console's: a game that never reads FPSR (few do) runs its floating
+    help point and saturating arithmetic faster. It applies to the next recompile, and to the JIT's next run
+setting Volatile load/stores
+    key volatile_memory
+    int 0 1
+    default 0
+    startup
+    words Off|On
+    recompile
+    help 1 = every load and store of the game's code happens exactly where the game has it. 0 = LLVM may merge two
+    help loads of one address, or a store and a load, between the game's barriers, as the console's memory model
+    help allows, which makes its code faster. 1 is for finding whether a bug is one of those. It applies to the
+    help next recompile, and to the JIT's next run
 setting GDB JIT symbols
     key gdb_jit
     int 0 1

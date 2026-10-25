@@ -10,7 +10,16 @@ msgstr ""
 "X-Language-Name: \n"
 
 #: src/gui/android.c
+msgid "an exception that says nothing"
+msgstr ""
+
+#: src/gui/android.c
 msgid "No Android activity to ask."
+msgstr ""
+
+#: src/gui/android.c
+#, c-format
+msgid "MainActivity.%s did not run: %s"
 msgstr ""
 
 #: src/gui/android.c
@@ -1193,6 +1202,60 @@ msgid "out of memory"
 msgstr ""
 
 #: src/gui/main.c
+msgid "Dump"
+msgstr ""
+
+#: src/gui/main.c
+msgid "Game"
+msgstr ""
+
+#: src/gui/main.c
+msgid "Saves"
+msgstr ""
+
+#: src/gui/main.c src/gui/ui.txt
+msgid "Settings"
+msgstr ""
+
+#: src/gui/main.c
+msgid "its dump is not known: the game was made before the recompile named it"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "%s is not there yet"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "%s is out of the Files app's reach, which shows the app's Documents alone"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "%s has no cache to delete: no %s, no %s"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "Delete the caches of %s? The shader cache, %s (%s), and the code cache, %s (%s). The game makes them again as it runs; its saves, settings and dump stay."
+msgstr ""
+
+#: src/gui/main.c
+msgid "none"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "Could not delete %s: %s"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "Deleted the caches of %s: %s"
+msgstr ""
+
+#: src/gui/main.c
 #, c-format
 msgid "Mod %s"
 msgstr ""
@@ -1220,6 +1283,14 @@ msgstr ""
 
 #: src/gui/main.c
 msgid "Open Cheats Folder"
+msgstr ""
+
+#: src/gui/main.c
+msgid "Open Folder"
+msgstr ""
+
+#: src/gui/main.c
+msgid "Clean Cache"
 msgstr ""
 
 #: src/gui/main.c
@@ -1383,6 +1454,10 @@ msgid "%s: its updates, DLCs, mods and cheats kept"
 msgstr ""
 
 #: src/gui/main.c
+msgid "Icon size is the grid's: View is List"
+msgstr ""
+
+#: src/gui/main.c
 msgid "Side panel"
 msgstr ""
 
@@ -1476,10 +1551,6 @@ msgstr ""
 msgid "Games"
 msgstr ""
 
-#: src/gui/main.c src/gui/ui.txt
-msgid "Settings"
-msgstr ""
-
 #: src/gui/main.c
 msgid "Compile"
 msgstr ""
@@ -1562,10 +1633,6 @@ msgstr ""
 #: src/gui/main.c
 #, c-format
 msgid "In use: %s"
-msgstr ""
-
-#: src/gui/main.c
-msgid "none"
 msgstr ""
 
 #: src/gui/main.c
@@ -1660,8 +1727,26 @@ msgid "R on another game: it joins the queue"
 msgstr ""
 
 #: src/gui/main.c
+msgid "Made with: ?"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "Made with: O%c, JIT only"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "Made with: O%c, AOT %s"
+msgstr ""
+
+#: src/gui/main.c
 #, c-format
 msgid "Debug on: %s"
+msgstr ""
+
+#: src/gui/main.c
+msgid "Needs Recompile"
 msgstr ""
 
 #: src/gui/main.c
@@ -2048,11 +2133,11 @@ msgid "App Folders"
 msgstr ""
 
 #: src/gui/main.c
-msgid "Recompiled Library"
+msgid "Dumps Library"
 msgstr ""
 
 #: src/gui/main.c
-msgid "Dumps Library"
+msgid "Recompiled Library"
 msgstr ""
 
 #: src/gui/main.c
@@ -2429,13 +2514,13 @@ msgstr ""
 #. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
 #: src/gui/main.c
 #, snx-keys
-msgid "Up/Down: row. Enter: open. ESC: back."
+msgid "Up/Down: row. Left/Right: change. Enter: open. ESC: back."
 msgstr ""
 
 #. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
 #: src/gui/main.c
 #, snx-keys
-msgid "Up/Down: row. Enter: open. ESC: exit."
+msgid "Up/Down: row. Left/Right: change. Enter: open. ESC: exit."
 msgstr ""
 
 #. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~

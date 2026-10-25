@@ -77,26 +77,9 @@ void pm_unlock(PMutex* m) { pthread_mutex_unlock(&m->l); }
 int plat_mkdir(const char* path) { return mkdir(path, 0777); }
 #endif
 
-int plat_dir_open(PDir* d, const char* path) {
-    (void)d;
-    (void)path;
-    test_fail("HLE attempted platform directory enumeration", __LINE__);
-    return -1;
-}
-int plat_dir_next(PDir* d) {
-    (void)d;
-    test_fail("HLE attempted platform directory enumeration", __LINE__);
-    return 0;
-}
-void plat_dir_close(PDir* d) { (void)d; }
 int plat_is_dir(const char* path) {
     (void)path;
     test_fail("HLE attempted host existence query", __LINE__);
-    return 0;
-}
-u64 plat_file_size(const char* path) {
-    (void)path;
-    test_fail("HLE attempted host size query", __LINE__);
     return 0;
 }
 i64 plat_pread(FILE* f, void* buf, u64 size, u64 off) {
@@ -1535,7 +1518,9 @@ static void mods_write(int image, int stale) {
     mods = snx_mods_folder("mods-data/0100000000AB0000_data");
     stamp = snx_mods_stamp(mods, g_settings.game_mods_off);
     CHECK(strlen(stamp) == 16);
-    text = stale ? snx_strdup("1") : snx_format("1 mods %s", stamp);
+    /* the image run's stamp ends with the made line the recompile writes now, the other's is one from before it */
+    text = stale ? snx_strdup("1")
+                 : snx_format("1 mods %s%s", stamp, image ? "\nmade opt=2 aot=1 found=10 code=20\n" : "");
     CHECK(!snx_write_file("mods-data/0100000000AB0000.abi", text, strlen(text)));
     free(text);
     free(stamp);

@@ -536,6 +536,7 @@ int snx_build_module_llvm(SnxProgram* loaded, const SnxCodegenOptions* options, 
     if (!options->interp_only &&
         snx_nx_codegen_analyze(&codegen, loaded, options->hints, options->hint_count, options->quiet))
         goto done;
+    if (build->found) *build->found = codegen.instruction_count;
     codegen.direct_svc = 1; /* the runtime's RtAPI.svcs (svc.c's g_svc64) */
     codegen.hook_direct_calls = options->hook_direct_calls;
     /* chunks of whole functions, as module.c splits the C */

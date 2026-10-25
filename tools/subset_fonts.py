@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright 2026 the ScarletNX contributors
-"""Makes the shared fonts' Noto Sans stand-ins in dist/fonts (see dist/fonts/README.md).
+"""Makes the shared fonts' Noto Sans stand-ins (see docs/SHARED_FONTS.md).
 
-    tools/subset_fonts.py                 # into dist/fonts
-    tools/subset_fonts.py --out DIR       # somewhere else
+    tools/subset_fonts.py --out DIR
 
 Each is Noto Sans JP, SC, TC or KR, instantiated at weight 400, kept to ASCII, Latin-1, common
 punctuation and the script's standard set (JIS X 0208, GB 2312, Big5, KS X 1001), with hinting and the
 variation tables dropped: a TrueType glyf font small enough for the 0x1100000-byte shared memory the
-console's SDK maps. Needs fontTools and network access; the build uses the files this wrote.
+console's SDK maps. Needs fontTools and network access; the build fetches the files this wrote from where
+they were published (cmake/dependencies.cmake).
 """
 
 import argparse
@@ -20,7 +20,7 @@ from fontTools import subset
 from fontTools.ttLib import TTFont
 from fontTools.varLib.instancer import instantiateVariableFont
 
-# Google Fonts, the commit the files in dist/fonts came from
+# Google Fonts, the commit the published files came from
 FONTS = 'https://raw.githubusercontent.com/google/fonts/e7db6ca603fd4862010383ff17ffd6cc4ffac1c0/ofl'
 SOURCES = [
     ('notosansjp', 'NotoSansJP[wght].ttf', 'shift_jis', 'NotoSansJP-Subset.ttf'),
@@ -66,8 +66,7 @@ def make(name, font_path, codec, out_path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    parser.add_argument('--out', default=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                                                      'dist', 'fonts'))
+    parser.add_argument('--out', required=True)
     parser.add_argument('--cache', default=os.path.join(os.path.expanduser('~'), '.cache', 'scnx-fonts'))
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)

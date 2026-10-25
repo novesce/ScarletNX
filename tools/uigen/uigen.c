@@ -1264,9 +1264,10 @@ static void write_h(const char* path) {
         "/* how a row is drawn, a bit each: in the failure colour, every other blink, an arrow up (rows above it are\n"
         "   hidden) or down (rows below) at its right, in the active colour (the one activated last), a label between\n"
         "   rows (no box), in the focus's look without its cursor (open: the row whose own rows show beside its list), a\n"
-        "   title over the rows after it (on the theme's band) */\n"
+        "   title over the rows after it (on the theme's band), greyed (off: nothing it can do now, its text in the soft\n"
+        "   colour) */\n"
         "enum { UI_ATTR_FAILURE = 1, UI_ATTR_BLINK = 2, UI_ATTR_MORE_UP = 4, UI_ATTR_MORE_DOWN = 8, "
-        "UI_ATTR_ACTIVE = 16, UI_ATTR_LABEL = 32, UI_ATTR_OPEN = 64, UI_ATTR_TITLE = 128 };\n");
+        "UI_ATTR_ACTIVE = 16, UI_ATTR_LABEL = 32, UI_ATTR_OPEN = 64, UI_ATTR_TITLE = 128, UI_ATTR_OFF = 256 };\n");
     outs("enum { UI_MOD_CTRL = 1, UI_MOD_ALT = 2 };\n");
     outs("/* what the hit test says of a point, a bit each: on an item, pressed on it, released on it */\nenum { "
          "UI_HIT_HOVER = 1, UI_HIT_CLICK = 2, UI_HIT_RELEASE = 4 };\n");

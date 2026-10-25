@@ -28,8 +28,10 @@ typedef struct FsNode {
     uint64_t size;
     int is_dir, is_virtual, readonly, attached;
     uint8_t* virtual_data;
-    /* fd >= 0: a RomFS/ExeFS file opened at startup and mapped read-only and shared (plat_file_share) for the
-       whole run, its contents at map (NULL when empty). Such nodes are readonly, so fd, map and size never change */
+    /* fd >= 0: a RomFS/ExeFS file opened and mapped read-only and shared (plat_file_share) for the rest of the run,
+       its contents at map (NULL when empty): at startup, or by fs_tree_map when it is first read. Such nodes are
+       readonly, so map and size never change, and fd is set once, after map (read it with fs_tree_mapped without
+       the tree's lock) */
     int fd;
     const uint8_t* map;
     unsigned refs; /* open handles; attached nodes are additionally owned by the tree */
@@ -79,16 +81,25 @@ FsTreeResult fs_tree_rename(FsTree* tree, FsNode* scope, const char* src, const 
 /* Copies the contents. Missing parent directories are virtual, writable placeholders. Injected files are readonly. */
 FsTreeResult fs_tree_add_virtual(FsTree* tree, const char* relative_path, const void* data, uint64_t size,
                                  FsNode** out);
-/* What fs_tree_share maps at most, bytes and files (0: no limit on either), and what it did: shared files of
-   mapped_bytes, skipped past a limit, failed that could not be mapped */
+/* What fs_tree_share and fs_tree_map map at most, bytes and files (0: no limit on either), and what they did: shared
+   files of mapped_bytes, skipped past a limit, failed that could not be mapped. lazy: fs_tree_share maps nothing,
+   leaving each file to fs_tree_map */
 typedef struct {
     uint64_t bytes, mapped_bytes;
     unsigned files, shared, skipped, failed;
+    int lazy;
 } FsShare;
-/* Startup only: opens and maps every regular file under node (plat_file_share) and makes the subtree readonly, so no
-   mapped file is ever truncated, replaced or renamed. A file past share's limits, or that can't be mapped, keeps fd -1
-   and is read on demand. */
+/* Startup only: makes the subtree under node readonly, so no mapped file is ever truncated, replaced or renamed, and
+   opens and maps every regular file in it (plat_file_share) unless share is lazy. A file past share's limits, or that
+   can't be mapped, keeps fd -1 and is read on demand. */
 FsTreeResult fs_tree_share(FsTree* tree, FsNode* node, FsShare* share);
+/* tree->lock held: node, a file of a subtree fs_tree_share made readonly, mapped now unless it is already, within
+   share's limits. 0 when it is mapped, -1 when it is read on demand (past the limits, or not mappable). The files a
+   game reads are mapped and the rest aren't: one game's 304,000 mapped at startup held as many descriptors, and a
+   driver that reads the process's mappings at startup (NVIDIA's Vulkan) took 12 to 26 s to */
+int fs_tree_map(FsTree* tree, FsNode* node, FsShare* share);
+/* whether node is mapped (fd >= 0), from any thread: its map may be read once this says so */
+int fs_tree_mapped(const FsNode* node);
 void fs_tree_retain(FsNode* node);
 void fs_tree_release(FsNode* node);
 

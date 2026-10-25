@@ -8,21 +8,27 @@
 #include <string.h>
 
 /* whether optimal-tiling images of a format have these features, asked of the device once per format */
-static int has_features(VkFormat f, VkFormatFeatureFlags need) {
+static int has_features(VkFormat f, VkFormatFeatureFlags2 need) {
     static struct {
         VkFormat f;
-        VkFormatFeatureFlags have;
+        VkFormatFeatureFlags2 have;
     } seen[64];
     static int n;
     for (int i = 0; i < n; i++)
         if (seen[i].f == f) return (seen[i].have & need) == need;
-    VkFormatProperties p;
-    vkGetPhysicalDeviceFormatProperties(g_vk.phys, f, &p);
+    VkFormatProperties3 features = {.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3};
+    VkFormatProperties2 p = {.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2, .pNext = &features};
+    vkGetPhysicalDeviceFormatProperties2(g_vk.phys, f, &p);
     if (n < 64) {
         seen[n].f = f;
-        seen[n++].have = p.optimalTilingFeatures;
+        seen[n++].have = features.optimalTilingFeatures;
     }
-    return (p.optimalTilingFeatures & need) == need;
+    return (features.optimalTilingFeatures & need) == need;
+}
+
+int vk_format_storage_write(VkFormat f) {
+    return g_vk.feat.shaderStorageImageWriteWithoutFormat &&
+           has_features(f, VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
 }
 
 /* a format the tables don't have: 1 the first time it is seen (the first few formats), to say so once */
@@ -137,10 +143,12 @@ VkFmt vk_zt_format(u32 f) {
         case 0x16:
         case 0x17: /* S8: only the stencil is used */
         case 0x18:
-            /* D24S8 isn't supported everywhere (AMD), D32F S8 holds the same values */
-            return has_features(VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)
-                       ? D(VK_FORMAT_D24_UNORM_S8_UINT, 4, 1)
-                       : D(VK_FORMAT_D32_SFLOAT_S8_UINT, 8, 1);
+            /* D24S8 isn't supported everywhere (AMD), D32F S8 holds the same values. Its texels are still 4 bytes
+               in guest memory, which is what bpp counts */
+            return D(has_features(VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)
+                         ? VK_FORMAT_D24_UNORM_S8_UINT
+                         : VK_FORMAT_D32_SFLOAT_S8_UINT,
+                     4, 1);
         case 0x19: return D(VK_FORMAT_D32_SFLOAT_S8_UINT, 8, 1);
     }
     static u32 said[8];
@@ -326,7 +334,6 @@ static VkFmt tic_format(u32 w0, int srgb, u32 native) {
         case 0x2B: {
             VkFmt r = vk_zt_format(0x14);
             r.raw = 0;
-            r.bpp = 4; /* guest texel size, even when the host uses D32F/S8 */
             r.conv = f == 0x0E || f == 0x29 ? VKC_S8D24 : f == 0x2A ? VKC_D24X8 : VKC_D24S8;
             return r;
         }

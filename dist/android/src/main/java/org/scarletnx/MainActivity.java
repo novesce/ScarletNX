@@ -16,11 +16,13 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.PowerManager;
+import android.provider.DocumentsContract;
 import android.provider.Settings;
 import android.view.DisplayCutout;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
+import java.io.File;
 import java.nio.charset.StandardCharsets;
 import org.libsdl.app.SDLActivity;
 import org.libsdl.app.SDLSurface;
@@ -162,8 +164,27 @@ public class MainActivity extends SDLActivity {
     /** src/gui/android.c: the data folder in the system's Files app, through DataProvider. Its viewer is the Files app
         itself where the system names none (some makers' own) */
     public void openData() {
+        view(DataProvider.rootUri(this), "vnd.android.document/root");
+    }
+
+    /** src/gui/android.c: a folder in the system's Files app: one of the data folder through DataProvider, one of the
+        shared storage (a dump's in Download/) through the system's own provider of it. Another is refused */
+    public void openFolder(String path) {
+        File folder = new File(path), data = DataProvider.folder(this);
+        String shared = Environment.getExternalStorageDirectory().getAbsolutePath(), full = folder.getAbsolutePath();
+        Uri uri = DataProvider.documentUri(this, folder);
+        if (uri == null && full.equals(data.getAbsolutePath())) uri = DataProvider.rootUri(this);
+        if (uri == null && (full.equals(shared) || full.startsWith(shared + "/")))
+            uri = DocumentsContract.buildDocumentUri("com.android.externalstorage.documents",
+                                                     "primary:" + full.substring(Math.min(full.length(), shared.length() + 1)));
+        if (uri == null) throw new IllegalArgumentException(path + " is neither in the app's data nor in shared storage");
+        view(uri, uri.equals(DataProvider.rootUri(this)) ? "vnd.android.document/root" : DocumentsContract.Document.MIME_TYPE_DIR);
+    }
+
+    /** the Files app on uri, as the system names it, else its own where it names none (some makers' own) */
+    private void view(Uri uri, String type) {
         Intent view = new Intent(Intent.ACTION_VIEW)
-                          .setDataAndType(DataProvider.rootUri(this), "vnd.android.document/root")
+                          .setDataAndType(uri, type)
                           .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
         try {
             startActivity(view);

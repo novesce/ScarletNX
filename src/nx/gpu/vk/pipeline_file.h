@@ -119,6 +119,8 @@ void pf_shipref(PFile* pf, u64 module, u64 at, u64 check);
 typedef void (*PfEach)(void* ctx, u32 type, const u8* payload, u32 len, u64 at);
 void pf_open_mapped(PFile* pf, const char* path, const char* key, PfEach each, void* ctx);
 void pf_unseal(PFile* pf);
+/* the appending ended and the view unmapped, for a file nothing reads afterwards */
+void pf_close(PFile* pf);
 /* the process's id, for a temporary file of its own: two runs of a game started together would write the same one */
 unsigned pf_pid(void);
 void pf_seal(PFile* pf);

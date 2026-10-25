@@ -83,6 +83,7 @@ typedef struct {
     VkPhysicalDeviceFeatures feat;
     int has_divisor;      /* VK_EXT_vertex_attribute_divisor: instance divisors above 1 */
     int has_dynamic_stride; /* a binding's stride is dynamic state, which MoltenVK refuses: a pipeline holds it then */
+    int has_vertex_robustness2; /* exact zero/default components for out-of-range mesh fetches */
     int has_calibrated_host; /* VK_EXT_calibrated_timestamps with CLOCK_MONOTONIC_RAW: the GPU's clock goes next to
                                 the client's, one driver call (gpuprof.c's calibration) */
     int has_xfb;          /* VK_EXT_transform_feedback: draws capture their outputs into guest memory */
@@ -220,6 +221,9 @@ void vk_frame_hold(u64 frame_id);
 u64 vk_last_submit(void);        /* the last submission's number, which its completion signals */
 void vk_submit_progress(u64* submitted, u64* done); /* the last submission and the last done (any thread) */
 void vk_wait_submit(u64 value);  /* until the GPU has done that submission (any thread, without vk_lock) */
+/* Flush recorded work without frame recycling or guest result callbacks, under
+   vk_lock, before an ownership readback uses the graphics queue directly. */
+void vk_submit_for_readback(void);
 void vk_land_through(u64 value); /* the results of the submissions up to value, done, into guest memory (vk_lock) */
 void vk_barrier(VkCommandBuffer cb, VkImage img, VkImageAspectFlags aspect, VkPipelineStageFlags2 src_stage,
                 VkAccessFlags2 src_access, VkImageLayout from, VkPipelineStageFlags2 dst_stage,
@@ -390,6 +394,8 @@ VkFmt vk_zt_format(u32 fmt);
 VkFmt vk_tic_format(u32 w0, int srgb); /* bpp 0: not supported */
 /* vk_tic_format for a 3D image: ASTC and ETC2 blocks decoded where the device can't make 3D images of them */
 VkFmt vk_tic_format_3d(u32 w0, int srgb);
+/* The device and optimal-tiling format both support writes without a shader format. */
+int vk_format_storage_write(VkFormat f);
 int vk_tic_reads_stencil(const u32* tic);
 /* sRGB and linear views of the same bytes: the twin of a color format, or the format itself when it has none */
 VkFormat vk_srgb_as(VkFormat f, int srgb);
@@ -403,7 +409,7 @@ void vk_view_formats(VkImageCreateInfo* ii, VkViewFormats* vf);
 
 /* gpu/vk/surface.c: a render target or a texture */
 typedef struct {
-    u64 key; /* view type | swizzle << 4 | format << 20 | stencil aspect << 60 (vk_tex_view) */
+    u64 key; /* view type | swizzle << 4 | format << 20 | stencil << 60 | single mip << 61 (vk_tex_view) */
     VkImageView v;
 } SurfView;
 typedef struct Surf {
@@ -493,6 +499,8 @@ Surf* vk_rt_for_cpu(u64 cpu_addr, u32 w, u32 h); /* the render target the guest 
 void vk_rt_note_read(Surf* s);
 void vk_rt_before_write(u64 gva, u64 size);
 void vk_rt_before_write_cpu(u64 cpu, u64 size);
+int vk_rt_clean(void); /* publish pending targets, oldest first, before a CPU-visible release */
+void vk_release_visibility(void); /* the next release also waits for the current graphics recording */
 /* an image of a scaled target's format at the guest's size with that many layers, a transfer's source and
    destination: to move it to and from guest memory, or into a texture a blit can't reach. VK_NULL_HANDLE on failure */
 VkImage vk_unscaled_image(const Surf* s, u32 layers, VmaAllocation* mem);
@@ -521,6 +529,7 @@ int vk_surf_publish(Surf* s);
 /* a release: the pitch-linear color targets drawn since the last one published, for the CPU to read */
 void vk_rt_publish_linear(void);
 void vk_surf_wrote(Surf* s); /* its image changed: its copies are out of date (wgen), and it is the newest (wseq) */
+u32 vk_surf_gen(void);       /* a write generation no image has held yet */
 /* vk_surf_flush in two halves, the GPU not waited for: the bytes a write-back of s copies (0 for none), its copy
    recorded into buf at at (host-readable once the submit being recorded is done), and its landing from those bytes p,
    as of the write generation the copy was recorded at */
@@ -714,6 +723,8 @@ static inline void vk_gmem_words(u64 gva, u32* w, u32 n) {
 /* texture.c */
 void vk_render_forget_state(void); /* the next draw sets all its state again (another pipeline or state was set) */
 Surf* vk_tex_from_tic(const u32* tic); /* tic: the header's words as host numbers */
+/* Writable resolution bypasses read-only render-target crop snapshots. */
+Surf* vk_tex_from_tic_storage(const u32* tic);
 /* a texture vk_tex_from_tic returned for an unchanged header, checked again as it would be: memory written since, what
    targets drew into it. NULL when it can't be drawn now */
 Surf* vk_tex_recheck(Surf* t);
@@ -722,6 +733,8 @@ Surf* vk_tex_from_tic_raw(const u32* tic); /* UINT view of raw RGBA8 texel bytes
    VK_NULL_HANDLE when the image can't be viewed that way */
 /* stencil: a depth/stencil surface's stencil aspect instead of its depth */
 VkImageView vk_tex_view(Surf* s, VkImageViewType type, int srgb, const VkComponentMapping* map, int stencil);
+/* One selected mip for storage; the sampled view retains the complete chain. */
+VkImageView vk_tex_storage_view(Surf* s, VkImageViewType type);
 /* an empty texture of a view type: num 0 float, 1 unsigned, 2 signed integer, 3 depth at 1.0 (shadow samplers) */
 VkImageView vk_null_view(VkImageViewType type, int num);
 /* the sampler for a TSC: raise lets anisotropy= raise its filtering (a 2D texture with mipmaps), integer gives its
@@ -1027,16 +1040,19 @@ VkSampler vk_tex_bind_sampler(const u32* tsc, const ShTex* st, int num, const Su
    to, which can be a depth target of another type than the header's; NULL takes the type a surface made from the
    header has (tex_from_tic copies a target of another color format into the header's).
    Storage image stores are translated unsigned when bindless and float when bound (spirv_translate.c's image kinds).
-   vk_image_keyable: whether slot i of an unkeyed program is one whose declaration follows its image, a 2D or 2D array
+   vk_image_keyable: whether slot i of an unkeyed program is one whose declaration follows its image, a 2D, 2D array or 3D
    store. Atomics need an unsigned image whatever the header says, and buffer images (bound by compute only) take a
    view in the format the unkeyed kind needs instead (cs_buffer_image). vk_image_key: whether such a slot's header
-   names an image of the other class, so that the program is translated again with bit 8 + i of rt_int_mask set. The
-   header has the class of the surface vk_storage_image_view checks (tex_from_tic keeps it).
+   names an image of the other class, so that the program is translated again with bit 8 + i of rt_int_mask set.
+   Signed image stores also set bit 8 + i of rt_sint_mask. The header has the class of the surface
+   vk_storage_image_view checks (tex_from_tic keeps it).
    vk_storage_image_view: the view storage image slot i of the keyed program si binds t through, or VK_NULL_HANDLE when
-   it can't: one level (a 2D view, or a 2D array view of every layer for a 2D array slot) that lands back in guest
-   memory as it is, R32_UINT for unsigned stores and atomics (which declare that format) and a float format for float
-   stores (which declare none). *bytes is set to the guest bytes t covers, every layer. A draw also refuses its own
-   attachments, which a dispatch, outside any rendering pass, can write.
+   it can't: the first selected level of a mip chain (a 2D view, every layer for a 2D array slot, or a 3D volume)
+   that lands back in guest memory as it is: R32_UINT for atomics, an unsigned integer format for unsigned stores,
+   a signed integer format for signed stores and a float format for float stores. Stores declare no shader format
+   and require the device and view format to support that. *bytes covers the selected level of every layer,
+   including the intervening mip data that writeback preserves.
+   A draw also refuses its own attachments, which a dispatch, outside any rendering pass, can write.
    vk_gbuf_desc: a storage buffer's address (*addr) and size from its descriptor's words {address low, address high,
    size} at off (SH_GBUF_*), where gbuf_tag (spirv_translate.c) found it for stage (ST_VS, ST_FS or ST_CS).
    No size takes 16 bytes, and sizes are capped at 16 MiB and rounded up to words. The vertex stage's 0xb0 holds a

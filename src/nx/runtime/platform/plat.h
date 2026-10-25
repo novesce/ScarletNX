@@ -1,8 +1,9 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
    Copyright 2026 the ScarletNX contributors */
-/* The operating system under the runtime. One of plat_posix.c and plat_win32.c implements it (threads, time, the
-   guest's address space, files, libraries, the crash handler); profiler_win32.c samples threads on Windows, and the
-   host audio output lives in the window backend. Paths are UTF-8 everywhere. */
+/* The operating system under the runtime. plat_sdl.c implements what SDL does the same way everywhere (the clocks,
+   sleeping, libraries, path queries), and one of plat_posix.c and plat_win32.c the rest (threads, condition variables,
+   the guest's address space, file maps, the crash handler); profiler_win32.c samples threads on Windows, and the host
+   audio output lives in the window backend. Paths are UTF-8 everywhere. */
 #ifndef SNX_PLAT_H
 #define SNX_PLAT_H
 #include "common/cpu/aarch64/cpu.h"
@@ -128,19 +129,8 @@ void* plat_dl_sym(void* h, const char* name);
 const char* plat_dl_error(void); /* the reason the last plat_dl_open or plat_dl_sym returned NULL */
 int plat_setenv(const char* name, const char* value); /* for this process and what it loads; 0 on success */
 
-/* ---- files and folders */
+/* ---- files */
 int plat_is_dir(const char* path);
-u64 plat_file_size(const char* path); /* 0 when it can't be read */
-typedef struct {
-    void* h;       /* the platform's state, owned by the iteration */
-    int first;
-    char name[512]; /* the current entry, never "." or ".." */
-    int is_dir;
-    u64 size;
-} PDir;
-int plat_dir_open(PDir* d, const char* path); /* 0, or -1 */
-int plat_dir_next(PDir* d);                   /* 1 with an entry in d, 0 at the end */
-void plat_dir_close(PDir* d);
 /* Reads size bytes at off without moving f's position. The count read, short only at the end of the file, or -1 */
 i64 plat_pread(FILE* f, void* buf, u64 size, u64 off);
 typedef struct {
