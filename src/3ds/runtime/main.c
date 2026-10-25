@@ -25,21 +25,22 @@
 
 static void usage(FILE* out) {
     fputs(
-        "Usage: scarletnx-3ds [OPTIONS] game.cia\n"
+        "Usage: scarletnx-3ds [OPTIONS] game\n"
         "       scarletnx-3ds [OPTIONS] --game=recompiled/<title ID>\n"
         "       <title ID> [OPTIONS]   (the game's copy of the runtime, in its folder)\n"
         "       scarletnx-3ds [--model old|new] --board-info\n"
-        "  game.cia        Read a decrypted application CIA where it lies, recompile if needed, then play. The\n"
-        "                  game's folder is recompiled/<its title ID>, as a Switch game's: its module <title ID>_code.so,\n"
-        "                  its copy of the runtime <title ID>, which plays it from then on, and <title ID>.ini,\n"
-        "                  which names the CIA (source=) and the console (model=)\n"
+        "  game            An application CIA, cartridge image or NCCH read where it lies, recompiled if needed,\n"
+        "                  then played: a .cia, a .cci or .3ds cartridge image, or a .cxi, .app or .hbb NCCH. The\n"
+        "                  game's folder is recompiled/<its title ID>, as a Switch game's: its module\n"
+        "                  <title ID>_code.so, its copy of the runtime <title ID>, which plays it from then on, and\n"
+        "                  <title ID>.ini, which names the game (source=) and the console (model=)\n"
         "  --game=DIR      Play the game in its folder DIR, as its copy of the runtime does\n"
         "  --extract-container\n"
-        "                  Extract the CIA into its folder first and play from the extraction\n"
+        "                  Extract the game into its folder first and play from the extraction\n"
         "  -x, --extract   Extract only\n"
         "  -r, --recompile Recompile without playing\n"
         "  --model old|new The console to model (default old)\n"
-        "  --keys FILE     The 3DS AES keys, in Azahar's aes_keys.txt format, to decrypt an encrypted CIA\n"
+        "  --keys FILE     The 3DS AES keys, in Azahar's aes_keys.txt format, to decrypt an encrypted game\n"
         "                  with (default ~/.3ds/aes_keys.txt)\n"
         "  --repo DIR      The data folder (default: a portable copy's folder, else the user's data\n"
         "  --data DIR      The data folder (default: a portable copy's folder, else the user's data\n"
@@ -58,17 +59,32 @@ static void usage(FILE* out) {
         "  --ipc-stubs L   With --ctr_auto_stub_ipc=0, still answer a service command the runtime lacks with\n"
         "                  success for the services in L: all, or a comma list of srv, fs, apt, ptm, hid, gsp,\n"
         "                  cfg, dsp, system. Given more than once, the lists add up\n"
-        "Without --extract-container nothing of the CIA is extracted: its ExeFS and RomFS are read from the\n"
-        "CIA itself, mapped read-only. An extraction and a compiled module already there are used as they\n"
+        "Without --extract-container nothing of the game is extracted: its ExeFS and RomFS are read from the\n"
+        "game itself, mapped read-only. An extraction and a compiled module already there are used as they\n"
         "are: the ARM11 code is compiled again only when its module is missing or no longer matches the\n"
-        "build or the code. An encrypted CIA is decrypted once, with the keys, into <folder>.decrypted.cia\n"
-        "beside the title's folder, and read from there.\n",
+        "build or the code. An encrypted game is decrypted once, with the keys, into a copy beside the title's\n"
+        "folder (<folder>.decrypted.cia, <folder>.decrypted.cci), and read from there. A cartridge image whose\n"
+        "game partition carries the game's update is played as that update.\n",
         out);
 }
-static bool cia_path(const char* path) {
+/* the extensions a game of this system may have. The loader reads the file's own header, so this is a guard against a
+   mistyped path and the GUI's filter, not the identification: .app and .hbb are NCCHs a manual and the Homebrew
+   Launcher keep, .cci and .3ds cartridge images */
+static const char* const game_extensions[] = {".cia", ".cci", ".3ds", ".cxi", ".app", ".hbb",
+                                              ".bcci", ".bcxi", ".bcia", ".zcci", ".zcxi", ".zcia"};
+static bool game_path(const char* path) {
     size_t n = strlen(path);
-    return n >= 4 && path[n - 4] == '.' && tolower((unsigned char)path[n - 3]) == 'c' &&
-           tolower((unsigned char)path[n - 2]) == 'i' && tolower((unsigned char)path[n - 1]) == 'a';
+    for (size_t i = 0; i < sizeof game_extensions / sizeof *game_extensions; ++i) {
+        const char* e = game_extensions[i];
+        size_t length = strlen(e);
+        if (n > length && path[n - length] == '.') {
+            bool found = true;
+            for (size_t k = 1; found && k < length; ++k)
+                if (tolower((unsigned char)path[n - length + k]) != e[k]) found = false;
+            if (found) return true;
+        }
+    }
+    return false;
 }
 static bool visible_path(const char* path) {
     for (const unsigned char* p = (const unsigned char*)path; *p; ++p)
@@ -110,17 +126,49 @@ static char* default_keys(void) {
     free(folder);
     return keys;
 }
-/* The CIA the driver reads: input itself when nothing in it is encrypted, else its decryption, made once with the keys
-   beside the title's folder (<folder>.decrypted.cia, published only complete) and read from then on. *path is the
-   caller's */
-static int readable_cia(const char* input, const char* folder, const char* keys, char** path) {
-    char *decrypted = snx_format("%s.decrypted.cia", folder), *parent = snx_dirname(folder), *found = NULL;
+/* whether the file is a z3ds one, by its magic: what Azahar's launcher keeps a game in */
+static bool is_z3ds(const char* path) {
+    unsigned char magic[4];
+    FILE* f = path ? fopen(path, "rb") : NULL;
+    bool z = f && fread(magic, 1, sizeof magic, f) == sizeof magic && !memcmp(magic, "Z3DS", 4);
+    if (f) fclose(f);
+    return z;
+}
+/* The game the driver reads: a z3ds game unpacked once into <folder>.unpacked.<its container's extension>, then an
+   encrypted game decrypted once into <folder>.decrypted.<its extension>, both beside the title's folder, published
+   only complete, and read from then on. *path is the caller's */
+static int readable_game(const char* input, const char* folder, const char* keys, char** path) {
+    char *unpacked = NULL, *suffix = snx_format(".decrypted.%s", strrchr(input, '.') ? strrchr(input, '.') + 1 : "game");
+    char* decrypted = suffix ? snx_format("%s%s", folder, suffix) : NULL;
+    char *parent = snx_dirname(folder), *found = NULL;
     char error[512], why[256];
     int status = 1;
     *path = NULL;
     if (!decrypted || !parent) goto done;
+    if (is_z3ds(input)) {
+        const char* ext = strrchr(input, '.');
+        unpacked = snx_format("%s.unpacked.%s", folder, ext && ext[1] == 'z' ? ext + 2 : "game");
+        if (!unpacked) goto done;
+        if (snx_is_file(unpacked)) {
+            printf("Using the unpacked game %s\n", unpacked);
+        } else {
+            SnxCtrExtractResult made = snx_ctr_unzstd(input, unpacked, error, sizeof error);
+            if (made != SNX_CTR_EXTRACT_OK) {
+                fprintf(stderr, "scarletnx-3ds: %s\n", error);
+                status = made == SNX_CTR_EXTRACT_UNSUPPORTED ? 3 : 1;
+                goto done;
+            }
+            printf("Unpacked %s into %s\n", input, unpacked);
+        }
+        input = unpacked;
+        free(suffix);
+        suffix = snx_format(".decrypted.%s", strrchr(input, '.') ? strrchr(input, '.') + 1 : "game");
+        free(decrypted);
+        decrypted = suffix ? snx_format("%s%s", folder, suffix) : NULL;
+        if (!decrypted) goto done;
+    }
     if (snx_is_file(decrypted)) {
-        printf("Using the decrypted CIA %s\n", decrypted);
+        printf("Using the decrypted copy %s\n", decrypted);
         *path = decrypted, decrypted = NULL;
         status = 0;
         goto done;
@@ -131,7 +179,7 @@ static int readable_cia(const char* input, const char* folder, const char* keys,
     }
     if (!keys) keys = found = default_keys();
     bool encrypted = false;
-    SnxCtrExtractResult result = snx_ctr_cia_decrypt(input, keys, decrypted, &encrypted, error, sizeof error);
+    SnxCtrExtractResult result = snx_ctr_decrypt(input, keys, decrypted, &encrypted, error, sizeof error);
     if (result != SNX_CTR_EXTRACT_OK) {
         fprintf(stderr, "scarletnx-3ds: %s\n", error);
         status = result == SNX_CTR_EXTRACT_UNSUPPORTED ? 3 : 1;
@@ -145,6 +193,8 @@ done:
     free(found);
     free(parent);
     free(decrypted);
+    free(unpacked);
+    free(suffix);
     return status;
 }
 /* what an extraction writes into its folder, beside which the title's state (native/, sdmc/, frames/, audio.wav) is
@@ -158,8 +208,8 @@ static bool holds_extraction(const char* folder) {
     free(exheader);
     return found;
 }
-/* The CIA extracted into folder: published there, or, when the folder is there already with the title's state but no
-   extraction (the CIA was read where it lies before), extracted beside it and moved into it */
+/* The game extracted into folder: published there, or, when the folder is there already with the title's state but
+   no extraction (the game was read where it lies before), extracted beside it and moved into it */
 static SnxCtrExtractResult extract_into(const char* input, const char* folder, char** published, char* error,
                                         size_t error_size) {
     /* anything but a folder of its own (nothing, a link, a file) is the extractor's to take or refuse */
@@ -202,10 +252,10 @@ out:
     free(staging);
     return result;
 }
-/* The default: nothing extracted. The CIA is mapped and checked as the extraction checks it, its ExeFS and RomFS read
-   where they lie, and folder keeps the title's state alone: an extraction an earlier --extract-container left there
-   is taken away, as the CIA has all of it */
-static int play_cia(const SnxCtrCia* cia, const char* folder, SnxCtrModel model, uint64_t max_blocks, double seconds,
+/* The default: nothing extracted. The game is mapped and checked as the extraction checks it, its ExeFS and RomFS
+   read where they lie, and folder keeps the title's state alone: an extraction an earlier --extract-container left
+   there is taken away, as the game has all of it */
+static int play_game(const SnxCtrSource* game, const char* folder, SnxCtrModel model, uint64_t max_blocks, double seconds,
                     unsigned flags, uint32_t ipc_stubs, const char* runtime, char* error, size_t error_size) {
     char *state = NULL, why[256];
     int status = 1;
@@ -219,7 +269,7 @@ static int play_cia(const SnxCtrCia* cia, const char* folder, SnxCtrModel model,
     }
     printf("The title's folder is %s\n", state);
     if (holds_extraction(state)) {
-        printf("Removing the extraction in %s, the game reads its CIA\n", state);
+        printf("Removing the extraction in %s, the game reads its own files\n", state);
         for (size_t i = 0; i < sizeof extraction_parts / sizeof *extraction_parts; ++i) {
             char* part = snx_path_join(state, extraction_parts[i]);
             bool failed = snx_path_exists(part) && snx_remove_tree(part);
@@ -228,27 +278,27 @@ static int play_cia(const SnxCtrCia* cia, const char* folder, SnxCtrModel model,
             if (failed) goto done;
         }
     }
-    status = snx_ctr_aot_run(state, cia, model, max_blocks, seconds, flags, ipc_stubs, runtime, error, error_size);
+    status = snx_ctr_aot_run(state, game, model, max_blocks, seconds, flags, ipc_stubs, runtime, error, error_size);
     if (status) fprintf(stderr, "scarletnx-3ds: %s\n", error);
 done:
     free(state);
     return status;
 }
 /* The game played, extracted or compiled as the options say, in its folder extracted (freed): an extraction there
-   already, else the CIA at input, which cia is opened (NULL when it is not) */
-static int play(const char* input, SnxCtrCia* cia, char* extracted, SnxCtrModel model, uint64_t max_blocks,
+   already, else the game at input, which source is opened (NULL when it is not) */
+static int play(const char* input, SnxCtrSource* source, char* extracted, SnxCtrModel model, uint64_t max_blocks,
                 double seconds, bool recompile, bool extract_only, bool extract_container, uint32_t ipc_stubs,
                 const char* runtime) {
     char error[512];
     unsigned flags = recompile ? SNX_CTR_RECOMPILE | SNX_CTR_COMPILE_ONLY : 0;
-    if (cia && !extract_container && !extract_only) { /* the CIA read where it lies, the folder keeping its state */
+    if (source && !extract_container && !extract_only) { /* the game read where it lies, the folder keeping its state */
         int status =
-            play_cia(cia, extracted, model, max_blocks, seconds, flags, ipc_stubs, runtime, error, sizeof error);
-        snx_ctr_cia_close(cia);
+            play_game(source, extracted, model, max_blocks, seconds, flags, ipc_stubs, runtime, error, sizeof error);
+        snx_ctr_source_close(source);
         free(extracted);
         return status;
     }
-    snx_ctr_cia_close(cia);
+    snx_ctr_source_close(source);
     /* like the Switch driver: a finished extraction is used again, the extractor publishes only complete ones */
     if (holds_extraction(extracted))
         printf("Using the extraction in %s\n", extracted);
@@ -312,8 +362,8 @@ static char* game_folder(const char* repo, const char* outdir, const char* argv0
     free(exe);
     return resolved;
 }
-/* What the game's .ini (<folder>/<title ID>.ini) says: the CIA it plays (source=), *source the caller's, NULL without
-   one, and the console (model=), *model kept without one. False only when it cannot be read */
+/* What the game's .ini (<folder>/<title ID>.ini) says: the game it plays (source=), *source the caller's, NULL
+   without one, and the console (model=), *model kept without one. False only when it cannot be read */
 static bool read_game_ini(const char* folder, char** source, SnxCtrModel* model) {
     char *path = snx_ctr_game_file(folder, ".ini"), *key, *value;
     size_t size;
@@ -347,7 +397,7 @@ static bool write_game_ini(const char* folder, const char* source, SnxCtrModel m
     free(path);
     return written;
 }
-/* An older version kept the game's state (saves, SD card) in work/3ds/<the CIA's name>: moved into the game's new
+/* An older version kept the game's state (saves, SD card) in work/3ds/<the game's name>: moved into the game's new
    folder the first time, which is made then */
 static void move_old_folder(const char* old, const char* folder) {
     if (!old || snx_is_link(old) || !snx_is_dir(old) || snx_path_exists(folder)) return;
@@ -515,13 +565,13 @@ int snx_ctr_main(int argc, char** argv) {
     if (network_data) snx_ctr_uds_settings(network_data);
     free(network_data);
     free(runtime_dir);
-    SnxCtrCia* cia = NULL;
+    SnxCtrSource* source = NULL;
     int status;
     if (folder) {
-        /* the game its .ini names: an extraction its folder holds, else the CIA */
-        char* source = NULL;
+        /* the game its .ini names: an extraction its folder holds, else the game itself */
+        char* named = NULL;
         SnxCtrModel recorded = model;
-        if (!read_game_ini(folder, &source, &recorded)) {
+        if (!read_game_ini(folder, &named, &recorded)) {
             fprintf(stderr, "scarletnx-3ds: cannot read the game's .ini in %s\n", folder);
             free(runtime);
             free(folder);
@@ -530,27 +580,26 @@ int snx_ctr_main(int argc, char** argv) {
         if (!model_set) model = recorded;
         if (holds_extraction(folder))
             extract_container = true;
-        else if (!source) {
+        else if (!named) {
             fprintf(stderr,
-                    "scarletnx-3ds: %s holds no game: its .ini names no CIA (source=). Play the CIA again "
+                    "scarletnx-3ds: %s holds no game: its .ini names no game (source=). Play the game again "
                     "(scarletnx-3ds game.cia) to make its folder\n",
                     folder);
             free(runtime);
             free(folder);
             return 2;
         } else if (!extract_container && !extract_only) {
-            SnxCtrExtractResult opened = snx_ctr_cia_open(source, &cia, error, sizeof error);
+            SnxCtrExtractResult opened = snx_ctr_source_open(named, &source, error, sizeof error);
             if (opened != SNX_CTR_EXTRACT_OK) {
                 fprintf(stderr, "scarletnx-3ds: %s\n", error);
-                free(source);
                 free(runtime);
                 free(folder);
                 return opened == SNX_CTR_EXTRACT_UNSUPPORTED ? 3 : 1;
             }
         }
-        status = play(source, cia, folder, model, max_blocks, seconds, recompile, extract_only, extract_container,
+        status = play(named, source, folder, model, max_blocks, seconds, recompile, extract_only, extract_container,
                       ipc_stubs, runtime);
-        free(source);
+        free(named);
         free(runtime);
         return status;
     }
@@ -560,7 +609,7 @@ int snx_ctr_main(int argc, char** argv) {
         free(runtime);
         return 2;
     }
-    const char* refused = !cia_path(input)          ? "is not a .cia file"
+    const char* refused = !game_path(input)         ? "is not a game of this system"
                           : !snx_path_exists(input) ? "does not exist"
                           : !snx_is_file(input)     ? "is not a file"
                                                     : NULL;
@@ -570,7 +619,7 @@ int snx_ctr_main(int argc, char** argv) {
         return 2;
     }
     /* The decryption is kept beside the game's folder named by --output, else in the data folder's work/3ds, where
-       an older version kept the game's folder, named after the CIA */
+       an older version kept the game's folder, named after the game */
     char* old = NULL;
     if (!output) {
         char *work = work_folder(repo, argv[0]), *name = snx_dump_name(input);
@@ -583,14 +632,14 @@ int snx_ctr_main(int argc, char** argv) {
         }
     }
     char* readable = NULL;
-    int decrypted = readable_cia(input, output ? output : old, keys, &readable);
+    int decrypted = readable_game(input, output ? output : old, keys, &readable);
     if (decrypted) {
         free(old);
         free(runtime);
         return decrypted;
     }
     printf("Reading %s\n", readable);
-    SnxCtrExtractResult opened = snx_ctr_cia_open(readable, &cia, error, sizeof error);
+    SnxCtrExtractResult opened = snx_ctr_source_open(readable, &source, error, sizeof error);
     if (opened != SNX_CTR_EXTRACT_OK) {
         fprintf(stderr, "scarletnx-3ds: %s\n", error);
         free(readable);
@@ -603,7 +652,7 @@ int snx_ctr_main(int argc, char** argv) {
         folder = snx_strdup(output); /* as given: the extractor refuses links on the way to it */
     else {
         char title[17];
-        snprintf(title, sizeof title, "%016" PRIX64, snx_ctr_cia_title(cia));
+        snprintf(title, sizeof title, "%016" PRIX64, snx_ctr_source_title(source));
         folder = game_folder(repo, outdir, argv[0], title);
         if (folder) move_old_folder(old, folder);
     }
@@ -615,13 +664,13 @@ int snx_ctr_main(int argc, char** argv) {
     }
     bool made = folder && !extract_only && !snx_is_link(folder) && !snx_mkdirs(folder);
     if (!folder || (made && !write_game_ini(folder, readable, model))) {
-        snx_ctr_cia_close(cia);
+        snx_ctr_source_close(source);
         free(folder);
         free(readable);
         free(runtime);
         return 1;
     }
-    status = play(readable, cia, folder, model, max_blocks, seconds, recompile, extract_only, extract_container,
+    status = play(readable, source, folder, model, max_blocks, seconds, recompile, extract_only, extract_container,
                   ipc_stubs, runtime);
     free(readable);
     free(runtime);

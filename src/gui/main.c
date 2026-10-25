@@ -507,7 +507,7 @@ typedef struct App {
    translated */
 #define GUI_ENTRY(item) (UI_MENU_ENTRIES_LOAD_SWITCH_NSP_XCI_NRO + (item))
 typedef char gui_entries_in_order
-    [GUI_ENTRY(GUI_LINUX) == UI_MENU_ENTRIES_LOAD_LINUX_ARM_ELF && GUI_ENTRY(GUI_3DS) == UI_MENU_ENTRIES_LOAD_3DS_CIA &&
+    [GUI_ENTRY(GUI_LINUX) == UI_MENU_ENTRIES_LOAD_LINUX_ARM_ELF && GUI_ENTRY(GUI_3DS) == UI_MENU_ENTRIES_LOAD_3DS_GAME &&
              GUI_ENTRY(GUI_VITA) == UI_MENU_ENTRIES_LOAD_VITA_VPK &&
              GUI_ENTRY(GUI_GBA) == UI_MENU_ENTRIES_LOAD_GBA_ROM &&
              GUI_ENTRY(GUI_KEYS) == UI_MENU_ENTRIES_INSTALL_KEYS &&
@@ -4592,7 +4592,7 @@ typedef struct {
 static const char* item_about(const App* app, int item) {
     static const char* const loads[] = {SNX_TR_NOOP("Recompiles a game's .nsp, .xci or .nro, then runs it"),
                                         SNX_TR_NOOP("Runs a Linux ARM program, 64 or 32-bit"),
-                                        SNX_TR_NOOP("Recompiles a 3DS .cia, then runs it"),
+                                        SNX_TR_NOOP("Recompiles a 3DS game, then runs it"),
                                         SNX_TR_NOOP("Recompiles a PS Vita homebrew .vpk, then runs it"),
                                         SNX_TR_NOOP("Runs a GBA ROM on the emulated AGB board")};
     if (item >= GUI_SWITCH && item <= GUI_GBA) return snx_tr(loads[item - GUI_SWITCH]);
@@ -4818,7 +4818,7 @@ void ui_games_grid_tiles_row_action_cb(App* app, size_t row, uint32_t hit) {
 /* the focused row of Games: what it is, about it, and a line more for a recent game's or a game's kind */
 static bool game_was_old(const App* app, const char* path);
 static int row_driver(const GuiGames* games, size_t i);
-/* a 3DS CIA, a Vita VPK or a GBA ROM: a console's package its driver makes a game of */
+/* a 3DS game, a Vita VPK or a GBA ROM: a console's package its driver makes a game of */
 static bool package(const char* name) { return gui_is_cia(name) || gui_is_vpk(name) || gui_is_gba(name); }
 /* a made game's kind, by the console its folder says */
 static const char* ready_kind(int driver) {
@@ -4837,7 +4837,7 @@ static void game_kind(const App* app, const GuiGames* games, size_t i, char* kin
                  games->addons[i]);
     else
         snprintf(kind, size, "%s",
-                 gui_is_cia(name)    ? snx_tr("3DS CIA, opened with scarletnx-3ds")
+                 gui_is_cia(name)    ? snx_tr("3DS game, opened with scarletnx-3ds")
                  : gui_is_vpk(name)  ? snx_tr("Vita VPK, opened with scarletnx-vita")
                  : gui_is_gba(name)  ? snx_tr("GBA ROM, played with scarletnx-agb")
                  : gui_is_dump(name) ? snx_tr("A dump, prepared when it runs")
@@ -4859,7 +4859,7 @@ static void recent_kind(const App* app, const GuiRecentGame* r, char* kind, size
     snprintf(kind, size, "%s",
              r->driver == GUI_LINUX  ? snx_tr("Linux ARM ELF, run with scarletnx-gnuabi")
              : r->prepared           ? ready_kind(r->driver)
-             : r->driver == GUI_3DS  ? snx_tr("3DS CIA, opened with scarletnx-3ds")
+             : r->driver == GUI_3DS  ? snx_tr("3DS game, opened with scarletnx-3ds")
              : r->driver == GUI_VITA ? snx_tr("Vita VPK, opened with scarletnx-vita")
              : r->driver == GUI_GBA  ? snx_tr("GBA ROM, played with scarletnx-agb")
              : gui_is_dump(r->path)  ? snx_tr("A dump, prepared when it runs")
@@ -11577,7 +11577,7 @@ static void menu_entry(App* app, int item, uint32_t hit) {
 }
 void ui_menu_entries_load_switch_nsp_xci_nro_action_cb(App* app, uint32_t hit) { menu_entry(app, GUI_SWITCH, hit); }
 void ui_menu_entries_load_linux_arm_elf_action_cb(App* app, uint32_t hit) { menu_entry(app, GUI_LINUX, hit); }
-void ui_menu_entries_load_3ds_cia_action_cb(App* app, uint32_t hit) { menu_entry(app, GUI_3DS, hit); }
+void ui_menu_entries_load_3ds_game_action_cb(App* app, uint32_t hit) { menu_entry(app, GUI_3DS, hit); }
 void ui_menu_entries_load_vita_vpk_action_cb(App* app, uint32_t hit) { menu_entry(app, GUI_VITA, hit); }
 void ui_menu_entries_load_gba_rom_action_cb(App* app, uint32_t hit) { menu_entry(app, GUI_GBA, hit); }
 void ui_menu_entries_install_keys_action_cb(App* app, uint32_t hit) { menu_entry(app, GUI_KEYS, hit); }

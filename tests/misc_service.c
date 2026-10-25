@@ -572,9 +572,46 @@ static void test_npad_players(SvcObj* h) {
     CHECK(npad_style_at(1) == 1u << 3 && npad_style_at(2) == 1u << 4);
     set_ids(h, first_ids, 5);
 }
+/* the global Npad condition at the end of the shared block: the SDK's GetNpadJoyHoldType reads it (and failed with
+   0x58CCA when the block was zeroed); SetNpadJoyHoldType (120) moves it and GetNpadJoyHoldType (121) reads the same */
+static u32 npad_condition(u32 off) {
+    return snx_ld_le32(kshmem_ptr(g_hle.hid.shm) + HO_HidSharedMemory_npad_condition + off);
+}
+static void set_joy_hold_type(SvcObj* h, u64 aruid, u64 hold_type) {
+    Request r;
+    request(&r, 120);
+    r.c.has_pid = 1;
+    argument64(&r, 0, aruid);
+    argument64(&r, 8, hold_type);
+    call(h, &r);
+}
+static u64 get_joy_hold_type(SvcObj* h, u64 aruid) {
+    Request r;
+    request(&r, 121);
+    r.c.has_pid = 1;
+    argument64(&r, 0, aruid);
+    call(h, &r);
+    CHECK(r.c.out_size == 8);
+    return snx_ld_le64(r.c.out);
+}
+static void test_npad_condition(SvcObj* h) {
+    u64 hold = (u64)g_hle.hid.hold;
+    CHECK(npad_condition(HO_HidNpadCondition_is_initialized) == 1);
+    CHECK(npad_condition(HO_HidNpadCondition_is_valid) == 1);
+    CHECK(npad_condition(HO_HidNpadCondition_hold_type) == (u32)hold);
+    set_joy_hold_type(h, 0x55, 1);
+    CHECK(g_hle.hid.hold == 1 && npad_condition(HO_HidNpadCondition_hold_type) == 1);
+    CHECK(get_joy_hold_type(h, 0x55) == 1);
+    set_joy_hold_type(h, 0x55, 0);
+    CHECK(g_hle.hid.hold == 0 && npad_condition(HO_HidNpadCondition_hold_type) == 0);
+    CHECK(get_joy_hold_type(h, 0x55) == 0);
+    set_joy_hold_type(h, 0x55, hold);
+    CHECK(npad_condition(HO_HidNpadCondition_hold_type) == (u32)hold);
+}
 static void test_hid(void) {
     svc_hid_init();
     SvcObj* h = new_hid();
+    test_npad_condition(h);
     for (int i = 0; i < 2; i++) {
         hid_update();
         check_npad_latest_sample(0, HO_HidNpadInternalState_full_key_lifo, g_hle.hid.samp);

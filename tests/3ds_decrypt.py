@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright 2026 the ScarletNX contributors
 """An application CIA encrypted at both layers, as a retail one is, with keys made up for the test, decrypted by the
-driver (snx_ctr_cia_decrypt) and extracted: its extraction is the plain CIA's. The layers as 3dbrew documents them:
+driver (snx_ctr_decrypt) and extracted: its extraction is the plain CIA's. The layers as 3dbrew documents them:
 each content AES-CBC under the ticket's title key (itself AES-CBC under the common key), and the NCCH's AES-CTR, the
 ExHeader, ExeFS header, icon and banner under the primary key (slot 0x2C) and the rest under the secondary one the
 crypto method names, every normal key the key scrambler of a KeyX and KeyY."""
@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 
-from ctr_fixtures import TITLE, cia, ncch, put
+from ctr_fixtures import TITLE, cia, ncsd, ncch, put, titled, UPDATE_TITLE
 
 try:
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -132,8 +132,8 @@ def main():
         root = Path(temp)
         env = {**os.environ, 'HOME': str(root), 'USERPROFILE': str(root)}
 
-        def run(name, blob, keys, status, message):
-            source = root / f'{name}.cia'
+        def run(name, blob, keys, status, message, extension='cia'):
+            source = root / f'{name}.{extension}'
             source.write_bytes(blob)
             args = [driver, '-x', '--output', str(root / name)] + (['--keys', str(keys)] if keys else []) + [str(source)]
             p = subprocess.run(args, capture_output=True, text=True, cwd=root, timeout=60, env=env)
@@ -156,8 +156,8 @@ def main():
         }
         decrypted_cia = (root / 'encrypted.decrypted.cia').read_bytes()
         assert len(decrypted_cia) == len(encrypted)
-        # The decrypted CIA is taken as it is the next time, not decrypted again
-        assert 'Using the decrypted CIA' in subprocess.run(
+        # The decrypted copy is taken as it is the next time, not decrypted again
+        assert 'Using the decrypted copy' in subprocess.run(
             [driver, '-x', '--keys', str(keys), '--output', str(root / 'encrypted'), str(root / 'encrypted.cia')],
             capture_output=True, text=True, cwd=root, timeout=60, env=env,
         ).stdout
@@ -171,7 +171,75 @@ def main():
         assert p.returncode and not (root / 'wrong').exists(), p.stdout + p.stderr
         # Without keys the driver says where it looked
         run('nokeys', encrypted, None, 3, 'no 3DS keys')
-    print('CTR CIA and NCCH decryption: both layers taken off with synthetic keys, extraction equal to the plain one')
+        # A cartridge image and a bare NCCH have no CIA layer: their NCCHs' own is taken off where each lies, the
+        # whole image copied through, the game partition and an update partition both
+        def files(folder):
+            return {p2.relative_to(folder).as_posix(): p2.read_bytes() for p2 in sorted(folder.rglob('*')) if p2.is_file()}
+
+        uh, ud = titled(UPDATE_TITLE)
+        update = ncch(patch_header=uh, patch_exheader=ud)
+        game = ncch()
+        plain_cci = ncsd(game=game)
+        plain_card_update = ncsd(game=game, update=update)
+        encrypted_game = encrypt_ncch(game)
+        encrypted_update = encrypt_ncch(update)
+        for name, blob, extension in [
+            ('card', ncsd(game=encrypted_game), 'cci'),
+            ('card-update', ncsd(game=encrypted_game, update=encrypted_update), 'cci'),
+            ('card-cxi', encrypt_ncch(game), 'cxi'),
+        ]:
+            plain = {'card': plain_cci, 'card-update': plain_card_update, 'card-cxi': game}[name]
+            plain_name = 'plain-' + name
+            run(plain_name, plain, None, 0, 'Extracted', extension=extension)
+            run(name, blob, keys, 0, 'Decrypted', extension=extension)
+            got, want = files(root / name), files(root / plain_name)
+            # the decrypted copy's NCCH signature holds the KeyY that decrypted it, as a console's does; the rest is
+            # the plain image's, byte for byte
+            for entry in got:
+                assert entry in want or entry == 'ncch.bin', (name, entry)
+                if entry == 'ncch.bin' or entry not in want:
+                    continue
+                assert got[entry] == want[entry], (name, entry)
+            assert not (root / f'{name}.decrypted.{extension}').exists() or (
+                root / f'{name}.decrypted.{extension}').read_bytes() != blob
+        assert 'overlay=1' in (root / 'card-update' / 'manifest.ini').read_text()
+        # the decrypted copy is taken as it is the next time, not decrypted again
+        assert 'Using the decrypted copy' in subprocess.run(
+            [driver, '-x', '--keys', str(keys), '--output', str(root / 'card'), str(root / 'card.decrypted.cci')],
+            capture_output=True, text=True, cwd=root, timeout=60, env=env,
+        ).stdout
+        # an image with nothing encrypted is read as it is, and no copy is written
+        p = subprocess.run(
+            [driver, '-x', '--keys', str(keys), '--output', str(root / 'plain-card'), str(root / 'plain-card.cci')],
+            capture_output=True, text=True, cwd=root, timeout=60, env=env,
+        )
+        assert p.returncode == 0 and 'Decrypted' not in p.stdout and not (root / 'plain-card.decrypted.cci').exists(), p.stdout + p.stderr
+        # without keys, and with seed crypto, and with the wrong ones, an encrypted image is refused and nothing published
+        seed = bytearray(ncsd(game=encrypted_game))
+        seed[0x200 + 0x18F] |= 0x20  # the seed bit, which no keys of this loader's take off
+        run('seed', bytes(seed), keys, 3, 'seed', extension='cci')
+        run('card-nokeys', ncsd(game=encrypted_game), None, 3, 'no 3DS keys', extension='cci')
+        # a cartridge's layer takes no common key: its KeyXes are what must be wrong, and garbage fails the
+        # ExHeader's hash, so nothing is published
+        wrong = root / 'wrong_keys.txt'
+        wrong.write_text(
+            f'generatorConstant={KEYS["gen"].hex().upper()}\n'
+            f'slot0x2CKeyX={bytes(16).hex().upper()}\nslot0x25KeyX={bytes(16).hex().upper()}\n'
+        )
+        p = subprocess.run(
+            [driver, '-x', '--keys', str(wrong), '--output', str(root / 'card-wrong'), str(root / 'card.cci')],
+            capture_output=True, text=True, cwd=root, timeout=60, env=env,
+        )
+        assert p.returncode and not (root / 'card-wrong').exists(), p.stdout + p.stderr
+        # the CIA's wrong keys are the common key's, as its title key hangs off it
+        wrong_cia = root / 'wrong_common.txt'
+        keys_file(wrong_cia, common0=bytes(16))
+        p = subprocess.run(
+            [driver, '-x', '--keys', str(wrong_cia), '--output', str(root / 'wrong-cia'), str(root / 'encrypted.cia')],
+            capture_output=True, text=True, cwd=root, timeout=60, env=env,
+        )
+        assert p.returncode and not (root / 'wrong-cia').exists(), p.stdout + p.stderr
+    print('CTR CIA, cartridge image and NCCH decryption: the layers taken off with synthetic keys, extractions equal to the plain ones')
 
 
 if __name__ == '__main__':

@@ -109,21 +109,21 @@ bool snx_ctr_image_load(const char* directory, SnxCtrImage* image, char* error, 
     }
     return image_parse(ex, extracted_code, directory, image, error, error_size);
 }
-/* the .code snx_ctr_cia_open expanded: exactly the size the ExHeader's pages give */
-static bool cia_code(const void* cia, unsigned char* out, size_t size) {
+/* the .code snx_ctr_source_open expanded: exactly the size the ExHeader's pages give */
+static bool source_code(const void* source, unsigned char* out, size_t size) {
     size_t have;
-    const unsigned char* code = snx_ctr_cia_code(cia, &have);
+    const unsigned char* code = snx_ctr_source_code(source, &have);
     if (have != size) return false;
     memcpy(out, code, size);
     return true;
 }
-bool snx_ctr_image_from_cia(const SnxCtrCia* cia, SnxCtrImage* image, char* error, size_t error_size) {
+bool snx_ctr_image_from_source(const SnxCtrSource* source, SnxCtrImage* image, char* error, size_t error_size) {
     if (error_size) error[0] = 0;
     if (!image) return false;
     memset(image, 0, sizeof *image);
-    if (!cia) {
-        if (error_size) snprintf(error, error_size, "no CIA to read the image from");
+    if (!source) {
+        if (error_size) snprintf(error, error_size, "no game to read the image from");
         return false;
     }
-    return image_parse(snx_ctr_cia_exheader(cia), cia_code, cia, image, error, error_size);
+    return image_parse(snx_ctr_source_exheader(source), source_code, source, image, error, error_size);
 }

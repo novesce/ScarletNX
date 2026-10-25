@@ -118,6 +118,9 @@ int vk_window_release(void); /* Renderer.release_window */
 /* logs a failed call with where it happened; evaluates to 1 on success */
 #define VK_OK(call) vk_ok_((call), #call, __FILE__, __LINE__)
 int vk_ok_(VkResult r, const char* what, const char* file, int line);
+/* messages the validation layer's debug messenger logged (0 without vk_validation): a test that enables the layer
+   holds a path to zero more of them */
+extern u32 g_vk_validation_messages;
 /* The renderer's lock, reentrant on the thread that holds it. The outermost vk_unlock, once the lock is let go,
    signals the event slots this thread's syncpoint releases under it reached (vk_release_events): that takes nvdrv's
    nvev_lk and the kernel's lock, so a hold that performs releases is never let go under either */
@@ -413,6 +416,9 @@ typedef struct Surf {
     u32 wgen;       /* render targets: bumped when drawn to */
     u64 wseq;       /* when its image last changed, counted across surfaces: of two over the same bytes, the higher
                        holds them (vk_surf_wrote) */
+    u64 discard_wseq; /* a render target discarded (vk_render_discard) at this wseq: its next pass loads it as
+                         DONT_CARE while nothing wrote it since */
+    u8 discarded;
     u32 drawn_at;   /* render targets: g_vk_present when last drawn to */
     int in_drawn;   /* in surface.c's list of drawn targets, entered at drawn_from */
     u64 drawn_from;
@@ -881,16 +887,15 @@ void vk_pipeline_init(void);
 /* the shader at gva (after a VertexA program at gva_a, or 0). The masks key integer inputs: attributes for the
    vertex stage, textures and render target outputs for the fragment stage. rt_int keys the primitives of the
    tessellation evaluation and geometry stages (ShaderInfo.rt_int_mask). clip: the clip distances the 3D engine
-   enables, and SNX_SH_NOT_LAST (the stages before rasterization). The translator reads ch's bound constant buffers
-   (ch->cbind) to resolve indirect branches. xfb: what transform feedback captures of the last stage before
-   rasterization's outputs (ShaderInfo.xfb), NULL for none. p: the programs' state that keys a fragment program (its
-   early fragment tests) and a geometry program (its passthrough mask), NULL for none */
-VkSh* vk_shader_get(const GpuChannel* ch, const DsPrograms* p, u64 gva, u64 gva_a, int stage, u64 int_mask,
-                    u64 sint_mask, u32 rt_int, u32 rt_sint, u32 clip, u64 dc_color, u32 dc_funcs, u32 unfed,
-                    const ShXfb* xfb);
-/* whether the constant buffer words s's translation read still hold in ch's bound buffers (vk_shader_get's check on
+   enables, and SNX_SH_NOT_LAST (the stages before rasterization). xfb: what transform feedback captures of the last stage before
+   rasterization's outputs (ShaderInfo.xfb), NULL for none. ds: the draw state whose programs key a fragment program
+   (its early fragment tests) and a geometry program (its passthrough mask), and whose bound constant buffers the
+   translator reads to resolve indirect branches. NULL for none */
+VkSh* vk_shader_get(const DrawState* ds, u64 gva, u64 gva_a, int stage, u64 int_mask, u64 sint_mask, u32 rt_int,
+                    u32 rt_sint, u32 clip, u64 dc_color, u32 dc_funcs, u32 unfed, const ShXfb* xfb);
+/* whether the constant buffer words s's translation read still hold in ds's bound buffers (vk_shader_get's check on
    a hit, for a caller that kept s) */
-int vk_shader_cb_hold(const GpuChannel* ch, const VkSh* s);
+int vk_shader_cb_hold(const DrawState* ds, const VkSh* s);
 typedef struct {
     VkShaderModule vs, fs;
     VkShaderModule tcs, tes, gs; /* tessellation control and evaluation, geometry: VK_NULL_HANDLE when off */
@@ -979,12 +984,13 @@ void vk_render_end(void); /* ends the dynamic rendering pass, if one is open */
    safe is the picture's part clear of the system's bars (gpu/vk/ui.c) */
 void vk_ui_draw(VkCommandBuffer cb, VkImage sc, const int safe[4]);
 void vk_ui_swapchain_gone(void); /* its images' views go before the swapchain does */
-void vk_render_clear(const DrawState* ds, const DrawClear* c, GpuChannel* ch);
+void vk_render_clear(const DrawState* ds, const DrawClear* c, const DrawOwner* o);
 /* viewport index of a draw's state with the resolution scale, and the facing its first viewport gives */
 VkViewport vk_viewport_from(const DsDynamic* d, const DsViewports* v, u32 index);
 VkFrontFace vk_render_front_face(const DsDynamic* d, const DsViewports* v);
-void vk_render_draw_texture(const DrawState* ds, const DrawTexture* t, GpuChannel* ch);
-void vk_render_draw(const DrawState* ds, const DrawCall* dc, GpuChannel* ch);
+void vk_render_draw_texture(const DrawState* ds, const DrawTexture* t);
+void vk_render_discard(const DrawState* ds, u32 targets);
+void vk_render_draw(const DrawState* ds, const DrawCall* dc, DrawOwner* o);
 /* a texture binding, for draws and compute: the view type a declaration takes, the view of t with the header's
    swizzle (VK_NULL_HANDLE when t is NULL or not of the number type num: 0 float, 1 unsigned, 2 signed integer), and
    the header's sampler with the declaration's comparison (integer textures unfiltered). The sampler's t and want,
@@ -1028,6 +1034,9 @@ extern u64 g_vk_draw_kept, g_vk_draw_checked;
    begun again for them (a target's layout, or ordering without those barriers), and draws that sampled a target
    through a copy instead (gpu/vk/render.c) */
 extern u64 g_vk_fb_draws, g_vk_fb_barriers, g_vk_fb_restarts, g_vk_rt_copies;
+/* rendering passes begun; clears recorded as vkCmdClearAttachments; attachments a pass began by clearing (its load
+   op) and by loading as DONT_CARE */
+extern u64 g_vk_passes, g_vk_clear_cmds, g_vk_clear_loads, g_vk_dontcare_loads;
 
 /* gpuprof.c, vk_gpu_profile=1: GPU time per rendering pass, summed per target and logged every 10 s */
 /* the Tracy GPU track's contexts, one per queue: the graphics queue's render passes, the compute queue's batches */

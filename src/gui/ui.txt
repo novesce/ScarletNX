@@ -10,7 +10,7 @@
 		android.row_height = 40px
 		[button]"Load Switch NSP/XCI/NRO" {}
 		[button]"Load Linux ARM ELF" {}
-		[button]"Load 3DS CIA" {}
+		[button]"Load 3DS game" {}
 		[button]"Load Vita VPK" {}
 		[button]"Load GBA ROM" {}
 		[button]"Install Keys" {}

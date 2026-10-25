@@ -3,7 +3,10 @@
 """Synthetic CTR format fixtures. No console assets, keys or signed content."""
 
 import hashlib
+import os
+import shutil
 import struct
+import subprocess
 
 TITLE = 0x0004000001234500
 NONE = 0xFFFFFFFF
@@ -143,6 +146,98 @@ def ncch(
     if patch_header:
         patch_header(header)
     return bytes(header + exheader + exefs + rom)
+
+
+UPDATE_TITLE = (TITLE & 0xFFFFFFFF) | 0x0004000E00000000
+
+
+def titled(tid):
+    """The patches giving an NCCH and its ExHeader another program ID, as an update partition's title has: the
+    NCCH header's at 0x118 and the ExHeader's at 0x200 must both say it, as the loader checks them against each
+    other."""
+
+    def header(h):
+        put(h, 0x118, '<Q', tid)
+
+    def exheader(d):
+        put(d, 0x200, '<Q', tid)
+
+    return header, exheader
+
+
+def ncsd(game=None, update=None, media_size=None, patch=None):
+    """A cartridge image (a CCI): an NCSD header, then partitions in 0x200-byte media units, each an NCCH. The
+    game is partition 0, on the media unit after the header's, as a card lays it out; the update is partition 7
+    when given, and the slots a manual and a DLP child usually hold are zero."""
+    if game is None:
+        game = ncch()
+    body, table = bytearray(), bytearray(0x40)
+    for slot, content in [(0, game)] + ([(7, update)] if update else []):
+        content = content.ljust(align(len(content), 0x200), b'\0')
+        put(table, slot * 8, '<II', (0x200 + len(body)) // 0x200, len(content) // 0x200)
+        body += content
+    header = bytearray(0x200)
+    header[0x100:0x104] = b'NCSD'
+    put(header, 0x104, '<I', (media_size if media_size is not None else 0x200 + len(body)) // 0x200)
+    header[0x110] = 1  # the game partition is a normal one, as a card's is
+    if update is not None:
+        header[0x110 + 7] = 1
+    header[0x120:0x160] = table
+    put(header, 0x180, '<I', 0)  # no additional header: the ExHeaders live in the NCCHs
+    put(header, 0x184, '<I', 0)  # sector zero holds the header itself, as a dump's does
+    if patch:
+        patch(header)
+    return bytes(header + body)
+
+
+def z3ds(blob, patch_header=None):
+    """A z3ds file of blob, as Azahar's launcher keeps one: the 0x20-byte header, then the game as a zstd seekable
+    stream, its seek table after the frame as the skippable frame the format's footer is."""
+    zstd = shutil.which('zstd')
+    assert zstd, 'the zstd CLI is not on PATH'
+    run = subprocess.run([zstd, '-q', '-c'], input=blob, capture_output=True, env={**os.environ, 'ZSTD_CLEVEL': '1'})
+    assert run.returncode == 0, run.stderr
+    frames = run.stdout
+    header = bytearray(0x20)
+    header[0:4] = b'Z3DS'
+    header[8] = 1  # the version, reserved after it
+    put(header, 0xA, '<H', 0x20)  # the header's own size
+    put(header, 0xC, '<I', 0)  # no metadata
+    put(header, 0x10, '<Q', len(frames))
+    put(header, 0x18, '<Q', len(blob))
+    table = struct.pack('<III', 1, len(blob), 1) + struct.pack('<I', 0x8F92EAB1)
+    footer = struct.pack('<II', 0x184D2A5E, len(table)) + table
+    # the header's compressed size is the stream's whole, the seek table's footer with it, as Azahar's writer counts it
+    put(header, 0x10, '<Q', len(frames) + len(footer))
+    if patch_header:
+        patch_header(header)
+    return bytes(header) + frames + footer
+
+
+def tar(*entries, patch=None):
+    """A tar bundle, what Azahar's .bcci/.bcxi/.bcia is: ustar headers of 512 bytes, each entry's data after its
+    header rounded to 512, two zero blocks at the end, every header's checksum set."""
+    out = bytearray()
+    for name, blob in entries:
+        h = bytearray(512)
+        n = name.encode()[:100]
+        h[: len(n)] = n
+        h[100:108] = b'0000644\0'
+        h[108:116] = h[116:124] = b'0000000\0'
+        h[124:136] = f'{len(blob):011o}\0'.encode()
+        h[136:148] = b'00000000000\0'
+        h[148:156] = b' ' * 8  # the checksum, taken over the field as spaces
+        h[156:157] = b'0'
+        h[257:263] = b'ustar\0'
+        h[263:265] = b'00'
+        put(h, 148, '<6sbb', b'%06o' % sum(h), 0, 32)  # six octal digits, NUL, space
+        out += h
+        out += blob
+        out += b'\0' * (-len(blob) % 512)
+    out += bytes(1024)
+    if patch:
+        patch(out)
+    return bytes(out)
 
 
 def cia(

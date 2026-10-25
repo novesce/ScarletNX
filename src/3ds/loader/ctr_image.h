@@ -25,8 +25,8 @@ typedef struct {
    directories. Identity is compatibility/integrity, NOT signature authenticity.
    On failure image is zeroed; free a successful image before reading another. */
 bool snx_ctr_image_load(const char* directory, SnxCtrImage* image, char* error, size_t error_size);
-/* The same image, the same identity, from a CIA read where it lies (snx_ctr_cia_open) */
-struct SnxCtrCia;
-bool snx_ctr_image_from_cia(const struct SnxCtrCia* cia, SnxCtrImage* image, char* error, size_t error_size);
+/* The same image, the same identity, from a game read where it lies (snx_ctr_source_open) */
+struct SnxCtrSource;
+bool snx_ctr_image_from_source(const struct SnxCtrSource* source, SnxCtrImage* image, char* error, size_t error_size);
 void snx_ctr_image_free(SnxCtrImage* image);
 #endif

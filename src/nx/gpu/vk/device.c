@@ -74,11 +74,13 @@ int vk_ok_(VkResult r, const char* what, const char* file, int line) {
     return 0;
 }
 
+u32 g_vk_validation_messages;
 static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBitsEXT sev,
                                                VkDebugUtilsMessageTypeFlagsEXT type,
                                                const VkDebugUtilsMessengerCallbackDataEXT* d, void* user) {
     (void)type;
     (void)user;
+    g_vk_validation_messages++;
     if (sev & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
         WARN("vulkan validation: %s\n", d->pMessage);
     else

@@ -24,7 +24,7 @@ bool ctr_fail(CtrReader* r, SnxCtrExtractResult result, const char* format, ...)
 bool ctr_read(CtrReader* r, CtrSpan span, uint64_t at, void* output, size_t size) {
     if (!ctr_fits(r->size, span.offset, span.size) || !ctr_fits(span.size, at, size))
         return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "truncated or out-of-range archive section");
-    uint64_t offset = span.offset + at;
+    uint64_t offset = r->base + span.offset + at;
     if (r->map) {
         if (size) memcpy(output, r->map + offset, size);
         return true;
@@ -148,6 +148,41 @@ static bool system_link(const char* path) {
     return path[0] == '/' && !strchr(path + 1, '/') && !lstat(path, &st) && st.st_uid == 0;
 #endif
 }
+/* The container by its own header, not its name, as Azahar's Loader::IdentifyFile reads it: an NCSD's magic at
+   0x100, a bare NCCH's at 0x100, a CIA's at 0. A file that is none of them is refused as the container it is not */
+static bool container(CtrReader* r, CtrSource* s) {
+    unsigned char h[0x2020];
+    size_t have = r->size < sizeof h ? (size_t)r->size : sizeof h;
+    if (have < 0x200 || !ctr_read(r, (CtrSpan){0, r->size}, 0, h, have))
+        return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "truncated or out-of-range archive section");
+    /* a bundle first: the game is one of its entries, and everything after reads that entry as the game */
+    bool tar = false;
+    if (!ctr_tar_game(r, &tar)) return false;
+    if (tar) {
+        have = r->size < sizeof h ? (size_t)r->size : sizeof h;
+        if (have < 0x200 || !ctr_read(r, (CtrSpan){0, r->size}, 0, h, have))
+            return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "truncated or out-of-range archive section");
+    }
+    if (!memcmp(h + 0x100, "NCSD", 4)) return ctr_ncsd_load(r, s);
+    if (!memcmp(h + 0x100, "NCCH", 4)) return ctr_ncch_load(r, s);
+    if (have >= 0x2020 && ctr_le32(h) == 0x2020) return ctr_cia_load(r, s);
+    return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT,
+                    "the game is not a CIA, a cartridge image (a CCI or a .3ds) or an NCCH");
+}
+void ctr_source_free(CtrSource* s) {
+    ctr_ncch_free(&s->base);
+    ctr_ncch_free(&s->over);
+    if (s->kind == CTR_KIND_CIA) ctr_cia_free(s);
+    memset(s, 0, sizeof *s);
+}
+bool ctr_source_load(CtrReader* r, CtrSource* s) {
+    memset(s, 0, sizeof *s);
+    if (container(r, s) && ctr_ncch_parse(r, s, &s->base, false) &&
+        (!s->overlay || ctr_ncch_parse(r, s, &s->over, true)))
+        return r->result == SNX_CTR_EXTRACT_OK;
+    ctr_source_free(s);
+    return false;
+}
 static bool no_links(const char* path) {
     char* part = snx_strdup(path);
     bool ok = true;
@@ -166,7 +201,7 @@ static bool no_links(const char* path) {
 SnxCtrExtractResult snx_ctr_extract(const char* input, const char* destination, const char* work, char** published,
                                     char* error, size_t error_size) {
     CtrReader r = {.error = error, .error_size = error_size};
-    CtrCia cia = {0};
+    CtrSource s = {0};
     char *target = NULL, *parent = NULL, *stage = NULL, generated[SNX_PATH_SIZE];
     if (published) *published = NULL;
     if (error_size) error[0] = 0;
@@ -191,12 +226,12 @@ SnxCtrExtractResult snx_ctr_extract(const char* input, const char* destination, 
        with an output given it is not taken (the contents' and ExeFS files' hashes still are, as they are copied) */
     r.quick = destination != NULL;
     bool input_hashed = !r.quick;
-    if (!ctr_cia_load(&r, &cia)) goto done;
+    if (!ctr_source_load(&r, &s)) goto done;
     r.quick = false;
     if (!destination) {
         char hex[65];
-        for (size_t i = 0; i < 32; ++i) snprintf(hex + i * 2, 3, "%02x", cia.input_hash[i]);
-        if (snx_path_format(generated, sizeof generated, "%s/%016" PRIx64 "-%s", work ? work : "work/3ds", cia.title_id,
+        for (size_t i = 0; i < 32; ++i) snprintf(hex + i * 2, 3, "%02x", s.input_hash[i]);
+        if (snx_path_format(generated, sizeof generated, "%s/%016" PRIx64 "-%s", work ? work : "work/3ds", s.title_id,
                             hex)) {
             ctr_fail(&r, SNX_CTR_EXTRACT_IO, "the output path is over %d bytes", SNX_PATH_SIZE - 1);
             goto done;
@@ -222,9 +257,9 @@ SnxCtrExtractResult snx_ctr_extract(const char* input, const char* destination, 
         ctr_fail(&r, SNX_CTR_EXTRACT_IO, "cannot create private staging directory");
         goto done;
     }
-    if (!ctr_cia_contents(&r, &cia, stage) || !ctr_ncch_extract(&r, &cia, stage)) goto done;
+    if ((s.kind == CTR_KIND_CIA && !ctr_cia_contents(&r, &s, stage)) || !ctr_ncch_extract(&r, &s, stage)) goto done;
     /* Detect normal concurrent input edits, including after content validation. */
-    if (input_hashed && !ctr_hash_matches(&r, (CtrSpan){0, r.size}, cia.input_hash)) goto done;
+    if (input_hashed && !ctr_hash_matches(&r, (CtrSpan){0, r.size}, s.input_hash)) goto done;
     if (snx_path_exists(target) || snx_replace(stage, target)) {
         ctr_fail(&r, SNX_CTR_EXTRACT_IO, "cannot publish extraction without overwriting an existing output");
         goto done;
@@ -238,7 +273,7 @@ SnxCtrExtractResult snx_ctr_extract(const char* input, const char* destination, 
 done:
     if (stage) snx_remove_tree(stage);
     if (r.input) fclose(r.input);
-    ctr_cia_free(&cia);
+    ctr_source_free(&s);
     if (target) free(target);
     if (parent) free(parent);
     if (stage) free(stage);

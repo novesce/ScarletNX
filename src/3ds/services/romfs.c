@@ -268,7 +268,7 @@ static uint32_t image32(const SnxCtrRomfs* r, uint64_t at) {
     return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
 }
 /* whether path (relative, '/'-separated UTF-8) names an entry of the image's level-3 tables: the root for "", then
-   each component among the folder's child folders, the last also among its files. snx_ctr_cia_open walked the tables
+   each component among the folder's child folders, the last also among its files. The loader walked the tables
    already; the bounds are checked again all the same */
 static bool image_has(const SnxCtrRomfs* r, const char* path) {
     uint32_t dir_table = image32(r, 12), dir_size = image32(r, 16), file_table = image32(r, 28),

@@ -3084,7 +3084,7 @@ int main(int argc, char** argv) {
     key(&app, SDLK_RIGHT);
     assert(app.menu.selected == GUI_3DS);
     render(&app);
-    shows(&app, "- Load 3DS CIA", yellow);
+    shows(&app, "- Load 3DS game", yellow);
     shows(&app, "- Load Switch NSP/XCI/NRO", normal);
     key(&app, SDLK_RIGHT);
     assert(app.menu.selected == GUI_VITA);
@@ -5625,7 +5625,8 @@ int main(int argc, char** argv) {
                     const char* kind;
                 } unlisted[] = {{"far away.nsp", GUI_SWITCH, "A dump, prepared when it runs"},
                                 {"tool.elf", GUI_LINUX, "Linux ARM ELF, run with scarletnx-gnuabi"},
-                                {"homebrew.cia", GUI_3DS, "3DS CIA, opened with scarletnx-3ds"},
+                                {"homebrew.cia", GUI_3DS, "3DS game, opened with scarletnx-3ds"},
+                                {"card.3ds", GUI_3DS, "3DS game, opened with scarletnx-3ds"},
                                 {"homebrew.vpk", GUI_VITA, "Vita VPK, opened with scarletnx-vita"},
                                 {"homebrew.gba", GUI_GBA, "GBA ROM, played with scarletnx-agb"}};
                 GuiRecent was = app.recent;
@@ -8009,10 +8010,10 @@ int main(int argc, char** argv) {
         app.menu.active = GUI_3DS;
         render(&app);
         b = menu_entry_box(&app, &m, GUI_3DS);
-        text_px_is(&app, b.x + cw / 2, item_text_y(&app, b), "- Load 3DS CIA", rgb(app.theme.active), black);
+        text_px_is(&app, b.x + cw / 2, item_text_y(&app, b), "- Load 3DS game", rgb(app.theme.active), black);
         app.menu.activated = false;
         render(&app);
-        text_px_is(&app, b.x + cw / 2, item_text_y(&app, b), "- Load 3DS CIA", normal, black);
+        text_px_is(&app, b.x + cw / 2, item_text_y(&app, b), "- Load 3DS game", normal, black);
         /* a row taller than a cell and a pixel, as Android's 40px: its text in the middle, not at its top */
         b = gui_rect(b.x, b.y, b.w, 40 * s);
         fill_rect(&app, b, app.theme.page); /* the rows it covers, gone */

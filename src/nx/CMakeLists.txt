@@ -266,6 +266,13 @@ if(BUILD_TESTING AND SNX_TEST_VULKAN)
     add_test(NAME vulkan_headless COMMAND snx-test-vulkan -H)
     set_tests_properties(vulkan_headless PROPERTIES TIMEOUT 60
         FAIL_REGULAR_EXPRESSION "vulkan validation:;failed: VK_ERROR")
+    # VIC only, under the validation layer when it is installed: its job binds the same buffer as a uniform and a
+    # storage buffer, which the layer checks against the buffer's usage flags (VUID-VkWriteDescriptorSet-
+    # descriptorType-00330). Without the layer this is VIC's own checks again.
+    add_test(NAME vulkan_headless_vic_validation COMMAND snx-test-vulkan -H --vk_validation=1)
+    set_tests_properties(vulkan_headless_vic_validation PROPERTIES TIMEOUT 60
+        ENVIRONMENT "SNX_TEST_VIC_ONLY=1"
+        FAIL_REGULAR_EXPRESSION "vulkan validation:;failed: VK_ERROR")
     # the ASTC upload against the CPU decoder, block linear moves on the GPU against bl_offset's layout and texture
     # conversions against the CPU's, with the
     # backend's own frames, staging and allocations and the SPIR-V

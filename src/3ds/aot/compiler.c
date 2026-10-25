@@ -409,7 +409,7 @@ static int by_place(const void* a, const void* b) {
     if (x->mode != y->mode) return x->mode < y->mode ? -1 : 1;
     return (x->index > y->index) - (x->index < y->index);
 }
-int snx_ctr_aot_compile(const char* extracted, const SnxCtrCia* cia, char* error, size_t error_size) {
+int snx_ctr_aot_compile(const char* extracted, const SnxCtrSource* game, char* error, size_t error_size) {
     int result = 1;
     SnxCtrImage image = {0}, check = {0};
     SnxCtrPlan plan = {0};
@@ -421,7 +421,7 @@ int snx_ctr_aot_compile(const char* extracted, const SnxCtrCia* cia, char* error
     const char** command = NULL;
     Work work = {0};
     if (error_size) error[0] = 0;
-    if (!(cia ? snx_ctr_image_from_cia(cia, &image, error, error_size)
+    if (!(game ? snx_ctr_image_from_source(game, &image, error, error_size)
               : snx_ctr_image_load(extracted, &image, error, error_size)))
         goto done;
     if (image.segment[0].bytes > SNX_CTR_AOT_TEXT_LIMIT) {
@@ -577,7 +577,7 @@ int snx_ctr_aot_compile(const char* extracted, const SnxCtrCia* cia, char* error
        are as large as the module) */
     for (unsigned i = 0; i < files; ++i) (void)remove(objects[i]);
     (void)remove(runtime);
-    if (!(cia ? snx_ctr_image_from_cia(cia, &check, error, error_size)
+    if (!(game ? snx_ctr_image_from_source(game, &check, error, error_size)
               : snx_ctr_image_load(directory, &check, error, error_size)))
         goto done; /* its own error says why */
     if (memcmp(image.identity, check.identity, 32)) {

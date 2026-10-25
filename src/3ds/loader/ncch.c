@@ -11,26 +11,38 @@ void ctr_ncch_free(CtrNcch* n) {
     free(n->code);
     n->code = NULL;
 }
-static bool parse(CtrReader* r, const CtrCia* cia, CtrNcch* n) {
+static bool parse(CtrReader* r, const CtrSource* s, CtrNcch* n, bool overlay) {
     unsigned char *h = n->header, *exheader = n->exheader, *exefs = n->exefs;
-    if (!ctr_read(r, cia->boot, 0, h, sizeof n->header)) return false;
+    const CtrSpan boot = overlay ? s->update : s->boot; /* the update NCCH lives in its partition, not the game's */
+    if (!ctr_read(r, boot, 0, h, sizeof n->header)) return false;
     if (memcmp(h + 0x100, "NCCH", 4)) return ctr_fail(r, SNX_CTR_EXTRACT_UNSUPPORTED, "boot content is not NCCH");
     if (h[0x18e] || h[0x18c] != 1)
         return ctr_fail(r, SNX_CTR_EXTRACT_UNSUPPORTED, "unsupported NCCH media unit/platform");
     if (!(h[0x18f] & 4)) return ctr_fail(r, SNX_CTR_EXTRACT_UNSUPPORTED, "encrypted NCCH is not supported");
     if (!(h[0x18d] & 2) || ((h[0x18d] >> 2) & 7))
         return ctr_fail(r, SNX_CTR_EXTRACT_UNSUPPORTED, "boot NCCH is not an executable application");
-    if ((uint64_t)ctr_le32(h + 0x104) * 512 != cia->boot.size || ctr_le64(h + 0x118) != cia->title_id ||
-        ctr_le32(h + 0x180) != 0x400)
+    /* An NCCH's content size and section sizes are in media units of 0x200 bytes, except a proto image's (an early
+       tool's), which counts bytes and matches the file it is in. Azahar's NCCHContainer decides the same way
+       (is_proto) and reads a proto's ExHeader as any other. */
+    unsigned units = ctr_le32(h + 0x104);
+    uint64_t unit = 512;
+    if ((uint64_t)units * unit != boot.size) {
+        if (units != boot.size)
+            return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "NCCH size does not match its container");
+        unit = 1;
+    }
+    n->proto = unit == 1;
+    uint64_t wanted = overlay ? ctr_update_title(s->title_id) : s->title_id;
+    if (ctr_le64(h + 0x118) != wanted || ctr_le32(h + 0x180) != (n->proto ? 0 : 0x400))
         return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "NCCH size/title/ExHeader mismatch");
     CtrSpan regions[4];
     const unsigned offsets[] = {0x190, 0x198, 0x1a0, 0x1b0};
     for (size_t i = 0; i < 4; ++i) {
-        uint64_t at = (uint64_t)ctr_le32(h + offsets[i]) * 512;
-        uint64_t size = (uint64_t)ctr_le32(h + offsets[i] + 4) * 512;
-        if ((size && at < 0xa00) || !ctr_fits(cia->boot.size, at, size))
+        uint64_t at = (uint64_t)ctr_le32(h + offsets[i]) * unit;
+        uint64_t size = (uint64_t)ctr_le32(h + offsets[i] + 4) * unit;
+        if ((size && at < 0xa00) || !ctr_fits(boot.size, at, size))
             return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "invalid NCCH section range");
-        regions[i] = (CtrSpan){cia->boot.offset + at, size};
+        regions[i] = (CtrSpan){boot.offset + at, size};
         for (size_t j = 0; size && j < i; ++j)
             if (regions[j].size && regions[i].offset < regions[j].offset + regions[j].size &&
                 regions[j].offset < regions[i].offset + size)
@@ -39,15 +51,19 @@ static bool parse(CtrReader* r, const CtrCia* cia, CtrNcch* n) {
     CtrSpan exe = regions[2], rom = regions[3];
     if (!exe.size || (!!rom.size == !!(h[0x18f] & 2)))
         return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "missing ExeFS or inconsistent RomFS flag");
-    uint64_t hash_size = (uint64_t)ctr_le32(h + 0x1a8) * 512;
+    uint64_t hash_size = (uint64_t)ctr_le32(h + 0x1a8) * unit;
     if (hash_size < sizeof n->exefs || hash_size > exe.size ||
         !ctr_hash_matches(r, (CtrSpan){exe.offset, hash_size}, h + 0x1c0))
         return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "invalid ExeFS superblock hash/range");
-    if (!ctr_read(r, cia->boot, 0x200, exheader, sizeof n->exheader)) return false;
+    if (!ctr_read(r, boot, 0x200, exheader, sizeof n->exheader)) return false;
     unsigned char hash[32];
     if (!ctr_sha256(r, exheader, 0x400, hash)) return false;
-    if (memcmp(hash, h + 0x160, 32) || ctr_le64(exheader + 0x200) != cia->title_id)
+    if (memcmp(hash, h + 0x160, 32) || ctr_le64(exheader + 0x200) != wanted)
         return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "ExHeader hash/program ID mismatch");
+    if (n->proto) { /* Azahar gives a proto's application the usual priority and the application resource limit */
+        if (!exheader[0x20f]) exheader[0x20f] = 0x30;
+        exheader[0x36f] = 0; /* the ARM11 local capabilities' resource limit category, at 0x200 + 0x16F */
+    }
     CtrSegment* segments = n->segments;
     const unsigned segment_offsets[] = {0x10, 0x20, 0x30};
     uint64_t expected = 0, minimum = 0;
@@ -137,7 +153,7 @@ static bool parse(CtrReader* r, const CtrCia* cia, CtrNcch* n) {
         if (*names[i] && !r->quick && !ctr_hash_matches(r, files[i], exefs + 0x1e0 - i * 32)) return false;
     n->rom = rom;
     if (rom.size) {
-        uint64_t rom_hash_size = (uint64_t)ctr_le32(h + 0x1b8) * 512;
+        uint64_t rom_hash_size = (uint64_t)ctr_le32(h + 0x1b8) * unit;
         if (!rom_hash_size || rom_hash_size > rom.size ||
             !ctr_hash_matches(r, (CtrSpan){rom.offset, rom_hash_size}, h + 0x1e0))
             return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "invalid RomFS superblock hash/range");
@@ -145,13 +161,18 @@ static bool parse(CtrReader* r, const CtrCia* cia, CtrNcch* n) {
     }
     return true;
 }
-bool ctr_ncch_parse(CtrReader* r, const CtrCia* cia, CtrNcch* n) {
+bool ctr_ncch_parse(CtrReader* r, const CtrSource* s, CtrNcch* n, bool overlay) {
     memset(n, 0, sizeof *n);
-    if (parse(r, cia, n)) return true;
+    if (parse(r, s, n, overlay)) return true;
     ctr_ncch_free(n);
     return false;
 }
-bool ctr_ncch_write(CtrReader* r, const CtrCia* cia, const CtrNcch* n, const char* stage) {
+/* the container the game was read from, and whether the game is a cartridge's update, recorded for a player's
+   reference; the image loader ignores it, as it ignores the rest of the manifest */
+static const char* kind_name(CtrKind kind) {
+    return kind == CTR_KIND_CIA ? "cia" : kind == CTR_KIND_CCI ? "cci" : "ncch";
+}
+bool ctr_ncch_write(CtrReader* r, const CtrSource* s, const CtrNcch* n, const char* stage) {
     const CtrSegment* segments = n->segments;
     char* path = snx_path_join(stage, "exefs");
     bool ok = ctr_directory(r, path);
@@ -188,21 +209,23 @@ bool ctr_ncch_write(CtrReader* r, const CtrCia* cia, const CtrNcch* n, const cha
     unsigned char hash[32];
     if (!ctr_sha256(r, n->code, n->code_size, hash)) return false;
     for (size_t i = 0; i < 32; ++i) {
-        if (cia->input_hashed) snprintf(input_hash + 13 + i * 2, 3, "%02x", cia->input_hash[i]);
+        if (s->input_hashed) snprintf(input_hash + 13 + i * 2, 3, "%02x", s->input_hash[i]);
         snprintf(code_hash + i * 2, 3, "%02x", hash[i]);
     }
-    if (cia->input_hashed) { /* the input's hash is taken only when it names the output (snx_ctr_extract) */
+    if (s->input_hashed) { /* the input's hash is taken only when it names the output (snx_ctr_extract) */
         memcpy(input_hash, "input_sha256=", 13);
         input_hash[77] = '\n';
         input_hash[78] = 0;
     }
     char* manifest =
-        snx_format("format=1\nstate=extracted\ntitle_id=%016" PRIx64 "\ntitle_version=%u\n%s"
+        snx_format("format=1\nstate=extracted\ncontainer=%s\noverlay=%u\ntitle_id=%016" PRIx64 "\n"
+                   "title_version=%u\n%s"
                    "code_sha256=%s\nentry=0x%08" PRIx32 "\nstack_size=0x%08" PRIx32 "\nbss_size=0x%08" PRIx32 "\n"
                    "text_address=0x%08" PRIx32 "\ntext_pages=%" PRIu32 "\ntext_bytes=%" PRIu32 "\n"
                    "ro_address=0x%08" PRIx32 "\nro_pages=%" PRIu32 "\nro_bytes=%" PRIu32 "\n"
                    "data_address=0x%08" PRIx32 "\ndata_pages=%" PRIu32 "\ndata_bytes=%" PRIu32 "\n",
-                   cia->title_id, (unsigned)cia->version, input_hash, code_hash, segments[0].address, n->stack,
+                   kind_name(s->kind), s->overlay ? 1 : 0, s->title_id, (unsigned)s->version, input_hash, code_hash,
+                   segments[0].address, n->stack,
                    n->bss, segments[0].address, segments[0].pages, segments[0].bytes, segments[1].address,
                    segments[1].pages, segments[1].bytes, segments[2].address, segments[2].pages, segments[2].bytes);
     path = snx_path_join(stage, "manifest.ini");
@@ -211,10 +234,12 @@ bool ctr_ncch_write(CtrReader* r, const CtrCia* cia, const CtrNcch* n, const cha
     free(manifest);
     return ok;
 }
-bool ctr_ncch_extract(CtrReader* r, const CtrCia* cia, const char* stage) {
+/* The game extracted into stage: the NCCH the container names for it, which is the update's when a cartridge
+   carries one, as the running game's ExHeader and code are */
+bool ctr_ncch_extract(CtrReader* r, const CtrSource* s, const char* stage) {
     CtrNcch n;
-    if (!ctr_ncch_parse(r, cia, &n)) return false;
-    bool ok = ctr_ncch_write(r, cia, &n, stage);
+    if (!ctr_ncch_parse(r, s, &n, s->overlay)) return false;
+    bool ok = ctr_ncch_write(r, s, &n, stage);
     ctr_ncch_free(&n);
     return ok;
 }

@@ -76,7 +76,7 @@ unsigned ui_main_load_list_attr_cb(App* app, size_t row) { return app->active ==
 unsigned ui_main_load_list_load_switch_attr_cb(App* app) {
     return app->keys_missing ? UI_ATTR_FAILURE | UI_ATTR_BLINK : 0;
 }
-void ui_main_load_list_load_3ds_cia_action_cb(App* app, uint32_t hit) { called(app, LOAD_3DS, hit, 0); }
+void ui_main_load_list_load_3ds_game_action_cb(App* app, uint32_t hit) { called(app, LOAD_3DS, hit, 0); }
 #ifdef SDL_PLATFORM_ANDROID
 void ui_main_load_list_open_data_folder_action_cb(App* app, uint32_t hit) { called(app, DATA, hit, 0); }
 #endif
@@ -200,7 +200,7 @@ static void test_draw(void) {
     is(d[0].r, 14, 24, 392, 17);
     assert(!strcmp(d[1].text, "Load Switch") && !d[1].focused && !d[1].attr); /* its attr_cb: keys in use */
     is(d[1].r, 14, 51, 200, 17);                                              /* max_row_width */
-    assert(!strcmp(d[2].text, "Load 3DS CIA") && d[2].focused);
+    assert(!strcmp(d[2].text, "Load 3DS game") && d[2].focused);
     is(d[2].r, 14, 70, 200, 17);
     is(ui_main_row(r, 1, UI_MAIN_LOAD_LIST, 1), 14, 70, 200, 17);       /* as drawn */
     is(ui_main_row(r, 1, UI_MAIN_GAMES, 3), 14, 154 + 3 * 19, 300, 17); /* max_row_width */
@@ -226,7 +226,7 @@ static void test_draw(void) {
     lists[UI_MAIN_GAMES].first = 1;
     g_gui_ui.ndrawn = 0;
     ui_main_draw(&app, r, 1, lists);
-    assert(!strcmp(d[1].text, "Load 3DS CIA") && d[1].focused && d[1].attr == UI_ATTR_MORE_UP);
+    assert(!strcmp(d[1].text, "Load 3DS game") && d[1].focused && d[1].attr == UI_ATTR_MORE_UP);
 #ifdef SDL_PLATFORM_ANDROID
     assert(!strcmp(d[3].text, "Settings") && d[3].attr == UI_ATTR_MORE_DOWN);
 #else
@@ -279,7 +279,7 @@ static void test_hit(void) {
     ui_main_layout(gui_rect(10, 20, 400, 300), 1, r);
     /* a row of LoadList: its button, and the bits of the event */
     assert(ui_main_hit(&app, r, 1, lists, 20, 75, UI_HIT_CLICK, &item, &row) == (UI_HIT_HOVER | UI_HIT_CLICK));
-    assert(item == UI_MAIN_LOAD_LIST_LOAD_3DS_CIA && row == 1);
+    assert(item == UI_MAIN_LOAD_LIST_LOAD_3DS_GAME && row == 1);
     ui_main_act(&app, item, row, UI_HIT_CLICK);
     assert(app.calls[LOAD_3DS] == 1 && app.hits[LOAD_3DS] == UI_HIT_CLICK);
     /* past max_row_width: no row there, in a list with items or without */

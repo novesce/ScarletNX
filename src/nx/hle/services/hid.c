@@ -109,6 +109,14 @@ static u32 hid_style_of(int e, const HidSource* s) {
 }
 
 static void w32(u8* p, u32 v) { snx_st_le32(p, v); }
+/* the global condition at the end of the block: initialized and valid, so the SDK's GetNpadJoyHoldType answers
+   instead of failing with 0x58CCA before any Npad has a state */
+static void hid_write_condition(void) {
+    u8* c = kshmem_ptr(g_hle.hid.shm) + HO_HidSharedMemory_npad_condition;
+    w32(c + HO_HidNpadCondition_is_initialized, 1);
+    w32(c + HO_HidNpadCondition_hold_type, (u32)g_hle.hid.hold);
+    w32(c + HO_HidNpadCondition_is_valid, 1);
+}
 /* an Npad's header for its new style: colors, assignment, device type, properties, as the console sets them */
 static void hid_write_header(int e, u32 style) {
     u8* n = hid_npad(e);
@@ -560,6 +568,7 @@ static int nn_hid_IHidServer_SetNpadJoyHoldType(SvcObj* self, u64 aruid, nn_hid_
     pm_lock(&g_hle.hid.lock);
     g_hle.hid.hold = hold_type;
     hid_layout();
+    hid_write_condition();
     pm_unlock(&g_hle.hid.lock);
     R_SUCCEED();
 }
@@ -808,6 +817,7 @@ void svc_hid_init(void) {
     g_hle.hid.supported_ids = (1u << HID_ENTRIES) - 1;
     pm_lock(&g_hle.hid.lock);
     hid_layout();
+    hid_write_condition();
     pm_unlock(&g_hle.hid.lock);
     /* the LIFOs hold states before the game's first look, as the console's have been sampling since boot */
     hid_update();

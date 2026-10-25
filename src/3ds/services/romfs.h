@@ -10,11 +10,11 @@ typedef struct SnxCtrRomfs SnxCtrRomfs;
 /* Builds the CTR level-3 view over the tree's "romfs" child, shared read-only
    and always open like NX's romfs/exefs. The tree is owned by the process and
    outlives the view; missing romfs/ is genuinely absent (*out stays NULL).
-   No CIA is reopened. */
+   No game is reopened. */
 bool snx_ctr_romfs_open(FsTree* tree, SnxCtrRomfs** out);
-/* The view over a level-3 image read where it lies (snx_ctr_cia_romfs), which
+/* The view over a level-3 image read where it lies (snx_ctr_source_romfs), which
    outlives the view: reads copy from it, and every entry's timestamp is mtime,
-   the CIA's (UTC Unix milliseconds). image NULL: the empty RomFS (a CIA with
+   the game's (UTC Unix milliseconds). image NULL: the empty RomFS (a game with
    none), as an empty romfs/ folder serializes. False for an image too small
    or too large */
 bool snx_ctr_romfs_open_image(const unsigned char* image, uint64_t size, uint64_t mtime, SnxCtrRomfs** out);

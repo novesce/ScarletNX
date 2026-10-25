@@ -240,6 +240,9 @@ if(TARGET snx_ctr_board)
             target_link_libraries(snx-test-3ds-container PRIVATE snx_ctr_process)
             add_test(NAME 3ds_container COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/3ds_container.py"
                 "${SNX_CTR_PROGRAM}" $<TARGET_FILE:snx-test-3ds-container>)
+            # a cartridge image or a bare NCCH against its extraction, and the update partition played as the update
+            add_test(NAME 3ds_cci COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/3ds_cci.py"
+                "${SNX_CTR_PROGRAM}" $<TARGET_FILE:snx-test-3ds-container>)
             set(snx_ctr_extract_test_args "")
 
             set(snx_ctr_extract_test_args --aot)
@@ -1567,6 +1570,12 @@ add_executable(snx-test-render-enable render_enable.c "${PROJECT_SOURCE_DIR}/src
     "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/draw_state.c")
 snx_test_target(snx-test-render-enable 23)
 add_test(NAME render_enable COMMAND snx-test-render-enable)
+
+add_executable(snx-test-draw-state-groups draw_state_groups.c "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/engines.c"
+    "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/maxwell3d.c" "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/write_pages.c"
+    "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/draw_state.c")
+snx_test_target(snx-test-draw-state-groups 23)
+add_test(NAME draw_state_groups COMMAND snx-test-draw-state-groups)
 
 add_executable(snx-test-clear-flags clear_flags.c)
 snx_test_target(snx-test-clear-flags 23)

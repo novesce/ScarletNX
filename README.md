@@ -94,8 +94,11 @@ Enter or hover and click, then choose drag-and-drop or the paginated `games/` br
 The GUI shows live driver/game
 output and combined CPU/RAM usage. See [GUI launcher](docs/GUI.md).
 
-The experimental `scarletnx-3ds` driver and **Load 3DS CIA** menu entry support
-decrypted application CIA extraction (`scarletnx-3ds -x game.cia`) and an independent
+The experimental `scarletnx-3ds` driver and **Load 3DS game** menu entry support
+encrypted or decrypted application CIAs (`scarletnx-3ds -x game.cia`), cartridge
+images (`game.cci`, `game.3ds`), bare NCCHs (`game.cxi`), a bundle or a z3ds
+compressed game of any of them, an update partition
+played as the update, and an independent
 page-based memory controller. It runs the extracted titles through an experimental
 **extract -> offline AOT -> native run** pipeline on 64-bit Linux and Windows, using an
 explicit ARM11/checked-memory profile without changing shared A57 defaults.

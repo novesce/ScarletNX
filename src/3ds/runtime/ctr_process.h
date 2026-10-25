@@ -19,7 +19,7 @@ SnxCtrProcess* snx_ctr_process_new(const SnxCtrImage* image, SnxCtrModel model);
 bool snx_ctr_process_mount_fs(SnxCtrProcess* process, const char* directory);
 /* The same, with nothing extracted: directory is the title's state folder (sdmc/), and the RomFS is the CIA's,
    read where it lies. The CIA stays open while the process is */
-bool snx_ctr_process_mount_cia(SnxCtrProcess* process, const char* directory, const SnxCtrCia* cia);
+bool snx_ctr_process_mount_source(SnxCtrProcess* process, const char* directory, const SnxCtrSource* game);
 void snx_ctr_process_free(SnxCtrProcess* process);
 SnxArmCPU* snx_ctr_process_cpu(SnxCtrProcess* process);
 SnxCtrAddressSpace* snx_ctr_process_space(SnxCtrProcess* process);

@@ -9,10 +9,10 @@ add_library(snx_ctr_memory STATIC memory/memory.c memory/host.c)
 target_link_libraries(snx_ctr_memory PUBLIC snx_ctr_board scarletnx-common)
 add_library(snx_ctr_cpu STATIC cpu/cpu.c)
 target_link_libraries(snx_ctr_cpu PUBLIC snx_ctr_memory)
-add_library(snx_ctr_loader STATIC loader/loader.c loader/cia.c loader/ncch.c loader/romfs.c loader/blz.c loader/image.c
-            loader/mapped.c loader/decrypt.c)
-# the CIA read where it lies is mapped as the indexed filesystem maps the files it shares (plat_file_share)
-target_link_libraries(snx_ctr_loader PUBLIC scarletnx-common scarletnx-filesystem OpenSSL::Crypto)
+add_library(snx_ctr_loader STATIC loader/loader.c loader/cia.c loader/ncsd.c loader/ncch.c loader/romfs.c loader/blz.c
+            loader/tar.c loader/z3ds.c loader/image.c loader/mapped.c loader/decrypt.c)
+# a game read where it lies is mapped as the indexed filesystem maps the files it shares (plat_file_share)
+target_link_libraries(snx_ctr_loader PUBLIC scarletnx-common scarletnx-filesystem OpenSSL::Crypto snx_zstd)
 target_compile_definitions(snx_ctr_loader PRIVATE _FILE_OFFSET_BITS=64 _CRT_SECURE_NO_WARNINGS)
 add_library(snx_ctr_process STATIC runtime/process.c kernel/kernel.c kernel/thread.c aot/dispatch.c ipc/ipc.c services/srv.c services/fs.c services/apt.c services/ptm.c services/hid.c services/romfs.c services/file.c services/gsp.c services/dsp.c services/cfg.c services/system.c services/am.c services/y2r.c)
 # the system archives' stand-ins (cmake/ctr_system_archives.cmake), which services/fs.c serves through the NCCH archive

@@ -238,12 +238,12 @@ fail:
 /* One NX-style shared tree over the extracted title directory: romfs and
    exefs are shared read-only and always open; sdmc is the read-write area,
    created on demand. The process owns the tree. */
-static bool mount(SnxCtrProcess* p, const char* directory, const SnxCtrCia* cia);
+static bool mount(SnxCtrProcess* p, const char* directory, const SnxCtrSource* game);
 bool snx_ctr_process_mount_fs(SnxCtrProcess* p, const char* directory) { return mount(p, directory, NULL); }
 /* Without an extraction: the tree is the title's state folder (sdmc/ and what the driver keeps there), and the RomFS
-   is the CIA's level 3 read where it lies */
-bool snx_ctr_process_mount_cia(SnxCtrProcess* p, const char* directory, const SnxCtrCia* cia) {
-    return cia && mount(p, directory, cia);
+   is the game's level 3 read where it lies */
+bool snx_ctr_process_mount_source(SnxCtrProcess* p, const char* directory, const SnxCtrSource* game) {
+    return game && mount(p, directory, game);
 }
 /* The SMDH's short title, for the window: one of the 16 languages' 0x200-byte entries (short title, 0x40 UTF-16LE
    units, then the long one and the publisher), English (1) first, then the others in order, as UTF-8 */
@@ -278,7 +278,7 @@ static void smdh_title(const unsigned char* smdh, char out[192]) {
         out[n] = 0;
     }
 }
-static bool mount(SnxCtrProcess* p, const char* directory, const SnxCtrCia* cia) {
+static bool mount(SnxCtrProcess* p, const char* directory, const SnxCtrSource* game) {
     if (!p || !directory || !*directory || p->tree) return false;
     FsTree* tree = calloc(1, sizeof *tree);
     if (!tree) return false;
@@ -291,22 +291,22 @@ static bool mount(SnxCtrProcess* p, const char* directory, const SnxCtrCia* cia)
     pm_lock(&tree->lock);
     FsShare share = {0};
     bool ok = true;
-    for (unsigned i = 0; i < 2 && ok && !cia; ++i) {
+    for (unsigned i = 0; i < 2 && ok && !game; ++i) {
         FsNode* node = NULL;
         if (!fs_tree_lookup(tree, NULL, i ? "exefs" : "romfs", &node)) ok = !fs_tree_share(tree, node, &share);
     }
     pm_unlock(&tree->lock);
-    if (cia) {
+    if (game) {
         uint64_t size;
-        const unsigned char* image = snx_ctr_cia_romfs(cia, &size);
+        const unsigned char* image = snx_ctr_source_romfs(game, &size);
         /* a CIA without a RomFS reads as an empty one, as its extraction's empty romfs/ folder does */
-        ok = ok && snx_ctr_romfs_open_image(image, size, snx_ctr_cia_mtime(cia), &p->romfs);
+        ok = ok && snx_ctr_romfs_open_image(image, size, snx_ctr_source_mtime(game), &p->romfs);
         /* the ExeFS files SelfNCCH serves (services/fs.c), in the tree as an extraction's exefs/ has them: copies of
            the CIA's sections, read-only and never on the host */
         static const char* const sections[] = {"icon", "logo", "banner"};
         pm_lock(&tree->lock);
         for (unsigned i = 0; i < 3 && ok; ++i) {
-            const unsigned char* data = snx_ctr_cia_exefs(cia, sections[i], &size);
+            const unsigned char* data = snx_ctr_source_exefs(game, sections[i], &size);
             char path[16];
             snprintf(path, sizeof path, "exefs/%s", sections[i]);
             if (data) ok = !fs_tree_add_virtual(tree, path, data, size, NULL);
@@ -336,8 +336,8 @@ static bool mount(SnxCtrProcess* p, const char* directory, const SnxCtrCia* cia)
     /* the regions the title's SMDH (ExeFS icon) says it runs in, which pick the console's (services/cfg.c) */
     unsigned char smdh[0x2020];
     uint64_t smdh_size = 0;
-    const unsigned char* icon = cia ? snx_ctr_cia_exefs(cia, "icon", &smdh_size) : NULL;
-    if (!cia) {
+    const unsigned char* icon = game ? snx_ctr_source_exefs(game, "icon", &smdh_size) : NULL;
+    if (!game) {
         char* path = snx_path_join(directory, "exefs/icon");
         FILE* f = path ? fopen(path, "rb") : NULL;
         if (f && fread(smdh, 1, sizeof smdh, f) == sizeof smdh) icon = smdh, smdh_size = sizeof smdh;

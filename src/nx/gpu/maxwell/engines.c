@@ -194,9 +194,9 @@ static void render_enable_update(GpuChannel* ch) {
     u64 a = gpu_packed_va(r[MAXWELL3D_RENDER_ENABLE_ADDRESS_HIGH], r[MAXWELL3D_RENDER_ENABLE_ADDRESS_LOW]);
     u32 mode = r[MAXWELL3D_RENDER_ENABLE_MODE] & MAXWELL3D_RENDER_ENABLE_MODE_MASK, pred = 0;
     int on = 1, known;
-    if (ch->render_pred) {
-        g_renderer->render_predicate_drop(ch->render_pred);
-        ch->render_pred = 0;
+    if (ch->owner.pred) {
+        g_renderer->render_predicate_drop(ch->owner.pred);
+        ch->owner.pred = 0;
     }
     switch (r[MAXWELL3D_RENDER_ENABLE_OVERRIDE] & MAXWELL3D_RENDER_ENABLE_OVERRIDE_MASK) {
         case MAXWELL3D_RENDER_ENABLE_OVERRIDE_ALWAYS_RENDER: on = 1; break;
@@ -225,7 +225,7 @@ static void render_enable_update(GpuChannel* ch) {
                     known = g_renderer->render_predicate ? g_renderer->render_predicate(a, equal, &pred) : -1;
                     if (known >= 0) {
                         on = known != 0;
-                        if (known == 2) ch->render_pred = pred;
+                        if (known == 2) ch->owner.pred = pred;
                         break;
                     }
                     gmem_read(a, &x, 8);
@@ -417,29 +417,35 @@ static void macro_call(GpuChannel* ch, u32 m, u32 v, int last) {
    shadowed), and in the low bits the register groups (R3D_*, gpu.h) the method's register is in. Every other method,
    most of a stream, is a plain register: maxwell3d_method stores it without the switch, a call per method word that
    was the GPU thread's biggest single cost. The groups are the bits themselves, not an index into a table of masks,
-   as this runs for nearly every method word: more groups than 7 widen the table */
-enum { G_ACTS = 0x80 };
-_Static_assert(R3D_XFB < G_ACTS, "the 3D register groups fit below G_ACTS");
-/* a vertex stream's stride and enable word and its frequency (divisor), around its address */
+   as this runs for nearly every method word: more groups than 15 widen the table */
+enum { G_ACTS = 0x8000 };
+_Static_assert(R3D_INDEX < G_ACTS, "the 3D register groups fit below G_ACTS");
+/* a vertex stream's stride and enable word and its frequency (divisor), around its address (2 words) */
 #define M3D_STREAM(i)                                                                     \
     [MAXWELL3D_VERTEX_STREAMS + MAXWELL3D_VERTEX_STREAM_STRIDE * (i)] = R3D_VFORMAT,      \
+    [MAXWELL3D_VERTEX_STREAMS + MAXWELL3D_VERTEX_STREAM_STRIDE * (i) + 1] = R3D_VBUF,     \
+    [MAXWELL3D_VERTEX_STREAMS + MAXWELL3D_VERTEX_STREAM_STRIDE * (i) + 2] = R3D_VBUF,     \
     [MAXWELL3D_VERTEX_STREAMS + MAXWELL3D_VERTEX_STREAM_STRIDE * (i) +                    \
      MAXWELL3D_VERTEX_STREAM_FREQUENCY] = R3D_VFORMAT
-/* a color target's format */
-#define M3D_RT_FORMAT(i) [MAXWELL3D_RT + MAXWELL3D_RT_STRIDE * (i) + MAXWELL3D_RT_FORMAT] = R3D_RTFORMAT
-static const u8 g_m3d_group[MAXWELL3D_MACRO_REGISTERS_START] = {
+/* a color target's address, size, format, memory layout, layers and layer stride */
+#define M3D_RT(i)                                                                         \
+    [MAXWELL3D_RT + MAXWELL3D_RT_STRIDE * (i) ... MAXWELL3D_RT + MAXWELL3D_RT_STRIDE * (i) + 3] = R3D_TARGETS, \
+    [MAXWELL3D_RT + MAXWELL3D_RT_STRIDE * (i) + MAXWELL3D_RT_FORMAT] = R3D_RTFORMAT | R3D_TARGETS,             \
+    [MAXWELL3D_RT + MAXWELL3D_RT_STRIDE * (i) + 5 ... MAXWELL3D_RT + MAXWELL3D_RT_STRIDE * (i) + 7] = R3D_TARGETS
+static const u16 g_m3d_group[MAXWELL3D_MACRO_REGISTERS_START] = {
     [MAXWELL3D_INVALIDATE_SHADER_CACHE] = G_ACTS, [MAXWELL3D_INVALIDATE_SHADER_CACHE_NO_WFI] = G_ACTS,
     [MAXWELL3D_WAIT_FOR_IDLE] = G_ACTS, [MAXWELL3D_LOAD_MME_INSTRUCTION_PTR] = G_ACTS,
     [MAXWELL3D_LOAD_MME_INSTRUCTION] = G_ACTS, [MAXWELL3D_LOAD_MME_START_ADDRESS_PTR] = G_ACTS,
     [MAXWELL3D_LOAD_MME_START_ADDRESS] = G_ACTS, [MAXWELL3D_SHADOW_RAM_CONTROL] = G_ACTS,
     [MAXWELL3D_LAUNCH_DMA] = G_ACTS, [MAXWELL3D_INLINE_DATA] = G_ACTS, [MAXWELL3D_SYNC_INFO] = G_ACTS,
-    [XFB_START_OFFSET(0)] = G_ACTS, [XFB_START_OFFSET(1)] = G_ACTS, [XFB_START_OFFSET(2)] = G_ACTS,
-    [XFB_START_OFFSET(3)] = G_ACTS, [MAXWELL3D_TRANSFORM_FEEDBACK_ENABLED] = G_ACTS | R3D_XFB,
+    [XFB_START_OFFSET(0)] = G_ACTS | R3D_BIND, [XFB_START_OFFSET(1)] = G_ACTS | R3D_BIND,
+    [XFB_START_OFFSET(2)] = G_ACTS | R3D_BIND, [XFB_START_OFFSET(3)] = G_ACTS | R3D_BIND,
+    [MAXWELL3D_TRANSFORM_FEEDBACK_ENABLED] = G_ACTS | R3D_XFB,
     [MAXWELL3D_VERTEX_BUFFER_FIRST] = G_ACTS, [MAXWELL3D_VERTEX_BUFFER_COUNT] = G_ACTS,
     [MAXWELL3D_FRAGMENT_BARRIER] = G_ACTS, [MAXWELL3D_INVALIDATE_TEXTURE_DATA_CACHE] = G_ACTS,
     [MAXWELL3D_TILED_CACHE_BARRIER] = G_ACTS, [MAXWELL3D_DRAW_TEXTURE_SRC_Y0] = G_ACTS,
     [MAXWELL3D_VERTEX_ARRAY_INSTANCE_FIRST] = G_ACTS, [MAXWELL3D_VERTEX_ARRAY_INSTANCE_SUBSEQUENT] = G_ACTS,
-    [MAXWELL3D_INLINE_INDEX_4X8_INDEX0] = G_ACTS, [MAXWELL3D_WINDOW_ORIGIN] = G_ACTS,
+    [MAXWELL3D_INLINE_INDEX_4X8_INDEX0] = G_ACTS, [MAXWELL3D_WINDOW_ORIGIN] = G_ACTS | R3D_DYNAMIC,
     [MAXWELL3D_INVALIDATE_SAMPLER_CACHE_NO_WFI] = G_ACTS, [MAXWELL3D_INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI] = G_ACTS,
     [MAXWELL3D_ZPASS_PIXEL_COUNT_ENABLE] = G_ACTS, [MAXWELL3D_CLEAR_REPORT_VALUE] = G_ACTS,
     [MAXWELL3D_RENDER_ENABLE_MODE] = G_ACTS, [MAXWELL3D_DRAW_INLINE_INDEX] = G_ACTS,
@@ -463,10 +469,11 @@ static const u8 g_m3d_group[MAXWELL3D_MACRO_REGISTERS_START] = {
     M3D_STREAM(14), M3D_STREAM(15), M3D_STREAM(16), M3D_STREAM(17), M3D_STREAM(18), M3D_STREAM(19), M3D_STREAM(20),
     M3D_STREAM(21), M3D_STREAM(22), M3D_STREAM(23), M3D_STREAM(24), M3D_STREAM(25), M3D_STREAM(26), M3D_STREAM(27),
     M3D_STREAM(28), M3D_STREAM(29), M3D_STREAM(30), M3D_STREAM(31),
-    [MAXWELL3D_RT_CONTROL] = R3D_RTFORMAT, M3D_RT_FORMAT(0), M3D_RT_FORMAT(1), M3D_RT_FORMAT(2), M3D_RT_FORMAT(3),
-    M3D_RT_FORMAT(4), M3D_RT_FORMAT(5), M3D_RT_FORMAT(6), M3D_RT_FORMAT(7),
+    [MAXWELL3D_RT_CONTROL] = R3D_RTFORMAT | R3D_TARGETS, M3D_RT(0), M3D_RT(1), M3D_RT(2), M3D_RT(3), M3D_RT(4),
+    M3D_RT(5), M3D_RT(6), M3D_RT(7), [0x3F8 ... 0x3FC] = R3D_TARGETS, [0x48A ... 0x48C] = R3D_TARGETS,
+    [0x54E] = R3D_TARGETS,
     [MAXWELL3D_COLOR_MASK_COMMON] = R3D_BLEND, [MAXWELL3D_BLEND_PER_TARGET_ENABLED] = R3D_BLEND,
-    [MAXWELL3D_BLEND + 1 ... MAXWELL3D_BLEND + 0x10] = R3D_BLEND, [MAXWELL3D_FRAMEBUFFER_SRGB] = R3D_BLEND,
+    [MAXWELL3D_BLEND + 1 ... MAXWELL3D_BLEND + 0x10] = R3D_BLEND, [MAXWELL3D_FRAMEBUFFER_SRGB] = R3D_TARGETS,
     [MAXWELL3D_LOGIC_OP ... MAXWELL3D_LOGIC_OP + 1] = R3D_BLEND,
     [MAXWELL3D_COLOR_MASK ... MAXWELL3D_COLOR_MASK + 7] = R3D_BLEND,
     [MAXWELL3D_BLEND_PER_TARGET ... MAXWELL3D_BLEND_PER_TARGET + 0x3F] = R3D_BLEND,
@@ -475,10 +482,25 @@ static const u8 g_m3d_group[MAXWELL3D_MACRO_REGISTERS_START] = {
     [MAXWELL3D_POST_VTG_SHADER_ATTRIB_SKIP_MASK ... MAXWELL3D_POST_VTG_SHADER_ATTRIB_SKIP_MASK + 7] = R3D_PIPEMISC,
     [MAXWELL3D_USER_CLIP_ENABLE] = R3D_PIPEMISC, [MAXWELL3D_PROVOKING_VERTEX] = R3D_PIPEMISC,
     [MAXWELL3D_VIEWPORT_CLIP_CONTROL] = R3D_PIPEMISC,
-    [MAXWELL3D_TRANSFORM_FEEDBACK_CONTROLS ... MAXWELL3D_TRANSFORM_FEEDBACK_CONTROLS + 0xF] = R3D_XFB,
-    [MAXWELL3D_STREAM_OUT_LAYOUT ... MAXWELL3D_STREAM_OUT_LAYOUT + 0x7F] = R3D_XFB};
+    [MAXWELL3D_TRANSFORM_FEEDBACK_CONTROLS ... MAXWELL3D_TRANSFORM_FEEDBACK_CONTROLS + 0xF] = R3D_XFB | R3D_BIND,
+    [MAXWELL3D_STREAM_OUT_LAYOUT ... MAXWELL3D_STREAM_OUT_LAYOUT + 0x7F] = R3D_XFB,
+    /* mx_draw_dynamic's: rasterize enable, depth mode, bias enables, the back stencil's reference and masks, the
+       surface clip, depth test and write, alpha test, its reference and function, blend constants, the front stencil,
+       line widths, the base instance word, bias factor, smooth lines, two-sided stencil and the back's operations,
+       bias units, MSAA mode, point sprite origin, bias clamp, cull and facing */
+    [0xDF] = R3D_DYNAMIC, [0x35F] = R3D_DYNAMIC, [0x370 ... 0x372] = R3D_DYNAMIC, [0x3D5 ... 0x3D7] = R3D_DYNAMIC,
+    [0x3FE] = R3D_DYNAMIC, [0x4B3] = R3D_DYNAMIC, [0x4BA ... 0x4BB] = R3D_DYNAMIC, [0x4C3 ... 0x4C5] = R3D_DYNAMIC,
+    [0x4C7 ... 0x4CA] = R3D_DYNAMIC, [0x4E0 ... 0x4E7] = R3D_DYNAMIC, [0x4EC ... 0x4ED] = R3D_DYNAMIC,
+    [0x50E] = R3D_DYNAMIC, [0x55B ... 0x55C] = R3D_DYNAMIC, [0x565 ... 0x569] = R3D_DYNAMIC, [0x56F] = R3D_DYNAMIC,
+    [0x574] = R3D_DYNAMIC, [0x581] = R3D_DYNAMIC, [0x61F] = R3D_DYNAMIC, [0x646 ... 0x648] = R3D_DYNAMIC,
+    [0x280 ... 0x33F] = R3D_VIEWPORTS, [0x380 ... 0x3BF] = R3D_VIEWPORTS, [0x64B] = R3D_VIEWPORTS,
+    [0x7C0 ... 0x7FF] = R3D_VBUF, [0x591 ... 0x592] = R3D_INDEX, [0x5F2 ... 0x5F6] = R3D_INDEX,
+    /* the bindings' registers: each capture buffer's enable, address and size (its start offset acts, above), the
+       sampler index mode, the TSC and TIC pools and the texture bank */
+    [0xE0 ... 0xE3] = R3D_BIND, [0xE8 ... 0xEB] = R3D_BIND, [0xF0 ... 0xF3] = R3D_BIND, [0xF8 ... 0xFB] = R3D_BIND,
+    [0x48D] = R3D_BIND, [0x557 ... 0x559] = R3D_BIND, [0x55D ... 0x55F] = R3D_BIND, [0x982] = R3D_BIND};
 #undef M3D_STREAM
-#undef M3D_RT_FORMAT
+#undef M3D_RT
 /* inline indices packed in one word, 32 / bits of them, the low ones first (InlineIndex4x8, InlineIndex2x16,
    draw_inline_index). Out of line: its array, inlined, made maxwell3d_method check a stack canary on every method */
 __attribute__((noinline)) static void inline_push_packed(GpuChannel* ch, u32 v, u32 bits) {
@@ -605,7 +627,8 @@ static void method_acts(GpuChannel* ch, u32 m, u32 v, int last) {
         case XFB_START_OFFSET(1):
         case XFB_START_OFFSET(2):
         case XFB_START_OFFSET(3):
-            ch->xfb_reload |= (u8)(1u << ((m - XFB_START_OFFSET(0)) / MAXWELL3D_TRANSFORM_FEEDBACK_BUFFER_STRIDE));
+            ch->owner.xfb_reload |=
+                (u8)(1u << ((m - XFB_START_OFFSET(0)) / MAXWELL3D_TRANSFORM_FEEDBACK_BUFFER_STRIDE));
             break;
         case MAXWELL3D_DRAW_END: draw_end(ch); break;
         case MAXWELL3D_DRAW_BEGIN: draw_begin(ch, v); break;

@@ -65,7 +65,7 @@ built in, drawn at the window's size ([lunasvg](https://github.com/sammycage/lun
   pages, left or up to the next as a phone's lists scroll, right or down back; a tap on a finished run returns to the menu, and one on a
   running run's ESC line aborts it. Android's back button is ESC. On a screen packed with
   pixels (a phone) the text takes the display's own scale, as far as the menu still fits.
-- **Load Switch NSP/XCI/NRO**, **Load Linux ARM ELF**, **Load 3DS CIA**, **Load Vita VPK** and
+- **Load Switch NSP/XCI/NRO**, **Load Linux ARM ELF**, **Load 3DS game**, **Load Vita VPK** and
   **Load GBA ROM** open a screen as the keys': a click on its blinking **[ Pick or drop a file ]**, or Enter, opens the system's file
   picker (on Linux the desktop's, else zenity's). Dropping a file on the window and Ctrl+V with
   a path work too. ESC returns to the menu. On Android the picker opens at once. A dump is read where it lies
@@ -76,8 +76,9 @@ built in, drawn at the window's size ([lunasvg](https://github.com/sammycage/lun
   take a game (its Main, and each Extra that can be written and runs programs), a box asks which the dump's game goes
   in, **Recompile** on its tab: each folder with what it is and its free room, the Main first and in focus; ESC runs
   nothing. The one taken is the run's `--outdir`, and the room asked about is that folder's.
-- **Load 3DS CIA** uses `scarletnx-3ds`. Its `games/` browser lists CIA inputs,
-  not host executables. The driver reads supported decrypted application CIAs where they lie, or extracts them with *Extract dump*.
+- **Load 3DS game** uses `scarletnx-3ds`. Its `games/` browser lists CIA, CCI, 3DS, CXI, APP, HBB, BCCI/BCXI/BCIA and ZCCI/ZCXI/ZCIA inputs,
+  not host executables. The driver reads supported decrypted application CIAs, cartridge images (a card's
+  update partition played as the update) and bare NCCHs where they lie, or extracts them with *Extract dump*.
   The driver then compiles the ARM11 code ahead of time and runs it, on Linux and
   Windows. Larger images use bounded conservative discovery (16 MiB text cap).
   SuperTux shows its title screen and plays its music, but takes no input yet.
@@ -337,8 +338,8 @@ folder the driver works in, which the menu passes it as `--data`: a portable cop
 AppImage (or the GUI), else the user's data folder, a build tree's menu's too ([USAGE](USAGE.md#folders)), then each
 Extra of Settings > App > Folders. Each game is shown by the name in its `control.nacp`, which the recompile copies into
 its data, else by its folder's or file's name, sorted by it in each folder. Only immediate files are listed:
-executables (execute permission on UNIX, `.exe` on Windows), `.cia` files (case-insensitive,
-no execute permission needed), which run with the 3DS driver, and `.vpk` files, which run with the Vita driver. Hidden files, shared libraries and
+executables (execute permission on UNIX, `.exe` on Windows), `.cia`, `.cci`, `.3ds`, `.cxi`, `.app`, `.hbb`, `.bcci`, `.bcxi`, `.bcia`, `.zcci`, `.zcxi` and `.zcia` files
+(case-insensitive, no execute permission needed), which run with the 3DS driver, and `.vpk` files, which run with the Vita driver. Hidden files, shared libraries and
 directories are excluded. The folders are looked at once a second while the menu is open (their
 names only), so a game put in or taken out shows in the open list; a folder that
 cannot be read is named and the others still listed.

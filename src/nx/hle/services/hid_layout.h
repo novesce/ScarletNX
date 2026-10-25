@@ -26,6 +26,13 @@
 #define HO_HidSharedMemory_npad                    0x9a00
 #define HO_HidSharedMemory_gesture                 0x3ba00
 #define HO_HidSharedMemory_console_six_axis_sensor 0x3c200
+#define HO_HidSharedMemory_npad_condition          0x3e200
+
+/* ---- the global Npad condition: the SDK's GetNpadJoyHoldType reads it before any Npad has a state */
+#define HS_HidNpadCondition                 0x10
+#define HO_HidNpadCondition_is_initialized  0x4
+#define HO_HidNpadCondition_hold_type       0x8
+#define HO_HidNpadCondition_is_valid        0xc
 
 /* ---- a ring of samples: a header, then the entries, each a sampling number and a state */
 #define HS_HidCommonLifoHeader              0x20
@@ -184,6 +191,9 @@ HID_LAYOUT_CHECK(touch_offsets, HO_HidTouchState_attribute == 0x8 && HO_HidTouch
                                     HO_HidTouchState_diameter_x == 0x18 && HO_HidTouchState_diameter_y == 0x1c &&
                                     HO_HidTouchState_rotation_angle == 0x20);
 HID_LAYOUT_CHECK(whole, HO_HidSharedMemory_console_six_axis_sensor < HS_HidSharedMemory);
+HID_LAYOUT_CHECK(condition, HO_HidSharedMemory_npad_condition + HS_HidNpadCondition <= HS_HidSharedMemory);
+HID_LAYOUT_CHECK(condition_fields, HO_HidNpadCondition_is_initialized == 4 && HO_HidNpadCondition_hold_type == 8 &&
+                                       HO_HidNpadCondition_is_valid == 12);
 #undef HID_LAYOUT_CHECK
 #undef HID_LAYOUT_ENTRIES
 #endif

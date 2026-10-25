@@ -1481,7 +1481,7 @@ msgid "Runs a Linux ARM program, 64 or 32-bit"
 msgstr ""
 
 #: src/gui/main.c
-msgid "Recompiles a 3DS .cia, then runs it"
+msgid "Recompiles a 3DS game, then runs it"
 msgstr ""
 
 #: src/gui/main.c
@@ -1539,7 +1539,7 @@ msgid "Ready to run, with %zu update(s), DLC(s), mod(s) or cheat(s) to pick from
 msgstr ""
 
 #: src/gui/main.c
-msgid "3DS CIA, opened with scarletnx-3ds"
+msgid "3DS game, opened with scarletnx-3ds"
 msgstr ""
 
 #: src/gui/main.c
@@ -3903,7 +3903,7 @@ msgid "Load Linux ARM ELF"
 msgstr ""
 
 #: src/gui/ui.txt
-msgid "Load 3DS CIA"
+msgid "Load 3DS game"
 msgstr ""
 
 #: src/gui/ui.txt

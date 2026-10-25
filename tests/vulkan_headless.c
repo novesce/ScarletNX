@@ -279,12 +279,14 @@ static int check_packed_depth(void) {
 }
 
 /* Clear separate shadow cascades through the real register path, then read each depth layer back. */
-/* a clear as the 3D engine hands it to the renderer (maxwell3d.c r3d_clear) */
+/* a clear as the 3D engine hands it to the renderer (maxwell3d.c r3d_clear). The tests set the registers directly,
+   not through the engine's methods, so every register group counts as changed */
 static void engine_clear(GpuChannel* ch, u32 v) {
     DrawClear c;
+    ch->r3d_dirty = ~0u;
     mx_draw_state_sync(ch);
     mx_draw_clear(ch->r3d, v, &c);
-    vk_render_clear(&ch->ds, &c, ch);
+    vk_render_clear(&ch->ds, &c, &ch->owner);
 }
 static int check_depth_array(void) {
     GpuChannel* ch = calloc(1, sizeof *ch);
@@ -396,6 +398,59 @@ static int check_srgb_write(void) {
     vk_readback_ready();
     const u8 expected[8] = {128, 137, 137, 255, 188, 64, 64, 255};
     for (u32 i = 0; i < 8; i++) CHECK(abs((int)data[i] - expected[i]) <= 1);
+    free(ch);
+    return 0;
+}
+
+/* a single-layer target's pixel 0 as its image holds it */
+static int read_pixel0(Surf* target, u8 out[4]) {
+    VkBuffer buffer;
+    u8* data = vk_readback_buffer(4, &buffer);
+    CHECK(data);
+    VkCommandBuffer cb = vk_cmd();
+    vk_surf_use(cb, target, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_COPY_BIT,
+                VK_ACCESS_2_TRANSFER_READ_BIT);
+    VkBufferImageCopy copy = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {1, 1, 1}};
+    rec_CmdCopyImageToBuffer(cb, target->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, 1, &copy);
+    vk_finish();
+    vk_readback_ready();
+    memcpy(out, data, 4);
+    return 0;
+}
+
+/* Clears as load ops: a whole-target clear before any draw of its pass is the pass's LOAD_OP_CLEAR, and gives the
+   pixels a vkCmdClearAttachments gave. A discarded target's next pass loads it as DONT_CARE, and what that pass writes
+   is there */
+static int check_clear_load_op(void) {
+    GpuChannel* ch = calloc(1, sizeof *ch);
+    CHECK(ch);
+    u32* r = ch->r3d;
+    r[0x487] = 1;
+    r[0x201] = 0x480000;
+    r[0x202] = 64; /* 16 RGBA pixels, pitch linear */
+    r[0x203] = 16;
+    r[0x204] = 0xD5; /* A8B8G8R8 */
+    r[0x205] = 0x1000;
+    r[0x206] = 1;
+    float red[4] = {1, 0, 0, 1}, half[4] = {0.5f, 0.5f, 0.5f, 0.5f};
+    memcpy(&r[0x360], red, sizeof red);
+    u64 loads = g_vk_clear_loads, cmds = g_vk_clear_cmds, dontcare = g_vk_dontcare_loads;
+    engine_clear(ch, 15 << 2);
+    vk_render_end();
+    CHECK(g_vk_clear_loads == loads + 1 && g_vk_clear_cmds == cmds);
+    Surf* target = vk_rt_find(r[0x201]);
+    CHECK(target);
+    u8 px[4];
+    CHECK(!read_pixel0(target, px));
+    CHECK(px[0] == 255 && px[1] == 0 && px[2] == 0 && px[3] == 255);
+    /* discarded, then only its red written (a masked clear is a draw): red is what the draw wrote */
+    vk_render_discard(&ch->ds, 1);
+    memcpy(&r[0x360], half, sizeof half);
+    engine_clear(ch, 1 << 2);
+    vk_render_end();
+    CHECK(g_vk_dontcare_loads == dontcare + 1);
+    CHECK(!read_pixel0(target, px));
+    CHECK(abs((int)px[0] - 128) <= 1);
     free(ch);
     return 0;
 }
@@ -573,6 +628,7 @@ static int check_flush_subnormal(void) {
 #define VIC_BASE (HEAP_BASE + 0x100000)
 static int check_vic(void) {
     enum { W = 32, H = 16, SENTINEL = 0xA5 };
+    u32 validation = g_vk_validation_messages; /* the job's first words are a uniform buffer (vk/vic.c, owned.c) */
     u8 *y = GP(VIC_BASE), *uv = GP(VIC_BASE + 0x1000), *out = GP(VIC_BASE + 0x2000);
     u64 lands = own_landings();
     for (u32 j = 0; j < H; ++j)
@@ -663,6 +719,7 @@ static int check_vic(void) {
     }
     /* each picture was read here: landed once, by the trap, where the host has traps */
     CHECK(!own_traps() || own_landings() >= lands + sizeof cases / sizeof cases[0]);
+    CHECK(g_vk_validation_messages == validation);
     return 0;
 }
 /* two jobs into the same output with no CPU access between: the second's picture outside its target rectangle is the
@@ -1030,6 +1087,13 @@ int main(int argc, char** argv) {
     g_settings.vulkan_video_decode = 1; /* a Vulkan Video decode queue where the device has one (lavapipe has none) */
     video_init("Headless Vulkan fixture", "");
     CHECK(g_opt_headless && g_renderer_up && g_vk.dev && !g_vk.surface && !g_vk.swapchain && !g_vk.sc_count);
+    if (getenv("SNX_TEST_VIC_ONLY")) { /* the validation test: VIC's bindings, none of the other checks' traffic */
+        CHECK(!check_vic());
+        CHECK(!check_vic_chain(shot));
+        CHECK(!check_nvdec_vic());
+        printf("PASS headless Vulkan VIC only: %u validation messages\n", g_vk_validation_messages);
+        return 0;
+    }
     CHECK(!check_hash_copy());
     CHECK(!check_staging_overflow());
     CHECK(!check_buffer_texture_rows());
@@ -1037,6 +1101,7 @@ int main(int argc, char** argv) {
     CHECK(!check_packed_depth());
     CHECK(!check_depth_array());
     CHECK(!check_srgb_write());
+    CHECK(!check_clear_load_op());
     CHECK(!check_multisample_shader_gate());
     CHECK(!check_direct_spirv());
     CHECK(!check_flush_subnormal());
