@@ -96,7 +96,9 @@ V ir_vec_all(SnxIr* ir, V lanes) {
 }
 
 void ir_vec_qc(SnxIr* ir, V saturated) {
-    V fpsr = ir_cpu_load(ir, ir->t_i32, offsetof(CPU, fpsr));
+    V fpsr;
+    if (!snx_ir_fpsr_exact()) return; /* QC is FPSR's too (snx_ir_fpsr_flags) */
+    fpsr = ir_cpu_load(ir, ir->t_i32, offsetof(CPU, fpsr));
     V bit = LLVMBuildShl(B, LLVMBuildZExt(B, ir_vec_any(ir, saturated), ir->t_i32, ""), ir_i32(ir, 27), "");
     ir_cpu_store(ir, LLVMBuildOr(B, fpsr, bit, ""), offsetof(CPU, fpsr));
 }

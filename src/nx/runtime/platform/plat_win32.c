@@ -1,27 +1,26 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
    Copyright 2026 the ScarletNX contributors */
-/* The platform layer on Windows: threads, time, the guest's address space with its write watch, files, libraries,
-   the text entry dialog and the crash handler. Paths are UTF-8, converted to wide for the W functions (the
+/* The platform layer on Windows: threads, condition variables, the guest's address space with its write watch, file
+   reads and maps, the environment, the text entry dialog and the crash handler (plat_sdl.c has the clocks, sleeping,
+   libraries and path queries). Paths are UTF-8, converted to wide for the W functions (the
    manifest's UTF-8 code page makes the A functions and the CRT take UTF-8 too) */
 #include "nx/runtime/platform/plat.h"
 #include "nx/runtime/main.h"
 #include "nx/runtime/options.h"
 #include "nx/runtime/platform/log.h"
+#include <SDL3/SDL_thread.h>
 #include <errno.h>
 #include <io.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
-#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
-#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
-#endif
 #define STACK_GUARANTEE 32768 /* room for the crash report after a stack overflow */
 #define GUARANTEE_MIN_THREAD ((size_t)256 << 10)
 
 /* ================================================================ timer resolution */
-/* The scheduler's default tick is 15.6 ms: asked once for 1 ms before the first sleep or timed wait. winmm is
-   loaded here so the runtime doesn't link it */
+/* The scheduler's default tick is 15.6 ms: asked once for 1 ms before the first timed wait (plat_sleep_ns's
+   high-resolution timer needs none). winmm is loaded here so the runtime doesn't link it */
 static int g_period_asked;
 static void timer_period_1ms(void) {
     HMODULE winmm;
@@ -64,14 +63,6 @@ int pc_wait(PCond* c, PMutex* m, i64 timeout_ns) {
 }
 
 /* ================================================================ threads */
-/* each thread's waitable timer for plat_sleep_ns, made on its first sleep and closed when a plat_thread ends */
-static __thread HANDLE t_sleep_timer;
-
-static void sleep_timer_close(void) {
-    if (t_sleep_timer) CloseHandle(t_sleep_timer);
-    t_sleep_timer = NULL;
-}
-
 typedef struct {
     PThreadFn fn;
     void* arg;
@@ -86,7 +77,7 @@ static DWORD WINAPI thread_start(LPVOID p) {
         SetThreadStackGuarantee(&g);
     }
     s.fn(s.arg);
-    sleep_timer_close();
+    SDL_CleanupTLS(); /* SDL's per-thread state, plat_sleep_ns's waitable timer among it */
     return 0;
 }
 
@@ -109,7 +100,7 @@ int plat_thread(PThreadFn fn, void* arg, size_t stack) {
     return 0;
 }
 void plat_thread_exit(void) {
-    sleep_timer_close();
+    SDL_CleanupTLS();
     ExitThread(0);
 }
 int plat_cpus(int* ids, int max) {
@@ -154,62 +145,11 @@ void plat_system_info(char* out, size_t cap) {
              (unsigned long long)((m.ullTotalPhys + (512ull << 20)) >> 30));
 }
 void plat_yield(void) { SwitchToThread(); }
-void plat_sleep_ns(i64 ns) {
-    LARGE_INTEGER due;
-    if (ns <= 0) {
-        SwitchToThread();
-        return;
-    }
-    timer_period_1ms();
-    if (!t_sleep_timer) {
-        t_sleep_timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-        if (!t_sleep_timer) t_sleep_timer = CreateWaitableTimerW(NULL, TRUE, NULL); /* before Windows 10 1803 */
-    }
-    due.QuadPart = -(LONGLONG)((u64)ns / 100u + ((u64)ns % 100u != 0)); /* relative, in 100 ns units */
-    if (t_sleep_timer && SetWaitableTimer(t_sleep_timer, &due, 0, NULL, NULL, FALSE))
-        WaitForSingleObject(t_sleep_timer, INFINITE);
-    else {
-        u64 ms = (u64)ns / 1000000u + ((u64)ns % 1000000u != 0);
-        Sleep(ms >= (u64)INFINITE ? INFINITE - 1 : (DWORD)ms);
-    }
-}
 void plat_exit_now(int code) {
     fflush(NULL);
     /* not ExitProcess: DLL detach code (the video driver's) can wait on a lock one of the stopped threads held */
     TerminateProcess(GetCurrentProcess(), (UINT)code);
     _exit(code);
-}
-
-/* ================================================================ time */
-u64 plat_ns(void) {
-    static LARGE_INTEGER freq; /* set once, before any other thread runs: the first log line asks */
-    LARGE_INTEGER c;
-    u64 f, n;
-    if (!__atomic_load_n(&freq.QuadPart, __ATOMIC_RELAXED)) {
-        LARGE_INTEGER q;
-        QueryPerformanceFrequency(&q);
-        __atomic_store_n(&freq.QuadPart, q.QuadPart, __ATOMIC_RELAXED);
-    }
-    QueryPerformanceCounter(&c);
-    f = (u64)__atomic_load_n(&freq.QuadPart, __ATOMIC_RELAXED);
-    n = (u64)c.QuadPart;
-    /* split so n * 1e9 can't overflow */
-    return n / f * 1000000000u + n % f * 1000000000u / f;
-}
-i64 plat_unix_time(void) {
-    FILETIME ft;
-    u64 t;
-    GetSystemTimeAsFileTime(&ft);
-    t = (u64)ft.dwHighDateTime << 32 | ft.dwLowDateTime;
-    return (i64)((t - 116444736000000000ull) / 10000000u); /* 100 ns units since 1601 */
-}
-i64 plat_tz_offset(void) {
-    TIME_ZONE_INFORMATION tz;
-    DWORD r = GetTimeZoneInformation(&tz);
-    LONG bias = tz.Bias;
-    if (r == TIME_ZONE_ID_INVALID) return 0;
-    bias += r == TIME_ZONE_ID_DAYLIGHT ? tz.DaylightBias : tz.StandardBias;
-    return -(i64)bias * 60; /* Bias is UTC minus local, in minutes */
 }
 
 /* ================================================================ the guest's address space */
@@ -369,113 +309,10 @@ void plat_freeze(u8* p, u64 size) {
 }
 void plat_thaw(void) {}
 
-/* ================================================================ libraries */
-void* plat_dl_open(const char* path) {
-    wchar_t* w = snx_host_wpath(path);
-    HMODULE h;
-    if (!w) {
-        SetLastError(ERROR_NO_UNICODE_TRANSLATION);
-        return NULL;
-    }
-    h = LoadLibraryW(w);
-    free(w);
-    return (void*)h;
-}
-void* plat_dl_sym(void* h, const char* name) {
-    FARPROC f = GetProcAddress((HMODULE)h, name);
-    void* p;
-    memcpy(&p, &f, sizeof p);
-    return p;
-}
+/* ================================================================ environment */
 int plat_setenv(const char* name, const char* value) { return _putenv_s(name, value) ? -1 : 0; }
-const char* plat_dl_error(void) {
-    static __thread char msg[512];
-    DWORD e = GetLastError(), n;
-    if (!e) return "unknown error";
-    n = FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, e, 0, msg, 400, NULL);
-    while (n && (msg[n - 1] == '\r' || msg[n - 1] == '\n' || msg[n - 1] == ' ')) n--;
-    if (!n) {
-        snprintf(msg, sizeof msg, "unknown error (error %lu)", (unsigned long)e);
-        return msg;
-    }
-    snprintf(msg + n, sizeof msg - n, " (error %lu)", (unsigned long)e);
-    return msg;
-}
 
-/* ================================================================ files and folders */
-static int file_attributes(const char* path, WIN32_FILE_ATTRIBUTE_DATA* a) {
-    wchar_t* w = snx_host_wpath(path);
-    int ok = w && GetFileAttributesExW(w, GetFileExInfoStandard, a);
-    free(w);
-    return ok;
-}
-int plat_is_dir(const char* path) {
-    WIN32_FILE_ATTRIBUTE_DATA a;
-    return file_attributes(path, &a) && (a.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
-}
-u64 plat_file_size(const char* path) {
-    WIN32_FILE_ATTRIBUTE_DATA a;
-    if (!file_attributes(path, &a)) return 0;
-    return (u64)a.nFileSizeHigh << 32 | a.nFileSizeLow;
-}
-
-typedef struct {
-    HANDLE find;
-    WIN32_FIND_DATAW data;
-} DirState;
-static void dir_entry(PDir* d, const WIN32_FIND_DATAW* f) {
-    if (!WideCharToMultiByte(CP_UTF8, 0, f->cFileName, -1, d->name, (int)sizeof d->name, NULL, NULL)) d->name[0] = 0;
-    d->is_dir = (f->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-    d->size = d->is_dir ? 0 : (u64)f->nFileSizeHigh << 32 | f->nFileSizeLow;
-}
-static int dir_skip(const WIN32_FIND_DATAW* f) {
-    return !wcscmp(f->cFileName, L".") || !wcscmp(f->cFileName, L"..");
-}
-int plat_dir_open(PDir* d, const char* path) {
-    char pattern[1024];
-    wchar_t* w;
-    DirState* s;
-    memset(d, 0, sizeof *d);
-    /* a cut pattern would list some other folder */
-    if ((size_t)snprintf(pattern, sizeof pattern, "%s\\*", path) >= sizeof pattern) return -1;
-    w = snx_host_wpath(pattern);
-    s = w ? malloc(sizeof *s) : NULL;
-    if (!s) {
-        free(w);
-        return -1;
-    }
-    s->find = FindFirstFileW(w, &s->data);
-    free(w);
-    if (s->find == INVALID_HANDLE_VALUE) {
-        free(s);
-        return -1;
-    }
-    d->h = s;
-    d->first = 1;
-    return 0;
-}
-int plat_dir_next(PDir* d) {
-    DirState* s = (DirState*)d->h;
-    if (!s) return 0;
-    for (;;) {
-        if (d->first)
-            d->first = 0;
-        else if (!FindNextFileW(s->find, &s->data))
-            return 0;
-        if (dir_skip(&s->data)) continue;
-        dir_entry(d, &s->data);
-        if (d->name[0]) return 1;
-    }
-}
-void plat_dir_close(PDir* d) {
-    DirState* s = (DirState*)d->h;
-    if (s) {
-        FindClose(s->find);
-        free(s);
-    }
-    d->h = NULL;
-}
-
+/* ================================================================ files */
 i64 plat_pread(FILE* f, void* buf, u64 size, u64 off) {
     HANDLE h = (HANDLE)_get_osfhandle(_fileno(f));
     u64 got = 0;
@@ -549,22 +386,6 @@ void plat_file_unmap(PFileMap* m) {
     else if (m->data && !m->borrowed) UnmapViewOfFile(m->data);
     file_map_clear(m);
 }
-int plat_replace_file(const char* tmp, const char* dst) {
-    wchar_t* wt = snx_host_wpath(tmp);
-    wchar_t* wd = snx_host_wpath(dst);
-    /* rename() fails when dst exists, and deleting dst first would lose it to a crash in between */
-    int ok = wt && wd && MoveFileExW(wt, wd, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
-    if (!ok) {
-        if (wt)
-            DeleteFileW(wt);
-        else
-            remove(tmp);
-    }
-    free(wt);
-    free(wd);
-    return ok ? 0 : -1;
-}
-
 /* ================================================================ text entry */
 enum { TI_EDIT = 100, TI_W = 420, TI_H = 150 };
 typedef struct {

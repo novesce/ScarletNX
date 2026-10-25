@@ -64,6 +64,7 @@ typedef struct {
     const uint64_t* addresses; /* ascending */
     const GuestFn* functions;  /* the function each leader belongs to (its F_, which dispatches on the entry) */
     GuestFn interp;            /* NULL: there is no interpreter, the module's JIT compiles what it lacks */
+    uint8_t* stale;             /* one byte per discovered function; set when its source code changes */
 } Descriptor;
 #define DESCRIPTOR_SYMBOL "snx_lib_module"
 typedef const Descriptor* (*DescriptorFn)(void);
@@ -73,6 +74,7 @@ struct snx_recompiler {
     SnxU64 features; /* the guest's A64 features (a64_decoder.h): SNX_A64_TARGET_SWITCH or SNX_A64_TARGET_MAX */
     unsigned jobs;
     int verbose;
+    int hook_direct_calls;
     char* keep_ir;
     char* cache; /* folder of linked modules by the hash of what they were made from (LLVM), NULL for none */
     char error[1024];
@@ -82,6 +84,18 @@ struct snx_recompiler {
     SnxCodeLoader* arena;
     size_t arena_modules;
 };
+
+typedef struct {
+    uint64_t start, end, prefix_max_end;
+    GuestFn code;
+    size_t entry;
+    size_t stale_index;
+} SnxCompiledFunction;
+
+typedef struct {
+    uintptr_t code;
+    size_t entry;
+} SnxEntryAlias;
 
 struct snx_recompiled {
     void* image;       /* dlopen/LoadLibrary handle */
@@ -100,9 +114,16 @@ struct snx_recompiled {
     const uint64_t* entry_addresses;
     const GuestFn* entry_functions;
     size_t entry_count;
+    uint8_t* stale;
+    char* jit_cache_path; /* the file of the module's JIT units, in the recompiler's cache folder: NULL for none */
+    SnxCompiledFunction* compiled_functions;
+    size_t compiled_function_count;
+    SnxEntryAlias* entry_aliases;
+    size_t entry_alias_count;
     struct snx_recompiler* arena_owner; /* PowerPC64: the recompiler whose arena holds the module's code */
     char opt;
     SnxU64 features; /* the recompiler's when the module was made: its JIT decodes as its code was */
+    int hook_direct_calls;
     /* made by the first miss (module_jit), JIT_NONE when it can't start */
     SnxJitService* jit;
 };
@@ -198,6 +219,9 @@ int snx_recompiler_set_a64_target(struct snx_recompiler* r, int target) {
 }
 
 void snx_recompiler_set_jobs(struct snx_recompiler* r, unsigned jobs) { r->jobs = jobs; }
+void snx_recompiler_set_hook_direct_calls(struct snx_recompiler* r, int enabled) {
+    if (r) r->hook_direct_calls = enabled != 0;
+}
 void snx_recompiler_set_verbose(struct snx_recompiler* r, int verbose) { r->verbose = verbose; }
 
 int snx_recompiler_set_keep_ir(struct snx_recompiler* r, const char* folder) {
@@ -267,6 +291,8 @@ static SnxJitService* module_jit(struct snx_recompiled* m) {
     config.aot_count = m->entry_count;
     config.opt = m->opt;
     config.features = m->features;
+    config.cache_path = m->jit_cache_path; /* read when the service starts */
+    config.hook_direct_calls = m->hook_direct_calls;
     s = snx_jit_service_new(&config, error, sizeof(error));
     if (!__atomic_compare_exchange_n(&m->jit, &expected, s ? s : JIT_NONE, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
         snx_jit_service_free(s);
@@ -562,6 +588,7 @@ static int load_descriptor(struct snx_recompiler* r, struct snx_recompiled* m, c
     m->entry_addresses = d->addresses;
     m->entry_functions = d->functions;
     m->entry_count = (size_t)d->count;
+    m->stale = d->stale;
     return 0;
 }
 
@@ -621,6 +648,7 @@ static int llvm_unit(Queue* q, size_t index, char* error, size_t error_size) {
     snprintf(name, sizeof(name), "code_%03lu", (unsigned long)index);
     ir = snx_ir_new(name, q->r->opt, error, error_size);
     if (!ir) return -1;
+    if (q->codegen->hook_direct_calls) snx_ir_stale_checks(ir);
     for (i = u->first; i < u->last; ++i) snx_ir_emit(ir, q->codegen, &q->codegen->functions[i]);
     if (q->r->keep_ir && save_ir(ir, q->r->keep_ir, name)) {
         snprintf(error, error_size, "cannot save the IR of %s in %s", name, q->r->keep_ir);
@@ -717,7 +745,7 @@ static void run_queue(Queue* q, unsigned jobs) {
 static int llvm_descriptor(SnxIr* ir, const SnxCodegen* codegen, char* error, size_t error_size) {
     Entry* e;
     size_t count, n, i;
-    LLVMValueRef *values, addresses, functions, desc, fn;
+    LLVMValueRef *values, addresses, functions, stale, desc, fn;
     LLVMTypeRef t_addresses, t_functions;
     LLVMBasicBlockRef block;
     e = entries(codegen, &count);
@@ -746,6 +774,14 @@ static int llvm_descriptor(SnxIr* ir, const SnxCodegen* codegen, char* error, si
     LLVMSetLinkage(functions, LLVMInternalLinkage);
     LLVMSetInitializer(functions, LLVMConstArray(ir->t_ptr, values, (unsigned)n));
     LLVMSetGlobalConstant(functions, 1);
+    stale = LLVMConstNull(ir->t_ptr);
+    if (codegen->hook_direct_calls) {
+        const size_t stale_count = codegen->function_count ? codegen->function_count : 1;
+        const LLVMTypeRef t_stale = LLVMArrayType(ir->t_i8, (unsigned)stale_count);
+        stale = LLVMAddGlobal(ir->mod, t_stale, "snx_stale");
+        LLVMSetInitializer(stale, LLVMConstNull(t_stale));
+        LLVMSetVisibility(stale, LLVMHiddenVisibility);
+    }
     free(values);
     free(e);
     /* static Descriptor DESC, written at run time at the C offsets */
@@ -768,6 +804,7 @@ static int llvm_descriptor(SnxIr* ir, const SnxCodegen* codegen, char* error, si
     FIELD(addresses, addresses);
     FIELD(functions, functions);
     FIELD(interp, LLVMConstNull(ir->t_ptr));
+    FIELD(stale, stale);
 #undef FIELD
     LLVMBuildRet(ir->b, desc);
     return 0;
@@ -803,11 +840,12 @@ static char* cache_path(struct snx_recompiler* r, SnxCodegen* codegen) {
     SnxU32 word;
     k.a = 0xcbf29ce484222325ull;
     k.b = 0x84222325cbf29ce4ull;
-    key_bytes(&k, "snx-module-cache-1", 18);
+    key_bytes(&k, "snx-module-cache-3", 18);
     key_u64(&k, SNX_ABI);
     key_u64(&k, (uint64_t)(unsigned char)r->opt);
     key_u64(&k, snx_a64_decoder_hash()); /* what each word decodes to: the decoder and the guest's features */
     key_u64(&k, r->features);
+    key_u64(&k, (uint64_t)codegen->hook_direct_calls);
     cpu = LLVMGetHostCPUName();
     features = LLVMGetHostCPUFeatures();
     key_bytes(&k, cpu, strlen(cpu) + 1);
@@ -1187,11 +1225,100 @@ static int keep_code(struct snx_recompiler* r, struct snx_recompiled* m, const s
     return 0;
 }
 
+static int compare_compiled_function(const void* a, const void* b) {
+    const SnxCompiledFunction* x = (const SnxCompiledFunction*)a;
+    const SnxCompiledFunction* y = (const SnxCompiledFunction*)b;
+    if (x->start != y->start) return x->start < y->start ? -1 : 1;
+    if (x->end != y->end) return x->end < y->end ? -1 : 1;
+    return x->stale_index < y->stale_index ? -1 : x->stale_index > y->stale_index;
+}
+
+static int compare_entry_alias(const void* a, const void* b) {
+    const SnxEntryAlias* x = (const SnxEntryAlias*)a;
+    const SnxEntryAlias* y = (const SnxEntryAlias*)b;
+    if (x->code != y->code) return x->code < y->code ? -1 : 1;
+    return x->entry < y->entry ? -1 : x->entry > y->entry;
+}
+
+static size_t lower_entry(const struct snx_recompiled* m, uint64_t address) {
+    size_t lo = 0, hi = m->entry_count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (m->entry_addresses[mid] < address)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo;
+}
+
+/* Keep invalidation metadata only for embedders that enabled dispatch hooks. A function may have
+   multiple leaders, and its entry need not be its start (for example after function splitting). */
+static int keep_invalidation_map(struct snx_recompiler* r, struct snx_recompiled* m,
+                                 const SnxCodegen* codegen) {
+    size_t i, j, count = 0;
+    uint64_t prefix_end = 0;
+    if (!m->hook_direct_calls || !codegen->function_count) return 0;
+    if (!m->stale) {
+        fail(r, "the recompiled module has no stale-function table");
+        return -1;
+    }
+    m->compiled_functions = (SnxCompiledFunction*)calloc(codegen->function_count, sizeof(*m->compiled_functions));
+    m->entry_aliases = (SnxEntryAlias*)calloc(m->entry_count ? m->entry_count : 1, sizeof(*m->entry_aliases));
+    if (!m->compiled_functions || !m->entry_aliases) {
+        fail(r, "out of memory for guest code invalidation metadata");
+        return -1;
+    }
+    for (i = 0; i < m->entry_count; ++i) {
+        m->entry_aliases[i].code = (uintptr_t)m->entry_functions[i];
+        m->entry_aliases[i].entry = i;
+    }
+    m->entry_alias_count = m->entry_count;
+    qsort(m->entry_aliases, m->entry_alias_count, sizeof(*m->entry_aliases), compare_entry_alias);
+    for (i = 0; i < codegen->function_count; ++i) {
+        const SnxFunction* function = &codegen->functions[i];
+        uint64_t start = UINT64_MAX, last = 0;
+        size_t first_entry = m->entry_count;
+        if (!function->count) continue;
+        for (j = 0; j < function->count; ++j) {
+            uint64_t address = snx_function_address(function, j);
+            if (address < start) start = address;
+            if (address > last) last = address;
+            if (first_entry == m->entry_count && function->leaders && function->leaders[j]) {
+                size_t entry = lower_entry(m, address);
+                if (entry < m->entry_count && m->entry_addresses[entry] == address) first_entry = entry;
+            }
+        }
+        if (first_entry == m->entry_count || last > UINT64_MAX - 4) continue;
+        SnxCompiledFunction* compiled = &m->compiled_functions[count++];
+        compiled->start = start;
+        compiled->end = last + 4;
+        compiled->code = m->entry_functions[first_entry];
+        compiled->entry = first_entry;
+        compiled->stale_index = i;
+    }
+    /* codegen orders functions by entry, but a span starts at its lowest block, which can lie below the entry (a split
+       or tail-merged function). snx_recompiled_invalidate stops its scan at the first span starting past the changed
+       range, so the spans must be ordered by their own start before prefix_max_end is made */
+    qsort(m->compiled_functions, count, sizeof(*m->compiled_functions), compare_compiled_function);
+    for (i = 0; i < count; ++i) {
+        if (m->compiled_functions[i].end > prefix_end) prefix_end = m->compiled_functions[i].end;
+        m->compiled_functions[i].prefix_max_end = prefix_end;
+    }
+    m->compiled_function_count = count;
+    return 0;
+}
+
 /* the backend's half of snx_recompile_ranges and snx_recompile_from, for the functions codegen found; frees codegen */
 static struct snx_recompiled* recompile(struct snx_recompiler* r, struct snx_recompiled* m, SnxCodegen* codegen) {
     int rc;
     m->functions = codegen->function_count;
+    /* A module that keeps its code has a JIT, and its units go in one file of the cache folder that the modules and
+       processes using the folder share. Without the memory for the path there is no file, and the JIT still works */
+    if (r->cache && m->view_count) m->jit_cache_path = snx_path_join(r->cache, "library-jit.cache");
+    m->hook_direct_calls = codegen->hook_direct_calls;
     rc = recompile_llvm(r, m, codegen);
+    if (!rc) rc = keep_invalidation_map(r, m, codegen);
     snx_codegen_free(codegen);
     if (rc) {
         snx_recompiled_free(m);
@@ -1242,7 +1369,10 @@ struct snx_recompiled* snx_recompile_ranges(struct snx_recompiler* r, const stru
         free(m);
         return NULL;
     }
+    codegen.hook_direct_calls = r->hook_direct_calls;
     free(views);
+    report(r, "%lu functions, %lu instructions\n", (unsigned long)codegen.function_count,
+           (unsigned long)codegen.instruction_count);
     return recompile(r, m, &codegen);
 }
 
@@ -1263,6 +1393,7 @@ struct snx_recompiled* snx_recompile_from(struct snx_recompiler* r, const struct
         free(views);
         return NULL;
     }
+    codegen.hook_direct_calls = r->hook_direct_calls;
     free(views);
     report(r, "from 0x%llx: %lu functions, %lu instructions\n", (unsigned long long)hints[0],
            (unsigned long)codegen.function_count, (unsigned long)codegen.instruction_count);
@@ -1296,6 +1427,9 @@ void snx_recompiled_free(struct snx_recompiled* m) {
     }
     if (m->jit && m->jit != JIT_NONE)
         snx_jit_service_free(m->jit); /* its threads stop before the code they read goes */
+    free(m->jit_cache_path);
+    free(m->compiled_functions);
+    free(m->entry_aliases);
     free(m->views);
     if (m->dispatch) free((void**)m->dispatch - 1); /* load_descriptor's block, with the module in front */
     unload_image(m);
@@ -1331,6 +1465,52 @@ GuestFn snx_recompiled_function(const struct snx_recompiled* m, uint64_t pc) {
 
 void snx_recompiled_set_fallback(struct snx_recompiled* m, GuestFn fallback) {
     __atomic_store_n(&m->fallback, fallback, __ATOMIC_RELEASE);
+}
+
+size_t snx_recompiled_invalidate(struct snx_recompiled* m, uint64_t addr, uint64_t size,
+                                 snx_recompiled_invalidate_callback callback, void* context) {
+    uint64_t end;
+    size_t lo = 0, hi, i, count = 0;
+    if (!m || !size || size > UINT64_MAX - addr) return 0;
+    end = addr + size;
+    /* prefix_max_end skips function intervals ending before addr */
+    hi = m->compiled_function_count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (m->compiled_functions[mid].prefix_max_end <= addr)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    for (i = lo; i < m->compiled_function_count && m->compiled_functions[i].start < end; ++i) {
+        const SnxCompiledFunction* function = &m->compiled_functions[i];
+        size_t alias_lo = 0, alias_hi = m->entry_alias_count;
+        uintptr_t code = (uintptr_t)function->code;
+        if (function->end <= addr) continue;
+        while (alias_lo < alias_hi) {
+            size_t mid = alias_lo + (alias_hi - alias_lo) / 2;
+            if (m->entry_aliases[mid].code < code)
+                alias_lo = mid + 1;
+            else
+                alias_hi = mid;
+        }
+        for (; alias_lo < m->entry_alias_count && m->entry_aliases[alias_lo].code == code; ++alias_lo) {
+            size_t entry = m->entry_aliases[alias_lo].entry;
+            uint64_t address = m->entry_addresses[entry];
+            if (address >= m->code_lo && address < m->code_hi)
+                __atomic_store_n(&m->dispatch[(address - m->code_lo) >> 2], NULL, __ATOMIC_RELEASE);
+        }
+        /* Clear dispatch before marking stale so diversions miss rather than re-enter */
+        __atomic_store_n(&m->stale[function->stale_index], 1, __ATOMIC_RELEASE);
+        if (callback) callback(context, function->start, function->end);
+        ++count;
+    }
+    /* Invalidate overlapping lazy JIT units */
+    {
+        SnxJitService* jit = __atomic_load_n(&m->jit, __ATOMIC_ACQUIRE);
+        if (jit && jit != JIT_NONE) snx_jit_invalidate_ranges(jit, addr, size, callback, context);
+    }
+    return count;
 }
 
 void snx_recompiled_call(struct snx_recompiled* m, CPU* cpu, uint64_t pc) {

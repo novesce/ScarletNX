@@ -157,23 +157,23 @@ scripts/apple-llvm.sh ios ~/apple-llvm/ios
 macOS, then the app:
 
 ```sh
-cmake --preset macos -DLLVM_DIR=$HOME/apple-llvm/macos/lib/cmake/llvm
+cmake --preset macos -DLLVM_DIR=$HOME/apple-llvm/macos/lib/cmake/llvm -DSNX_MOLTENVK=$HOME/moltenvk-macos
 cmake --build --preset macos
-cmake --install build/macos --prefix stage
-scripts/apple-app.sh macos stage out moltenvk   # out/ScarletNX.app
+cpack --config build/macos/CPackConfig.cmake -B out   # out/ScarletNX-macos-arm64.zip, ScarletNX.app in it
 ```
 
-`moltenvk` is the release's `MoltenVK-macos.tar`, extracted (`MoltenVK-ios.tar` for iOS). The CI pins the release and
+`SNX_MOLTENVK` is the release's `MoltenVK-macos.tar`, extracted (`MoltenVK-ios.tar` for iOS). CPack installs the app
+into its own folder, signs it ad hoc and zips it (`-G DragNDrop` makes a disk image instead).
+`cmake --install build/macos --prefix out/ScarletNX.app/Contents` makes the same app without the zip. The CI pins the release and
 its SHA-256 (`.github/workflows/build.yml`). Homebrew's LLVM works too, with every code generator:
 `-DSNX_LLVM_CONFIG="$(brew --prefix llvm)/bin/llvm-config"` in place of `LLVM_DIR`.
 
 iOS, then the IPA:
 
 ```sh
-cmake --preset ios -DLLVM_DIR=$HOME/apple-llvm/ios/lib/cmake/llvm
+cmake --preset ios -DLLVM_DIR=$HOME/apple-llvm/ios/lib/cmake/llvm -DSNX_MOLTENVK=$HOME/moltenvk-ios
 cmake --build --preset ios
-cmake --install build/ios --prefix stage
-scripts/apple-app.sh ios stage out moltenvk     # out/ScarletNX.ipa
+cpack --config build/ios/CPackConfig.cmake -B out     # out/ScarletNX-ios-arm64.ipa
 ```
 
 `MACOS_VERSION` (default 13.0) and `IOS_VERSION` (default 16.0) are the oldest systems `apple-llvm.sh` builds for,

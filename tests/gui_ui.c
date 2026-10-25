@@ -24,7 +24,7 @@ struct App {
 enum { LOAD_SWITCH, LOAD_3DS, SETTINGS, GAMES, OK, BACK, DATA };
 /* the row attributes are a bit each, none shared */
 typedef char ui_attr_bits[(UI_ATTR_FAILURE | UI_ATTR_BLINK | UI_ATTR_MORE_UP | UI_ATTR_MORE_DOWN | UI_ATTR_ACTIVE |
-                           UI_ATTR_LABEL | UI_ATTR_OPEN | UI_ATTR_TITLE) == 255
+                           UI_ATTR_LABEL | UI_ATTR_OPEN | UI_ATTR_TITLE | UI_ATTR_OFF) == 511
                               ? 1
                               : -1];
 

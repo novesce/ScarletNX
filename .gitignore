@@ -37,6 +37,7 @@ romfs/
 *.ppm
 *.vkshaders
 *.vkshipped
+*.vkscan
 *.jitcache
 shader_cache/
 vkshader_*.glsl

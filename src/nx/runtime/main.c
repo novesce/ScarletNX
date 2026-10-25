@@ -907,6 +907,8 @@ int snx_main(int argc, char** argv) {
     }
     if (g_addon) LOG("game: the update of the game in %s, with its settings and saves\n", base);
     snx_ir_slp_vectorizer(g_settings.slp_vectorizer); /* before the JIT's first compile too */
+    snx_ir_fpsr_flags(g_settings.fpsr_flags);
+    snx_ir_volatile_memory(g_settings.volatile_load_stores);
 
     fs_init(keys, title_keys); /* the npdm is read through it, and mem_init's layout comes before */
     free(keys);

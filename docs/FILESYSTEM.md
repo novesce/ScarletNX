@@ -70,13 +70,13 @@ and the same for `FontChineseSimplified`, `FontExtendedChineseSimplified`, `Font
 directory. `.bfttf` is accepted too and takes priority over `.ttf`; both take priority over the stand-ins.
 
 Without one, the runtime uses the stand-ins compiled in (`cmake/shared_fonts.cmake`): Noto Sans JP, SC, TC
-and KR subsets in `dist/fonts`, one per script, and yuzu's controller button glyphs for
+and KR subsets the build fetches, one per script, and yuzu's controller button glyphs for
 `FontNintendoExtended`. The subsets cover ASCII, Latin-1, common punctuation and the script's standard set
 (JIS X 0208, GB 2312, Big5, KS X 1001); they total about 11 MB. The console's private-use icon block,
 U+E000 to U+E1FF (buttons, symbols), is not in any free font, so `pl_font.c` gives every stand-in blank
 glyphs there: a game's font map that names one gets a glyph instead of a null pointer, and the icon draws
 as nothing. A console font is not touched.
 
-`dist/fonts/README.md` has where the subsets came from and how `tools/subset_fonts.py` regenerates them;
+[SHARED_FONTS.md](SHARED_FONTS.md) has where the subsets came from and how `tools/subset_fonts.py` regenerates them;
 the text is under the SIL Open Font License 1.1 (`dist/licenses/Noto/OFL.txt`). Font substitution can
 change text weight and spacing.

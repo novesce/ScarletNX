@@ -393,6 +393,7 @@ void snx_ir_emit(SnxIr* ir, SnxCodegen* codegen, const SnxFunction* function) {
         LLVMPositionBuilderAtEnd(B, other);
         must_tail(ir, call_dynamic(ir, ir_pc(ir)));
     }
+    ir_promote_registers(ir, fn);
     free(labels);
 }
 

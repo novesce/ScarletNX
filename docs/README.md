@@ -27,7 +27,7 @@ New here? Start with [Build](./BUILD.md), then [Usage](./USAGE.md).
     **[SuperTux target](./3DS-SUPERTUX.md)**
 - Switch runtime:
   - **[IPC interfaces](./IPC.md)** - the services a game talks to
-  - **[Filesystem](./FILESYSTEM.md)**
+  - **[Filesystem](./FILESYSTEM.md)** and its **[shared fonts' stand-ins](./SHARED_FONTS.md)**
   - **[NRO files](./NRO.md)** and **[ldr:ro](./LDR_RO.md)**
   - **[Networking](./NETWORKING.md)**
   - **[Memory accounting](./MEMORY_ACCOUNTING.md)**

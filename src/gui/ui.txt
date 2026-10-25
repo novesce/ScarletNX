@@ -6,8 +6,9 @@
 		attr = callback
 		# every entry where they fit: a list shows 8 rows at most by default
 		max_rows = 64
-		# a finger's: 40px at the 3x a phone held wide gets is about 48dp, Android's touch target
-		android.row_height = 40px
+		# a finger's (main.c's GUI_FINGER_ROW): a phone held wide gets 3x, so 144 pixels, Android's 48dp touch target at
+		# a density of 3 and more under it, iOS's 44pt at its 3x (#589)
+		android.row_height = 48px
 		[button]"Load Switch NSP/XCI/NRO" {}
 		[button]"Load Linux ARM ELF" {}
 		[button]"Load 3DS game" {}
@@ -27,7 +28,7 @@
 	# foot's, adds a folder)
 	[list]Rows {
 		max_rows = 64
-		android.row_height = 40px
+		android.row_height = 48px
 	}
 }
 # Games as a grid (the View box's View: Grid): a tile a game, its icon over its name, as many a line as fit; Recent
@@ -38,7 +39,7 @@
 		row_gap = 8px
 		tile_width = 12cols
 		tile_height = 4rows + 8px
-		android.row_height = 40px
+		android.row_height = 48px
 	}
 }
 # the Settings and the theme editor: the groups, or the theme's keys, in the list's column; beside them, under the
@@ -46,13 +47,13 @@
 [scene]FormList {
 	[list]Rows {
 		max_rows = 64
-		android.row_height = 40px
+		android.row_height = 48px
 	}
 }
 [scene]FormSide {
 	[list]Rows {
 		max_rows = 64
-		android.row_height = 40px
+		android.row_height = 48px
 	}
 }
 # a question's choices, a row each: the setup page's, and those of a box over a screen (a question, UI scale's, the
@@ -60,14 +61,15 @@
 [scene]Choices {
 	[list]Rows {
 		max_rows = 64
-		android.row_height = 40px
+		android.row_height = 48px
 	}
 }
-# the setup's Appearance page: Settings > App's Language, Theme and UI scale, a row each, under the page box's head
+# the setup's Appearance page: Settings > App's Language, Theme, UI scale and Side panel, Games' View and Icon size, a
+# row each, under the page box's head
 [scene]Appearance {
 	[list]Rows {
-		max_rows = 3
-		android.row_height = 40px
+		max_rows = 6
+		android.row_height = 48px
 	}
 }
 # the box of users a click on the head's user opens, a row each (its picture at its right), and the box of a game's
@@ -75,20 +77,20 @@
 [scene]Users {
 	[list]Rows {
 		max_rows = 8
-		android.row_height = 40px
+		android.row_height = 48px
 	}
 }
 [scene]Addons {
 	[list]Rows {
 		max_rows = 64
-		android.row_height = 40px
+		android.row_height = 48px
 	}
 }
 # the box Games' V opens: an option of the list a row each, its value between the arrows Left and Right go by
 [scene]View {
 	[list]Rows {
 		max_rows = 8
-		android.row_height = 40px
+		android.row_height = 48px
 	}
 }
 # the Compile tab's queue, under its box's head: a row a compile in the order they were asked, those that ended
@@ -96,14 +98,14 @@
 [scene]Queue {
 	[list]Rows {
 		max_rows = 16
-		android.row_height = 40px
+		android.row_height = 48px
 	}
 }
 # the box of a game's save states, which S on Games opens: a row each, the focused one's picture beside the box
 [scene]States {
 	[list]Rows {
 		max_rows = 64
-		android.row_height = 40px
+		android.row_height = 48px
 	}
 }
 # the OK under the files of a box over the screen (what an older version left, what Clean Old Settings did): any key,
@@ -111,7 +113,7 @@
 [scene]Files {
 	[list]Ok {
 		max_rows = 1
-		android.row_height = 40px
+		android.row_height = 48px
 		@[button]"OK" {}
 	}
 }

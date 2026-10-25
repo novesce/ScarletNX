@@ -82,8 +82,11 @@ static void wr_string(Wr* w, const char* s) {
     memcpy(w->b + w->n, s, strlen(s));
     w->n += strlen(s);
 }
+/* ENet takes the packet only when it is sent: one to a peer that left already (a test's client that closed) is the
+   sender's to free */
 static void room_send(ENetPeer* peer, const uint8_t* data, size_t size) {
-    enet_peer_send(peer, 0, enet_packet_create(data, size, ENET_PACKET_FLAG_RELIABLE));
+    ENetPacket* packet = enet_packet_create(data, size, ENET_PACKET_FLAG_RELIABLE);
+    if (packet && enet_peer_send(peer, 0, packet) < 0) enet_packet_destroy(packet);
 }
 static void room_information(FakeRoom* f) {
     Wr w;

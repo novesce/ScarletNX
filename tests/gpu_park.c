@@ -69,13 +69,16 @@ StateFnPtr state_fn_find(const char* name) {
     (void)name;
     return NULL;
 }
-/* Keep the compute report path identical to compute.c, using the real shared report handler. */
+/* Keep compute reports and inline uploads identical to compute.c, using the
+   real shared report and upload handlers. */
 void query_get(GpuChannel* ch, u32* r, int base, u32 v);
 void compute_method(GpuChannel* ch, u32 m, u32 v, int last) {
     (void)last;
     m &= 0xFFF;
     ch->rcomp[m] = v;
     if (m == 0x6C3) query_get(ch, ch->rcomp, 0x6C0, v);
+    if (m == 0x6C) i2m_launch(ch, ch->rcomp, 0x60);
+    if (m == 0x6D) i2m_data(ch, v);
 }
 void kepler_i2m_method(GpuChannel* ch, u32 m, u32 v) { (void)ch, (void)m, (void)v; }
 void fermi2d_method(GpuChannel* ch, u32 m, u32 v) { (void)ch, (void)m, (void)v; }
@@ -125,8 +128,24 @@ static int dma_on_cpu(const GpuDmaOp* o) { /* the renderer's copy as its CPU ref
     dma_copy_ref(o);
     return 1;
 }
+/* A compute result whose host mirror still has the old command payload. Safe
+   reads publish it before the inline engine consumes it. */
+static struct {
+    u64 addr;
+    u32 words[4], reads;
+} pending_inline;
+static void compute_read(u64 addr, u64 size) {
+    if (!pending_inline.addr || addr >= pending_inline.addr + 16 || addr + size <= pending_inline.addr) return;
+    u8 bytes[16];
+    for (u32 i = 0; i < 4; i++) snx_st_le32(bytes + 4 * i, pending_inline.words[i]);
+    gmem_write_raw(pending_inline.addr, bytes, sizeof bytes);
+    pending_inline.addr = 0;
+    pending_inline.reads++;
+    g_cs_any = 0;
+}
 static const Renderer stand_in = {.name = "stand-in",
                                   .dma_copy = dma_on_cpu,
+                                  .cs_mem_need = compute_read,
                                   .mem_may_have_changed = new_epoch,
                                   .clear = record_clear,
                                   .draw = no_draw,
@@ -576,6 +595,42 @@ int main(void) {
         cpu_store(SEM + 80, 1);
         wait_marks(1);
         expect(gmem_r32(0x9100) == 0x55667788, "DMA reads CPU data produced after a 3D or compute report acquire");
+        forget_marks();
+    }
+    /* Citron's Peach fix: compute-inline payloads need the earlier GPU
+       result, including a continuation entry and discontiguous source pages. */
+    for (u32 layout = 0; layout < 3; layout++) {
+        const u32 output = 0x9400;
+        u32 commands[] = {inc(0x60, 5) | (1u << 13), 16, 1, 0, output, 16,
+                          imm(0x6C, 1) | (1u << 13),
+                          (3u << 29) | (4u << 16) | (1u << 13) | 0x6D,
+                          0, 0, 0, 0, imm(CLEAR, 0x920 + layout)};
+        u64 entries[2];
+        u32 count = layout ? 2 : 1;
+        entries[0] = push(commands, layout ? 8 : 13);
+        if (layout == 1) entries[1] = push(commands + 8, 5);
+        if (layout == 2) {
+            const u64 source = 0xAFF8;
+            u8 bytes[20];
+            for (u32 i = 0; i < 5; i++) snx_st_le32(bytes + i * 4, commands[8 + i]);
+            gmem_write_raw(source, bytes, sizeof bytes);
+            entries[1] = source | 5ull << 42;
+        }
+        pending_inline.addr = layout ? gpfifo_addr(entries[1]) : gpfifo_addr(entries[0]) + 32;
+        pending_inline.reads = 0;
+        for (u32 i = 0; i < 4; i++) {
+            pending_inline.words[i] = 0x87654321 + i;
+            cpu_store(output + i * 4, 0);
+        }
+        g_cs_any = 1;
+        submit(entries, count, 34 + layout);
+        wait_marks(1);
+        expect(marks_are((u32[]){0x920 + layout}, 1), "compute-inline command finishes");
+        for (u32 i = 0; i < 4; i++)
+            expect(gmem_r32(output + i * 4) == pending_inline.words[i], "compute-inline consumes the GPU result");
+        expect(pending_inline.reads == 1, "compute-inline resolves its pending input once per run");
+        pending_inline.addr = 0;
+        g_cs_any = 0;
         forget_marks();
     }
     expect(!warned, "no wait timed out");

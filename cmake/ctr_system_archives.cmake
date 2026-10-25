@@ -40,4 +40,4 @@ const size_t ${snx_symbol}_size = ${snx_size};
 ")
 endforeach()
 # file(CONFIGURE) writes only when the content changed, so a configure rebuilds nothing on its own
-file(CONFIGURE OUTPUT "${CMAKE_BINARY_DIR}/generated/ctr_system_archives.c" CONTENT "${snx_archives_c}")
+file(CONFIGURE OUTPUT "${PROJECT_BINARY_DIR}/generated/ctr_system_archives.c" CONTENT "${snx_archives_c}")

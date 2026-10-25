@@ -23,7 +23,7 @@ endfunction()
 
 # where a recipe file (this text) would build "lib" with KEY..., seen from build tree TREE, in a configure of its own
 function(dir_of out tree recipe)
-    set(CMAKE_BINARY_DIR "${WORK}/${tree}")
+    set(PROJECT_BINARY_DIR "${WORK}/${tree}")
     set_property(GLOBAL PROPERTY snx_deps_headers "")
     set(key ${ARGN})
     file(WRITE "${WORK}/recipes/${tree}.cmake" "${recipe}\nsnx_deps_cached(lib found \${key})\n")

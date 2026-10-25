@@ -71,13 +71,15 @@ static void builder(LLVMPassBuilderOptionsRef options) { settings_llvm_builder(&
 static void machine(LLVMTargetMachineRef target) { settings_llvm_machine(&g_settings, target); }
 
 /* tuning.text, a line each: "pipeline=" the one that runs (default: LLVM's own for the level), whether the SLP
-   vectorizer runs (snx_ir_slp), then every key of the llvm table with its value. 0, or -1 with why */
+   vectorizer runs (snx_ir_slp), whether FPSR's flags are kept (snx_ir_fpsr_exact), whether guest accesses are volatile (snx_ir_volatile),
+   then every key of the llvm table with its value. 0, or -1 with why */
 static int describe(char* error, size_t error_size) {
     char* text = g_llvm_tuning.text;
     size_t size = sizeof g_llvm_tuning.text, at;
     const IniOpt* o;
-    int n = snprintf(text, size, "pipeline=%s\nslp_vectorizer=%d\n",
-                     g_llvm_tuning.tuning.pipeline ? g_llvm_tuning.tuning.pipeline : "default", snx_ir_slp());
+    int n = snprintf(text, size, "pipeline=%s\nslp_vectorizer=%d\nfpsr_flags=%d\nvolatile_memory=%d\n",
+                     g_llvm_tuning.tuning.pipeline ? g_llvm_tuning.tuning.pipeline : "default", snx_ir_slp(),
+                     snx_ir_fpsr_exact(), snx_ir_volatile());
     for (at = (size_t)n, o = g_llvm_ini; n >= 0 && at < size && o->key; o++, at += (size_t)n) {
         char value[64];
         ini_format(o, value, sizeof value);

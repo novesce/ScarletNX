@@ -34,7 +34,7 @@ target_compile_options(snx_demangle PRIVATE -pedantic-errors -Wall -Wextra -Werr
 if(NOT ANDROID AND NOT IOS)
     add_executable(snx-logscan utilities/logscan_main.c utilities/logscan.c)
     set_target_properties(snx-logscan PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF
-                                                 LINKER_LANGUAGE CXX RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+                                                 LINKER_LANGUAGE CXX RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}")
     target_compile_options(snx-logscan PRIVATE -pedantic-errors -Wall -Wextra -Werror -Werror=missing-prototypes)
     target_link_libraries(snx-logscan PRIVATE snx_demangle)
 endif()

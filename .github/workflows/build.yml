@@ -1431,7 +1431,6 @@ jobs:
           cmake --preset macos -DLLVM_DIR="$PWD/apple-llvm/lib/cmake/llvm" -DSNX_TEST_VP9_VECTORS=ON \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cmake --build --preset macos --parallel "$(getconf _NPROCESSORS_ONLN)"
-          cmake --install build/macos --prefix stage-macos
       - name: Build the app for iOS
         id: ios-build
         if: ${{ !cancelled() && steps.ios-llvm-build.outcome != 'failure' }}
@@ -1439,7 +1438,6 @@ jobs:
           cmake --preset ios -DLLVM_DIR="$PWD/ios-llvm/lib/cmake/llvm" \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cmake --build --preset ios --parallel "$(getconf _NPROCESSORS_ONLN)"
-          cmake --install build/ios --prefix stage-ios
       - name: Trim the compiler cache
         if: ${{ !cancelled() }}
         run: |
@@ -1470,7 +1468,7 @@ jobs:
       - name: Test native tooling and indexed filesystems
         if: ${{ !cancelled() && steps.macos-build.outcome == 'success' }}
         run: ctest --test-dir build/macos --output-on-failure --parallel 4
-      # ditto keeps the app's links and its signature, which zip would not
+      # the app, signed ad hoc, and its zip, by CPack (cmake/apple_package.cmake)
       - name: Make the macOS app
         if: ${{ !cancelled() && steps.macos-build.outcome == 'success' }}
         run: |
@@ -1478,8 +1476,10 @@ jobs:
             "https://github.com/V380-Ori/Ryujinx.MoltenVK/releases/download/$MOLTENVK_RELEASE/MoltenVK-macos.tar"
           echo "$MOLTENVK_MACOS_SHA256  moltenvk-macos.tar" | shasum -a 256 -c
           mkdir moltenvk-macos && tar -xf moltenvk-macos.tar -C moltenvk-macos
-          scripts/apple-app.sh macos stage-macos app-macos moltenvk-macos
-          ditto -c -k --keepParent app-macos/ScarletNX.app ScarletNX-macos-arm64-${{ steps.commit.outputs.short }}.zip
+          cmake build/macos -DSNX_MOLTENVK="$PWD/moltenvk-macos"
+          cpack --config build/macos/CPackConfig.cmake -B app-macos \
+            -D CPACK_PACKAGE_FILE_NAME=ScarletNX-macos-arm64-${{ steps.commit.outputs.short }}
+          mv app-macos/ScarletNX-macos-arm64-${{ steps.commit.outputs.short }}.zip .
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() && steps.macos-build.outcome == 'success' }}
         with:
@@ -1495,8 +1495,10 @@ jobs:
             "https://github.com/V380-Ori/Ryujinx.MoltenVK/releases/download/$MOLTENVK_RELEASE/MoltenVK-ios.tar"
           echo "$MOLTENVK_IOS_SHA256  moltenvk-ios.tar" | shasum -a 256 -c
           mkdir moltenvk-ios && tar -xf moltenvk-ios.tar -C moltenvk-ios
-          scripts/apple-app.sh ios stage-ios app-ios moltenvk-ios
-          mv app-ios/ScarletNX.ipa ScarletNX-ios-arm64-${{ steps.commit.outputs.short }}.ipa
+          cmake build/ios -DSNX_MOLTENVK="$PWD/moltenvk-ios"
+          cpack --config build/ios/CPackConfig.cmake -B app-ios \
+            -D CPACK_PACKAGE_FILE_NAME=ScarletNX-ios-arm64-${{ steps.commit.outputs.short }}
+          mv app-ios/ScarletNX-ios-arm64-${{ steps.commit.outputs.short }}.ipa .
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() && steps.ios-build.outcome == 'success' }}
         with:

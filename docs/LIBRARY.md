@@ -36,6 +36,28 @@ find_package(ScarletNXRecompiler REQUIRED)
 target_link_libraries(my_emulator PRIVATE ScarletNX::recompiler)
 ```
 
+A project can also build the library in its own tree, fetched with
+[CPM.cmake](https://github.com/cpm-cmake/CPM.cmake) (or added with `add_subdirectory`).
+With every driver off, the configure needs LLVM and nothing else: no third-party
+package is downloaded and no font or other asset of the runtimes is fetched. ScarletNX's
+tests are left out when another project includes it (`SNX_BUILD_TESTING`, on only at the
+top level), without changing that project's `BUILD_TESTING`:
+
+```cmake
+CPMAddPackage(NAME ScarletNX
+              GIT_REPOSITORY https://github.com/scarletnx/ScarletNX.git
+              GIT_TAG main   # a commit, for a reproducible build
+              GIT_SHALLOW YES
+              EXCLUDE_FROM_ALL YES
+              OPTIONS "SNX_BUILD_NX OFF" "SNX_BUILD_GNUABI OFF" "SNX_BUILD_3DS OFF"
+                      "SNX_BUILD_VITA OFF" "SNX_BUILD_AGB OFF" "SNX_DEPLOY OFF")
+target_link_libraries(my_emulator PRIVATE ScarletNX::recompiler)
+```
+
+`EXCLUDE_FROM_ALL` builds only what the project links. The project builds with Clang,
+as ScarletNX does, and finds LLVM the same way (`llvm-config` on the PATH,
+`SNX_LLVM_CONFIG` or `LLVM_DIR`, `cmake/llvm.cmake`).
+
 The archive carries the function discovery, the LLVM emitters, the linker and
 the prebuilt runtime library every module gets. Its link line adds LLVM, which the
 package records. The backend generates code for the machine it runs on, as the `scarletnx`
@@ -84,7 +106,10 @@ The recompiler also takes the `-O` level (`snx_recompiler_set_optimization`, `2`
 default), how many code units compile at once (`snx_recompiler_set_jobs`, on
 threads),
 progress lines (`snx_recompiler_set_verbose`) and a folder to save the generated
-code's text in (`snx_recompiler_set_keep_ir`).
+code's text in (`snx_recompiler_set_keep_ir`). `snx_recompiler_set_hook_direct_calls`
+routes calls between discovered functions through the CPU's dispatch table. Enable it
+when the runtime can invalidate guest code, so callers do not retain direct pointers to
+retired functions.
 
 `snx_recompiler_set_a64_target` chooses the A64 features of the guest's CPU, which
 decide what the decoder (`tools/a64dec`, from QEMU's `a64.decode`) accepts: an
@@ -143,7 +168,15 @@ address and runs it, as the Linux runtime (`src/gnuabi/runtime/jit.c`) does. A c
 keeps `snx_runtime_defaults`' miss can instead name that handler with
 `snx_recompiled_set_fallback`, which the module's misses then run instead of its own JIT. `snx_recompiler_set_cache` names a
 folder that keeps linked modules (LLVM) by a hash of everything they are made from, and
-the compiled runtime library: a module found there is loaded instead of compiled.
+the compiled runtime library: a module found there is loaded instead of compiled. The
+units its lazy JIT compiles on a miss are kept in `library-jit.cache` in the same folder,
+and a later miss loads a unit instead of compiling it when its code is the same, byte for
+byte, and the file was made with the same settings, LLVM and host CPU. The modules of one
+program and other programs may share the file. A damaged file is made again, and a folder
+that can't be written to leaves the JIT working without the file.
+`snx_recompiled_invalidate` clears dispatch entries for compiled functions overlapping
+[addr, addr+size) and purges matching lazy JIT units. Host code stays loaded for running
+threads. An optional callback receives each retired [start, end) span.
 
 For A32 and Thumb, `snx_recompile32` prepares an address range whose blocks are compiled
 on first use by the LLVM block compiler (`src/common/cpu/arm/`), and

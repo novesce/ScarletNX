@@ -149,9 +149,11 @@ typedef struct {
     size_t npatches;
     int rlayered; /* the RomFS image is made up with the mods' over the game's (romfs_init) */
 } HleFs;
-/* fs's host side: locks and condition variables, which a save state never holds (hle.h's g_host) */
+/* fs's host side, which a save state never holds (hle.h's g_host): locks, and what the RomFS folder's files may still
+   map as the game first reads them (fs_tree_map, tree.lock) */
 typedef struct {
     PMutex dlock;
+    FsShare romfs;
 } HostFs;
 /* all zero: fs_init sets the tree up */
 extern const StateFnTable g_fs_state_fns; /* the functions a save state may hold of fs.c */

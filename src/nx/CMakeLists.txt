@@ -52,7 +52,7 @@ snx_component(hle hle/services/services.c hle/services/audren.c hle/services/aud
               hle/services/misc.c hle/services/ldr.c hle/services/network/bsd.c hle/services/network/dns.c
               hle/services/network/nifm.c hle/services/network/ssl.c hle/services/network/ldn.c hle/services/network/room.c hle/filesystem/fs.c hle/services/hid.c hle/services/hid_motion.c hle/services/hid_touch.c hle/services/vi.c hle/services/nvdrv.c)
 # the shared fonts' stand-ins (cmake/shared_fonts.cmake), which hle/services/pl.c hands out
-target_sources(snx_hle PRIVATE "${CMAKE_BINARY_DIR}/generated/shared_fonts.c")
+target_sources(snx_hle PRIVATE "${PROJECT_BINARY_DIR}/generated/shared_fonts.c")
 # the IPC interfaces of the services (docs/IPC.md): their dispatchers are generated, the handlers are in the services'
 # files. A type is defined before the files that use it
 include("${PROJECT_SOURCE_DIR}/cmake/swipc.cmake")
@@ -73,15 +73,18 @@ snx_component(gpu gpu/gpu.c gpu/maxwell/engines.c gpu/maxwell/mme.c gpu/maxwell/
               gpu/nvn_trace.c gpu/shipped_pass.c)
 # mme_jit.c compiles the macros mme_hle.c has no implementation for with the LLVM backend
 target_link_libraries(snx_gpu PRIVATE snx_llvm)
+include("${PROJECT_SOURCE_DIR}/cmake/ship_walk.cmake")
+snx_ship_walk(gpu/shipped_pass.c)
 
 include("${PROJECT_SOURCE_DIR}/cmake/controls_atlas.cmake")
 include("${PROJECT_SOURCE_DIR}/cmake/gui_themes.cmake")
-set(platform runtime/platform/plat.c runtime/platform/unattended.c runtime/platform/backend/sdl3.c
+set(platform runtime/platform/plat.c runtime/platform/plat_sdl.c runtime/platform/unattended.c
+             runtime/platform/backend/sdl3.c
              runtime/platform/backend/gamepad.c runtime/platform/tracy.c
              runtime/platform/hud.c runtime/platform/overlay.c runtime/platform/stats.c runtime/platform/touch.c
              runtime/platform/ui.c runtime/platform/vpad.c runtime/platform/fatal_screen.c
              runtime/platform/prepare_screen.c
-             "${CMAKE_BINARY_DIR}/generated/controls_png.c")
+             "${PROJECT_BINARY_DIR}/generated/controls_png.c")
 if(WIN32)
     list(APPEND platform runtime/platform/plat_win32.c runtime/platform/profiler_win32.c)
 else()
@@ -130,7 +133,7 @@ if(ANDROID)
     # FFmpeg's assembly reaches its tables PC-relative, as its own shared libraries allow with this
     target_link_options(scarletnx PRIVATE -Wl,-Bsymbolic)
     add_executable(scarletnx-run runtime/platform/android_run.c)
-    set_target_properties(scarletnx-run PROPERTIES OUTPUT_NAME libscarletnx-run.so RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+    set_target_properties(scarletnx-run PROPERTIES OUTPUT_NAME libscarletnx-run.so RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}")
     target_link_libraries(scarletnx-run PRIVATE ${CMAKE_DL_LIBS})
     install(TARGETS scarletnx scarletnx-run LIBRARY DESTINATION lib/${ANDROID_ABI} RUNTIME DESTINATION lib/${ANDROID_ABI})
 else()
@@ -162,8 +165,8 @@ target_link_libraries(scarletnx-nx PUBLIC snx_nx_flags ${components} snx_driver)
 target_link_libraries(scarletnx PRIVATE scarletnx-nx)
 # VMA is C++: link with the C++ driver. It goes in the build folder itself, where
 # the native driver and CI look for it
-set_target_properties(scarletnx PROPERTIES LINKER_LANGUAGE CXX RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+set_target_properties(scarletnx PROPERTIES LINKER_LANGUAGE CXX RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}")
 if(WIN32)
     # Prefer static toolchain/SDL libraries. LLVM may still use a DLL import library,
     # resolved by cmake/llvm.cmake and bundled by CI. user32 provides message boxes and
@@ -172,7 +175,7 @@ if(WIN32)
     target_link_libraries(scarletnx PRIVATE user32 advapi32)
     # The application manifest (src/common/platform/runtime.manifest): UTF-8 as the process's code page, long paths
     enable_language(RC)
-    target_sources(scarletnx PRIVATE "${CMAKE_SOURCE_DIR}/src/common/platform/runtime.rc")
+    target_sources(scarletnx PRIVATE "${PROJECT_SOURCE_DIR}/src/common/platform/runtime.rc")
     target_link_options(scarletnx PRIVATE -static)
     target_link_options(scarletnx PRIVATE -mwindows)
 else()
@@ -196,7 +199,7 @@ target_link_libraries(snx_platform PRIVATE SDL3::SDL3 snx_window_icon snx_build_
 target_link_libraries(snx_vk PRIVATE snx_build_info FFmpeg::avutil) # vk/nvdec.c: FFmpeg's Vulkan device and pictures
 # the game's menu in YoRHa's colours, from src/gui/themes/yorha/theme.ini (cmake/gui_themes.cmake), and the shader
 # loading screen's when the launcher's theme can't be read
-target_include_directories(snx_platform PRIVATE "${CMAKE_BINARY_DIR}/generated")
+target_include_directories(snx_platform PRIVATE "${PROJECT_BINARY_DIR}/generated")
 target_link_libraries(scarletnx PRIVATE SDL3::SDL3)
 
 if(BUILD_TESTING)
@@ -273,19 +276,19 @@ if(BUILD_TESTING AND SNX_TEST_VULKAN)
     # images in pieces are tested too. `snx-test-astc-vulkan --large` decodes two 512 MiB textures (minutes on lavapipe)
     # cmd.c records the frame's commands through record.c's thread, with the platform's threads and locks
     if(WIN32)
-        set(snx_astc_plat runtime/platform/plat_win32.c)
+        set(snx_astc_plat runtime/platform/plat_win32.c runtime/platform/plat_sdl.c)
     else()
-        set(snx_astc_plat runtime/platform/plat_posix.c)
+        set(snx_astc_plat runtime/platform/plat_posix.c runtime/platform/plat_sdl.c)
     endif()
     add_executable(snx-test-astc-vulkan "${PROJECT_SOURCE_DIR}/tests/astc_vulkan.c" "${PROJECT_SOURCE_DIR}/tests/tracy_stubs.c"
         "${PROJECT_SOURCE_DIR}/tests/support/astc.c" gpu/vk/astc.c
         gpu/vk/blocklinear.c gpu/texture/blocklinear.c gpu/vk/texconv.c "${PROJECT_SOURCE_DIR}/tests/support/etc2.c"
         "${PROJECT_SOURCE_DIR}/tests/support/bcn.c"
         gpu/vk/cmd.c gpu/vk/memory.c gpu/vk/record.c gpu/vk/vma.cpp ${snx_astc_plat} "${volk_SOURCE_DIR}/volk.c"
-        "${CMAKE_BINARY_DIR}/generated/spirv/astc_spv.c" "${CMAKE_BINARY_DIR}/generated/spirv/blocklinear_spv.c"
-        "${CMAKE_BINARY_DIR}/generated/spirv/texconv_spv.c")
+        "${PROJECT_BINARY_DIR}/generated/spirv/astc_spv.c" "${PROJECT_BINARY_DIR}/generated/spirv/blocklinear_spv.c"
+        "${PROJECT_BINARY_DIR}/generated/spirv/texconv_spv.c")
     target_link_libraries(snx-test-astc-vulkan PRIVATE snx_nx_flags scarletnx-filesystem snx_xxhash Threads::Threads
-                                                      ${CMAKE_DL_LIBS})
+                                                      SDL3::SDL3 ${CMAKE_DL_LIBS})
     set_target_properties(snx-test-astc-vulkan PROPERTIES LINKER_LANGUAGE CXX)
     add_test(NAME astc_vulkan COMMAND snx-test-astc-vulkan)
     add_test(NAME astc_vulkan_pieces COMMAND snx-test-astc-vulkan --vk_max_allocation_mb=4)
@@ -314,7 +317,7 @@ elseif(SNX_DEPLOY)
         COMMAND "${CMAKE_COMMAND}" "-DRUNTIME=$<TARGET_FILE:scarletnx>" "-DCTR_RUNTIME=${snx_ctr_deployed}"
                 "-DVITA_RUNTIME=${snx_vita_deployed}"
                 "-DGAMES=${SNX_RECOMPILED_DIR}" "-DWINDOWS=${WIN32}" "-DMACOS=${APPLE}"
-                -P "${CMAKE_SOURCE_DIR}/cmake/deploy.cmake"
+                -P "${PROJECT_SOURCE_DIR}/cmake/deploy.cmake"
         VERBATIM)
 endif()
 
@@ -323,8 +326,8 @@ endif()
 if(WIN32)
     add_custom_command(TARGET scarletnx POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:scarletnx>"
-                "${CMAKE_BINARY_DIR}/scarletnx-switch.exe" VERBATIM)
-    install(PROGRAMS "${CMAKE_BINARY_DIR}/scarletnx-switch.exe" DESTINATION bin)
+                "${PROJECT_BINARY_DIR}/scarletnx-switch.exe" VERBATIM)
+    install(PROGRAMS "${PROJECT_BINARY_DIR}/scarletnx-switch.exe" DESTINATION bin)
 elseif(NOT ANDROID AND NOT IOS)
     set(snx_names scarletnx-switch)
     # the other drivers, which it is too (SNX_MULTICALL, src/multicall), by the names they have as programs of their own
@@ -340,9 +343,9 @@ elseif(NOT ANDROID AND NOT IOS)
     foreach(name IN LISTS snx_names)
         # in place of the program of that name an older build made in this folder
         add_custom_command(TARGET scarletnx POST_BUILD
-            COMMAND "${CMAKE_COMMAND}" -E rm -f "${CMAKE_BINARY_DIR}/${name}"
-            COMMAND "${CMAKE_COMMAND}" -E create_symlink "$<TARGET_FILE_NAME:scarletnx>" "${CMAKE_BINARY_DIR}/${name}"
+            COMMAND "${CMAKE_COMMAND}" -E rm -f "${PROJECT_BINARY_DIR}/${name}"
+            COMMAND "${CMAKE_COMMAND}" -E create_symlink "$<TARGET_FILE_NAME:scarletnx>" "${PROJECT_BINARY_DIR}/${name}"
             VERBATIM)
-        install(PROGRAMS "${CMAKE_BINARY_DIR}/${name}" DESTINATION bin)
+        install(PROGRAMS "${PROJECT_BINARY_DIR}/${name}" DESTINATION ${CMAKE_INSTALL_BINDIR})
     endforeach()
 endif()

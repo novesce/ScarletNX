@@ -13,7 +13,7 @@
 set(CPM_VERSION 0.43.2)
 set(CPM_HASH 49a3bef91ceb65bb66d57255e12d1ffd22abc2f6408fa9fe4534c544a2f232aa)
 if(NOT DEFINED CPM_SOURCE_CACHE AND NOT DEFINED ENV{CPM_SOURCE_CACHE})
-    set(CPM_SOURCE_CACHE "${CMAKE_SOURCE_DIR}/.cache/cpm" CACHE PATH "Where CPM.cmake keeps downloaded packages")
+    set(CPM_SOURCE_CACHE "${PROJECT_SOURCE_DIR}/.cache/cpm" CACHE PATH "Where CPM.cmake keeps downloaded packages")
 endif()
 if(DEFINED CPM_SOURCE_CACHE)
     set(cpm_file "${CPM_SOURCE_CACHE}/cpm/CPM_${CPM_VERSION}.cmake")
@@ -123,15 +123,15 @@ endif()
 # OpenSSL for the hashes and ciphers (the NX, 3DS and Vita loaders, ldr, csrng, hactool) and the ssl service's TLS. It
 # builds with its own Configure and make, which cmake/openssl.cmake runs
 # The archives' SHA-256 are also part of their cache keys (cmake/deps_cache.cmake)
-include("${CMAKE_SOURCE_DIR}/cmake/deps_cache.cmake")
-include("${CMAKE_SOURCE_DIR}/cmake/apple.cmake")
+include("${PROJECT_SOURCE_DIR}/cmake/deps_cache.cmake")
+include("${PROJECT_SOURCE_DIR}/cmake/apple.cmake")
 if(SNX_BUILD_NX OR SNX_BUILD_3DS OR SNX_BUILD_GNUABI OR snx_vita_runtime) # the GNU ABI runtime's random bytes and TLS sockets
     set(snx_openssl_sha256 325b5c806167c13b40b1ffeadfe0248197c00eccc4cf123ec1e28d2d2fd216d9)
     CPMAddPackage(NAME OpenSSL VERSION 4.0.3
                   URL https://github.com/openssl/openssl/releases/download/openssl-4.0.3/openssl-4.0.3.tar.gz
                   URL_HASH SHA256=${snx_openssl_sha256}
                   DOWNLOAD_ONLY YES)
-    include("${CMAKE_SOURCE_DIR}/cmake/openssl.cmake")
+    include("${PROJECT_SOURCE_DIR}/cmake/openssl.cmake")
 endif()
 
 if((SNX_BUILD_NX AND NOT SNX_TOOLS_ONLY) OR SNX_BUILD_3DS OR snx_vita_runtime)
@@ -164,7 +164,7 @@ if((SNX_BUILD_NX AND NOT SNX_TOOLS_ONLY) OR SNX_BUILD_3DS OR snx_vita_runtime)
                       URL https://raw.githubusercontent.com/azahar-emu/azahar/8a2c44be5688db1cea22ba7c485e8befc892e673/externals/open_source_archives/include/bad_word_list.app.romfs.h
                       URL_HASH SHA256=fe040590fa035e2602c9ce25ba3cf6a208fcb72cb9d53945cbc5747610ad4e15
                       DOWNLOAD_ONLY YES DOWNLOAD_NO_EXTRACT YES)
-        include("${CMAKE_SOURCE_DIR}/cmake/ctr_system_archives.cmake")
+        include("${PROJECT_SOURCE_DIR}/cmake/ctr_system_archives.cmake")
     endif()
     # volk.c and VMA's implementation (src/nx/gpu/vk/vma.cpp) compiled into a target of ours: no warnings, and not
     # the sanitizers SNX_TEST_SANITIZERS gives our code (tests/CMakeLists.txt)
@@ -182,19 +182,34 @@ if((SNX_BUILD_NX AND NOT SNX_TOOLS_ONLY) OR snx_vita_runtime)
                   URL https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz
                   URL_HASH SHA256=${snx_ffmpeg_sha256}
                   DOWNLOAD_ONLY YES)
-    include("${CMAKE_SOURCE_DIR}/cmake/ffmpeg.cmake")
+    include("${PROJECT_SOURCE_DIR}/cmake/ffmpeg.cmake")
 endif()
 
 # Extraction-only and tools-only builds do not contain the NX runtime or its graphics/media dependencies.
 if(SNX_BUILD_NX AND NOT SNX_TOOLS_ONLY)
-    # the shared fonts' stand-ins (cmake/shared_fonts.cmake): Noto Sans subsets in dist/fonts for the five text fonts,
-    # one per script, because a game asks the font for the characters it draws and the Open Sans Eden ships has none
-    # of the CJK ones; and yuzu's controller button glyphs (GPL-2.0-or-later) in the source file Eden keeps them in
+    # the shared fonts' stand-ins (cmake/shared_fonts.cmake): Noto Sans subsets for the five text fonts, one per
+    # script, because a game asks the font for the characters it draws and the Open Sans Eden ships has none of the
+    # CJK ones; and yuzu's controller button glyphs (GPL-2.0-or-later) in the source file Eden keeps them in. The
+    # subsets (SIL OFL 1.1, docs/SHARED_FONTS.md) are fetched from the commit of this repository that last changed
+    # them, so a checkout, and a project fetching ScarletNX for its recompiler alone, carries none of their 11 MB
+    set(snx_noto_url https://raw.githubusercontent.com/scarletnx/ScarletNX/777f377013806bc4cdbbc0306eca6e7e9c835df2/dist/fonts)
+    foreach(font IN ITEMS "JP 0941fc22edbe0b3b9e8306d4a2feae5e9c0fbd25942600564cc3edb69da88e62"
+                          "SC fa874173ff129ef89f6e24e432ab14a51124a21aae7a1860e9c8146337631312"
+                          "TC 58aac9005ce3f61a1ed1bf052fce327b4a97e99540c45a25da23a8bf162402fa"
+                          "KR ce9a4a8c87c60350440b8e0c77c0af77738ed86a145c85ce031cddf51dbbb9eb")
+        string(REPLACE " " ";" font "${font}")
+        list(GET font 0 script)
+        list(GET font 1 hash)
+        CPMAddPackage(NAME NotoSans${script}Subset VERSION 2026
+                      URL ${snx_noto_url}/NotoSans${script}-Subset.ttf
+                      URL_HASH SHA256=${hash}
+                      DOWNLOAD_ONLY YES DOWNLOAD_NO_EXTRACT YES)
+    endforeach()
     CPMAddPackage(NAME YuzuOSSExtension VERSION 2019
                   URL https://raw.githubusercontent.com/eden-emulator/mirror/2b87305d319f0bd04da36fb96314934f37b12637/src/core/file_sys/system_archive/data/font_nintendo_extended.cpp
                   URL_HASH SHA256=6fbbf5176ff4fd2024f9d150c889477f6b45ece4ac5e45d51286e32f8b13a6f2
                   DOWNLOAD_ONLY YES DOWNLOAD_NO_EXTRACT YES)
-    include("${CMAKE_SOURCE_DIR}/cmake/shared_fonts.cmake")
+    include("${PROJECT_SOURCE_DIR}/cmake/shared_fonts.cmake")
 
     CPMAddPackage(NAME VulkanMemoryAllocator VERSION 3.4.0
                   URL https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator/archive/refs/tags/v3.4.0.tar.gz
@@ -231,7 +246,28 @@ if(SNX_BUILD_NX AND NOT SNX_TOOLS_ONLY)
 endif()
 
 set(SNX_SDL3_FROM_SOURCE OFF)
+# The system's SDL3 from find_package, or CPM's pinned source build. FreeBSD's ports package lags the pin (3.4.16
+# against 3.4.18), so CPM's version check refuses it and builds SDL3 itself: SNX_SYSTEM_SDL3 takes the native package
+# instead, which needs only 3.4.16, the version every SDL call in the tree is in. It is the default on FreeBSD, whose
+# build installs the sdl3 package (docs/BUILD.md); the pinned source build is had with -DSNX_SYSTEM_SDL3=OFF
+set(snx_sdl3_system_default OFF)
+if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+    set(snx_sdl3_system_default ON)
+endif()
+option(SNX_SYSTEM_SDL3 "Use the system's SDL3 from find_package, not CPM's pinned source build"
+       ${snx_sdl3_system_default})
 if((SNX_BUILD_NX AND NOT SNX_TOOLS_ONLY) OR SNX_BUILD_GUI OR SNX_BUILD_3DS OR snx_vita_runtime OR SNX_BUILD_AGB)
+    if(SNX_SYSTEM_SDL3)
+        find_package(SDL3 3.4.16 CONFIG QUIET)
+        if(NOT SDL3_FOUND)
+            message(FATAL_ERROR "SNX_SYSTEM_SDL3: no SDL3 3.4.16 or newer package found (FreeBSD: pkg install sdl3). "
+                                "Use -DSNX_SYSTEM_SDL3=OFF for CPM's pinned source build.")
+        endif()
+        if(NOT TARGET SDL3::SDL3)
+            message(FATAL_ERROR "SNX_SYSTEM_SDL3: the system's SDL3 ${SDL3_VERSION} has no SDL3::SDL3 target")
+        endif()
+        message(STATUS "Using the system's SDL3 ${SDL3_VERSION}")
+    else()
     # Prefer a compatible system package. CPM handles the pinned static fallback and user overrides. SDL_ALTIVEC only
     # changes PowerPC builds: SDL's AltiVec blitters prefetch with dstt, which the ISA phased out and qemu's POWER10
     # traps as illegal (the window icon's and the menu's software surfaces, which nothing here needs fast)
@@ -248,6 +284,7 @@ if((SNX_BUILD_NX AND NOT SNX_TOOLS_ONLY) OR SNX_BUILD_GUI OR SNX_BUILD_3DS OR sn
         if(CMAKE_C_COMPILER_LAUNCHER)
             set_target_properties(SDL3-static PROPERTIES DISABLE_PRECOMPILE_HEADERS ON)
         endif()
+    endif()
     endif()
 endif()
 
@@ -267,5 +304,5 @@ endif()
 
 # hactool, in the tree (src/nx/runtime/driver/hactool), which scarletnx --extract calls in its own process
 if(SNX_BUILD_NX)
-    include("${CMAKE_SOURCE_DIR}/cmake/hactool.cmake")
+    include("${PROJECT_SOURCE_DIR}/cmake/hactool.cmake")
 endif()

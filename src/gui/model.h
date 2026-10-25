@@ -76,11 +76,20 @@ typedef struct {
 } GuiChoice;
 typedef enum { GUI_CHOICE_STAY, GUI_CHOICE_TAKE, GUI_CHOICE_BACK } GuiChoiceDo;
 GuiChoiceDo gui_choice_key(GuiChoice* choice, GuiKey key);
-/* The setup's first step, Appearance: Language, Theme and UI scale a row each, as Settings > App has them, and Next
-   under them. Up and Down move round the four; Left and Right change Language's or Theme's value a step either way and
-   open UI scale's box; Select steps Language's or Theme's value on and opens UI scale's box, as Settings > App's
-   Enter does, and goes on from Next; Cancel goes back */
-enum { GUI_APPEARANCE_LANGUAGE, GUI_APPEARANCE_THEME, GUI_APPEARANCE_TEXT, GUI_APPEARANCE_NEXT, GUI_APPEARANCE_ROWS };
+/* The setup's first step, Appearance: Language, Theme and UI scale a row each, as Settings > App has them, the Side
+   panel, and Games' View and Icon size as its View box has them, then Next under them. Up and Down move round them all;
+   Left and Right change a row's value a step either way, UI scale's slider too; Select steps a row's value on and
+   opens UI scale's box, as Settings > App's Enter does, and goes on from Next; Cancel goes back */
+enum {
+    GUI_APPEARANCE_LANGUAGE,
+    GUI_APPEARANCE_THEME,
+    GUI_APPEARANCE_TEXT,
+    GUI_APPEARANCE_SIDE,
+    GUI_APPEARANCE_VIEW,
+    GUI_APPEARANCE_ICONS,
+    GUI_APPEARANCE_NEXT,
+    GUI_APPEARANCE_ROWS
+};
 typedef enum {
     GUI_APPEARANCE_STAY,
     GUI_APPEARANCE_CHANGE, /* the row's value, *step (-1 or 1) away */

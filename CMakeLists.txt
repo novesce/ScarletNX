@@ -27,6 +27,14 @@ if(NOT CMAKE_C_COMPILER_ID MATCHES "^(Apple)?Clang$" OR NOT CMAKE_CXX_COMPILER_I
                         "(${CMAKE_C_COMPILER}). Use a preset, or -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ "
                         "in a new build folder.")
 endif()
+# The Apple apps are what `cmake --install` makes (cmake/apple_package.cmake): on macOS the prefix is ScarletNX.app's
+# Contents, the programs in its MacOS/ and share/ beside them; on iOS share/ goes in the app the build makes. Over
+# GNUInstallDirs' defaults, which a build folder configured before keeps in its cache
+if(IOS AND NOT CMAKE_INSTALL_DATADIR)
+    set(CMAKE_INSTALL_DATADIR scarletnx.app/share)
+elseif(APPLE AND NOT IOS AND (NOT CMAKE_INSTALL_BINDIR OR CMAKE_INSTALL_BINDIR STREQUAL "bin"))
+    set(CMAKE_INSTALL_BINDIR MacOS)
+endif()
 # the CPU baseline (POWER8 on PowerPC64) and a Linux cross build's target and sysroot, for FFmpeg, OpenSSL and the
 # recompiler's runtime library
 include(cmake/cross.cmake)
@@ -72,7 +80,7 @@ if(DEFINED SNX_GAMES_DIR)
     unset(SNX_GAMES_DIR CACHE)
 endif()
 # the checkout's games/ was the default while the drivers of a build tree worked in it (docs/DEPRECATIONS.md)
-if(SNX_RECOMPILED_DIR STREQUAL "${CMAKE_SOURCE_DIR}/games")
+if(SNX_RECOMPILED_DIR STREQUAL "${PROJECT_SOURCE_DIR}/games")
     message(STATUS "SNX_RECOMPILED_DIR=${SNX_RECOMPILED_DIR} was the checkout's games/, an older version's default: "
                    "the data folder's recompiled/ from now on")
     set_property(CACHE SNX_RECOMPILED_DIR PROPERTY VALUE "")
@@ -143,11 +151,17 @@ endif()
 if(SNX_TRACY AND SNX_MULTICALL)
     set(SNX_MULTICALL OFF)
     foreach(name scarletnx-3ds scarletnx-vita scarletnx-gnuabi)
-        if(IS_SYMLINK "${CMAKE_BINARY_DIR}/${name}")
-            file(REMOVE "${CMAKE_BINARY_DIR}/${name}") # a link of an earlier configure would be written through
+        if(IS_SYMLINK "${PROJECT_BINARY_DIR}/${name}")
+            file(REMOVE "${PROJECT_BINARY_DIR}/${name}") # a link of an earlier configure would be written through
         endif()
     endforeach()
     message(STATUS "SNX_TRACY: the drivers are their own programs (the client makes dlclose a no-op on Linux)")
+endif()
+# A project that adds ScarletNX (CPM, add_subdirectory) builds none of its tests unless it asks: a plain variable here
+# rather than BUILD_TESTING in the cache, which the including project's own tests read
+option(SNX_BUILD_TESTING "Build ScarletNX's tests (off when another project includes it)" ${PROJECT_IS_TOP_LEVEL})
+if(NOT SNX_BUILD_TESTING)
+    set(BUILD_TESTING OFF)
 endif()
 # Before the dependencies: the tests' network fixtures link ENet and zstd, whatever the build
 include(CTest)
@@ -161,6 +175,13 @@ include(cmake/settings.cmake)
 add_subdirectory(src/common)
 if(SNX_BUILD_NX)
     add_subdirectory(src/nx/runtime/driver host-tools)
+endif()
+# The recompiler library (docs/LIBRARY.md) is configured by the NX driver's tree or the GNU ABI runtime's. Without
+# either, as a project that only wants the library builds ScarletNX, it is configured here, with LLVM alone
+if(NOT SNX_BUILD_NX AND NOT SNX_BUILD_GNUABI)
+    include(cmake/llvm.cmake)
+    add_subdirectory(src/common/cpu/recompiler/llvm llvm-backend)
+    add_subdirectory(src/common/cpu/recompiler recompiler-library)
 endif()
 include(cmake/build_info.cmake) # the window titles' line; the driver stamps games with its commit
 if(SNX_BUILD_3DS)
@@ -233,7 +254,7 @@ add_subdirectory(tools)
 # `cmake --install` puts the runtime, the desktop entry and the licenses under CMAKE_INSTALL_PREFIX, which is
 # what the AppImage and the CI artifacts are made from (.github/workflows/build.yml)
 include(GNUInstallDirs)
-if(IOS) # the app itself (dist/apple), which scripts/ios-app.sh packs
+if(IOS) # the app itself (dist/apple), which cmake/apple_package.cmake packs
     install(TARGETS scarletnx BUNDLE DESTINATION .)
 elseif(NOT ANDROID) # src/nx puts Android's in the app's libraries
     install(TARGETS scarletnx RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
@@ -264,8 +285,8 @@ install(FILES "${VulkanMemoryAllocator_SOURCE_DIR}/LICENSE.txt" DESTINATION ${li
 file(READ "${renderdoc_app_SOURCE_DIR}/renderdoc_app.h" renderdoc_app)
 string(FIND "${renderdoc_app}" "*/" renderdoc_app_end)
 string(SUBSTRING "${renderdoc_app}" 0 ${renderdoc_app_end} renderdoc_app)
-file(WRITE "${CMAKE_BINARY_DIR}/renderdoc_app-LICENSE.txt" "${renderdoc_app}*/\n")
-install(FILES "${CMAKE_BINARY_DIR}/renderdoc_app-LICENSE.txt" DESTINATION ${licenses}/renderdoc_app RENAME LICENSE.txt)
+file(WRITE "${PROJECT_BINARY_DIR}/renderdoc_app-LICENSE.txt" "${renderdoc_app}*/\n")
+install(FILES "${PROJECT_BINARY_DIR}/renderdoc_app-LICENSE.txt" DESTINATION ${licenses}/renderdoc_app RENAME LICENSE.txt)
 install(FILES "${OpenSSL_SOURCE_DIR}/LICENSE.txt" DESTINATION ${licenses}/OpenSSL)
 # lib/LICENSE is the library's BSD-2-Clause. The top-level LICENSE covers the rest of LZ4 (GPL-2.0-or-later), none
 # of which is built here
@@ -286,6 +307,9 @@ if(TARGET hactool_lib)
     file(READ "${hactool_src}/cJSON.h" cjson)
     string(FIND "${cjson}" "*/" cjson_end)
     string(SUBSTRING "${cjson}" 0 ${cjson_end} cjson)
-    file(WRITE "${CMAKE_BINARY_DIR}/cJSON-LICENSE.txt" "${cjson}*/\n")
-    install(FILES "${CMAKE_BINARY_DIR}/cJSON-LICENSE.txt" DESTINATION ${licenses}/hactool/cJSON RENAME LICENSE.txt)
+    file(WRITE "${PROJECT_BINARY_DIR}/cJSON-LICENSE.txt" "${cjson}*/\n")
+    install(FILES "${PROJECT_BINARY_DIR}/cJSON-LICENSE.txt" DESTINATION ${licenses}/hactool/cJSON RENAME LICENSE.txt)
+endif()
+if(APPLE) # the app's own files, its signature and CPack's package of it
+    include(cmake/apple_package.cmake)
 endif()

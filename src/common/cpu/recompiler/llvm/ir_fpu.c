@@ -78,6 +78,7 @@ static V fp_call(SnxIr* ir, const char* name, LLVMTypeRef ret, const V* operands
     }
     function = ir_extern(ir, name, ret, params, count + 1);
     ir_argmem(ir, function); /* only c->fpcr and c->fpsr */
+    ir_noregs(ir, function);
     ir_state_invalidate(ir);
     return LLVMBuildCall2(B, LLVMFunctionType(ret, params, count + 1, 0), function, args, count + 1, "");
 }
@@ -172,11 +173,12 @@ static V call_from_int(SnxIr* ir, V v, unsigned integer, unsigned width, unsigne
 }
 
 /* ---- the fast paths ----
-   The host's IEEE operations in round to nearest give the helpers' exact result when no operand is a NaN, an
-   infinity or a denormal and the result is finite and above the smallest normal, or an exact zero: then no NaN is
-   processed, nothing is flushed (FZ), tininess (before rounding, as the Arm ARM detects it) can't have occurred, and
-   IXC is the only flag. A result above the smallest normal rounds a value above it; a zero is exact for any sum of
-   such operands (sums only cancel exactly), and for a product or quotient only with a zero operand. IXC is computed
+   The host's IEEE operations in round to nearest without FZ give the helpers' exact result when the result is finite
+   and above the smallest normal, or an exact zero: then no NaN was processed (a NaN operand gives a NaN), no infinity
+   was an operand (it gives an infinity or a NaN), a denormal operand is the IEEE value it is without FZ and raises
+   nothing, tininess (before rounding, as the Arm ARM detects it) can't have occurred, and IXC is the only flag. A
+   result above the smallest normal rounds a value above it; a zero is exact for any sum (sums only cancel exactly),
+   and for a product or quotient only with a zero operand. IXC is computed
    exactly where that is cheap (TwoSum for sums; for singles the double product, quotient remainder or square, all
    exact; for doubles an FMA residual where the host has FMA, kept to operands whose residual can't underflow), and
    otherwise the path is taken only once IXC is set: it is sticky, so an inexact result changes nothing then.
@@ -214,10 +216,6 @@ static V magnitude_in(SnxIr* ir, unsigned width, V bits, SnxU64 lo, SnxU64 hi) {
     V offset = LLVMBuildSub(B, magnitude(ir, width, bits), kint(ir, width, lo), "");
     return LLVMBuildICmp(B, LLVMIntULT, offset, kint(ir, width, hi - lo), "");
 }
-/* zero or normal: no denormal, infinity or NaN */
-static V tame(SnxIr* ir, unsigned width, V bits) {
-    return either(ir, is_zero(ir, width, bits), magnitude_in(ir, width, bits, min_normal(width), inf_bits(width)));
-}
 /* finite and above the smallest normal */
 static V roomy(SnxIr* ir, unsigned width, V bits) {
     return magnitude_in(ir, width, bits, min_normal(width) + 1, inf_bits(width));
@@ -251,9 +249,15 @@ static void split_begin(SnxIr* ir, V ok, V fast, V inexact, Split* s) {
     s->fast = fast;
     ir_likely(ir, LLVMBuildCondBr(B, ok, on, off));
     LLVMPositionBuilderAtEnd(B, on);
+    /* only while IXC is clear: it is sticky, and LLVM sinks the inexactness test into that block */
     if (inexact) {
+        LLVMBasicBlockRef clear = ir_block(ir, "fp_ixc"), done = ir_block(ir, "fp_ixc_done");
+        ir_unlikely(ir, LLVMBuildCondBr(B, LLVMBuildNot(B, ixc_set(ir), ""), clear, done));
+        LLVMPositionBuilderAtEnd(B, clear);
         V flags = fpsr(ir), bit = LLVMBuildShl(B, LLVMBuildZExt(B, inexact, ir->t_i32, ""), ir_i32(ir, 4), "");
         ir_cpu_store(ir, LLVMBuildOr(B, flags, bit, ""), offsetof(CPU, fpsr));
+        LLVMBuildBr(B, done);
+        LLVMPositionBuilderAtEnd(B, done);
     }
     s->fast_end = LLVMGetInsertBlock(B);
     LLVMBuildBr(B, s->join);
@@ -316,8 +320,7 @@ static V fast_binary(SnxIr* ir, unsigned op, unsigned width, V a, V b, V* ok, V*
             }
             break;
     }
-    *ok = both(ir, both(ir, fpcr_clear(ir, FPCR_RMODE), both(ir, tame(ir, width, a), tame(ir, width, b))),
-               either(ir, roomy(ir, width, rb), exact_zero));
+    *ok = both(ir, fpcr_clear(ir, FPCR_RMODE | FPCR_FZ), either(ir, roomy(ir, width, rb), exact_zero));
     if (cut) *ok = both(ir, *ok, cut);
     if (!*inexact) *ok = both(ir, *ok, ixc_set(ir));
     return rb;
@@ -328,7 +331,7 @@ static V fast_sqrt(SnxIr* ir, unsigned width, V a, V* ok, V* inexact) {
     V fa = as_float(ir, a, width), r = ir_intrinsic(ir, "llvm.sqrt", LLVMTypeOf(fa), &fa, 1);
     V rb = as_bits(ir, r, width), zero = is_zero(ir, width, a);
     *inexact = NULL;
-    *ok = both(ir, both(ir, fpcr_clear(ir, FPCR_RMODE), tame(ir, width, a)), either(ir, roomy(ir, width, rb), zero));
+    *ok = both(ir, fpcr_clear(ir, FPCR_RMODE | FPCR_FZ), either(ir, roomy(ir, width, rb), zero));
     if (width == 32)
         *inexact = float_ne(ir, widen(ir, fa), LLVMBuildFMul(B, widen(ir, r), widen(ir, r), ""));
     else if (host_fma(ir)) {
@@ -343,10 +346,17 @@ static V fast_sqrt(SnxIr* ir, unsigned width, V a, V* ok, V* inexact) {
 static V fast_fma(SnxIr* ir, unsigned width, V add, V n, V m, V* ok) {
     V r = as_bits(ir, fma3(ir, as_float(ir, n, width), as_float(ir, m, width), as_float(ir, add, width)), width);
     V zero_product = either(ir, is_zero(ir, width, n), is_zero(ir, width, m));
-    V operands = both(ir, tame(ir, width, add), both(ir, tame(ir, width, n), tame(ir, width, m)));
     V result = either(ir, roomy(ir, width, r), both(ir, is_zero(ir, width, r), zero_product));
-    *ok = both(ir, both(ir, fpcr_clear(ir, FPCR_RMODE), ixc_set(ir)), both(ir, operands, result));
+    *ok = both(ir, both(ir, fpcr_clear(ir, FPCR_RMODE | FPCR_FZ), ixc_set(ir)), result);
     return r;
+}
+
+/* without FPSR's flags (snx_ir_fpsr_flags): the host's result wherever it is not a NaN, in round to nearest without
+   FZ. Infinities, denormals and zeros are the IEEE values the console gives there too */
+static void relax(SnxIr* ir, unsigned width, V value, V* ok, V* inexact) {
+    if (snx_ir_fpsr_exact()) return;
+    *ok = both(ir, fpcr_clear(ir, FPCR_RMODE | FPCR_FZ), LLVMBuildNot(B, is_nan(ir, width, value), ""));
+    if (inexact) *inexact = NULL;
 }
 
 /* ---- data processing ---- */
@@ -357,6 +367,7 @@ static void fp_binary(SnxIr* ir, const SnxA64Args* a, unsigned op, int negate) {
     V n = fp_reg(ir, (unsigned)a->rn, width), m = fp_reg(ir, (unsigned)a->rm, width), r;
     if (width != 16) {
         V ok, inexact, fast = fast_binary(ir, op, width, n, m, &ok, &inexact);
+        relax(ir, width, fast, &ok, &inexact);
         Split s;
         split_begin(ir, ok, fast, inexact, &s);
         r = split_end(ir, &s, call_binary(ir, n, m, width, op));
@@ -397,6 +408,7 @@ static void fp_fma(SnxIr* ir, const SnxA64Args* a, int negate_add, int negate_n)
     if (negate_n) n = LLVMBuildXor(B, n, kint(ir, width, sign_mask(width)), "");
     if (width != 16 && host_fma(ir)) {
         V ok, fast = fast_fma(ir, width, add, n, m, &ok);
+        relax(ir, width, fast, &ok, NULL);
         Split s;
         split_begin(ir, ok, fast, NULL, &s);
         r = split_end(ir, &s, call_fma(ir, add, n, m, width));
@@ -419,6 +431,7 @@ static void fp_sqrt(SnxIr* ir, const SnxA64Args* a) {
     V n = fp_reg(ir, (unsigned)a->rn, width), r;
     if (width != 16 && host_native(ir)) {
         V ok, inexact, fast = fast_sqrt(ir, width, n, &ok, &inexact);
+        relax(ir, width, fast, &ok, &inexact);
         Split s;
         split_begin(ir, ok, fast, inexact, &s);
         r = split_end(ir, &s, call_unary(ir, n, width, SNX_FP_SQRT));

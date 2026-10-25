@@ -1323,10 +1323,18 @@ static void grid_view(App* app, const char* temporary) {
     key(app, SDLK_V);
     render(app);
     shows(app, "- View          < List >", normal);
-    hides(app, "Icon size", normal); /* the grid's alone */
+    /* Icon size, the grid's: still there in the list, greyed, Enter on it saying why and changing nothing (#614) */
+    shows(app, "- Icon size     < Medium >", rgb(app->theme.soft));
     {
-        int shown_rows[GUI_VIEW_BOX_ROWS];
-        assert(view_rows(app, shown_rows) == GUI_VIEW_BOX_ROWS - 1 && shown_rows[4] == GUI_VIEW_SIDE);
+        int shown_rows[GUI_VIEW_BOX_ROWS], icons = app->options[GUI_OPTION_ICONS];
+        assert(view_rows(app, shown_rows) == GUI_VIEW_BOX_ROWS && shown_rows[GUI_OPTION_ICONS] == GUI_OPTION_ICONS &&
+               shown_rows[GUI_VIEW_BOX_ROWS - 1] == GUI_VIEW_SIDE);
+        app->options_focus = GUI_OPTION_ICONS;
+        key(app, SDLK_RETURN);
+        assert(app->options[GUI_OPTION_ICONS] == icons && !games_grid(app) &&
+               !strcmp(app->message, "Icon size is the grid's: View is List"));
+        app->options_focus = 0;
+        app->message[0] = 0;
     }
     for (int i = 0; i < 3; ++i) key(app, SDLK_DOWN);
     key(app, SDLK_RETURN);
@@ -3369,7 +3377,8 @@ int main(int argc, char** argv) {
     shows(&app, "- Overlay", normal); /* the runtime's On-screen controls */
     hides(&app, "On-screen controls", normal);
     shows(&app, "- User", normal);
-    shows(&app, "Reset to Defaults", normal); /* App's last row, beside: none among the groups */
+    /* App's last row, beside: none among the groups; greyed, every setting at its default (#614) */
+    shows(&app, "Reset to Defaults", rgb(app.theme.soft));
     hides(&app, "\x1e", rgb(app.theme.soft)); /* every row shows: no arrows */
     hides(&app, "\x1f", rgb(app.theme.soft));
     key(&app, SDLK_DOWN);
@@ -3542,7 +3551,8 @@ int main(int argc, char** argv) {
         shows(&app, "- App", yellow); /* the group open, as focused while its rows have the focus */
         snprintf(line, sizeof line, "- %-20s %s", "Theme", first); /* past Background recompile, the longest */
         shows(&app, line, yellow);
-        shows(&app, "- UI scale             Auto", normal);
+        shows(&app, "- UI scale", normal); /* its slider, the size at the row's end (#613) */
+        shows(&app, "Auto", normal);
         shows(&app, "- Language             Auto: English", normal); /* SDL_PREFERRED_LOCALES, the test's */
         shows(&app, "- Theme Editor", normal);
         /* under the rows, the three folders Folders moves, whole: the extractions too */
@@ -3567,17 +3577,44 @@ int main(int argc, char** argv) {
             app.work_dir = work;
             app_values(&app);
         }
-        shows(&app, "- Clean Old Settings", normal);
+        shows(&app, "- Clean Old Settings", rgb(app.theme.soft)); /* nothing to clean here: greyed (#614) */
         hides(&app, "- Layout", normal);
+        { /* a row with nothing to do greyed, still there (#614): Move Old Files with nothing left, Clean Old Settings
+             with nothing to clean; something to do, F5 looking again, in ink; Enter on a greyed one says why */
+            size_t size = 0;
+            char *was = (char*)snx_read_file(app.app_file, &size), *old;
+            int row = app.editor.row;
+            assert(!app.lefts);
+            shows(&app, "- Move Old Files", rgb(app.theme.soft));
+            app.editor.row = GUI_APP_CLEAN;
+            key(&app, SDLK_RETURN);
+            assert(!app.confirm.shown && strstr(app.editor.note, "Nothing to clean"));
+            app.lefts = 1;
+            old = snx_format("%s[app]\nan_old_key = 1\n", was ? was : "");
+            assert(!snx_write_file(app.app_file, old, strlen(old)));
+            app.editor.row = row; /* off them, so they read in ink */
+            key(&app, SDLK_F5);
+            render(&app);
+            shows(&app, "- Move Old Files", normal);
+            shows(&app, "- Clean Old Settings", normal);
+            assert(!snx_write_file(app.app_file, was ? was : "", was ? size : 0));
+            app.lefts = 0;
+            app.clean_found = -1;
+            app.editor.row = row;
+            app.editor.note[0] = 0;
+            render(&app);
+            free(old);
+            free(was);
+        }
         key(&app, SDLK_RIGHT);
         assert(strcmp(app.theme.name, first) && !strcmp(app.app_form.theme, app.theme.name));
         key(&app, SDLK_LEFT);
         assert(!strcmp(app.theme.name, first));
     }
     key(&app, SDLK_DOWN);
-    /* UI scale: its sizes in a box, Auto's parts first; the one picked is used at once and asked about: Keep keeps it,
-       Back, ESC or no answer in 15 s bring the one before it back */
-    key(&app, SDLK_RIGHT);
+    /* UI scale: its sizes in a box Enter opens, Auto's parts first; the one picked is used at once and asked about:
+       Keep keeps it, Back, ESC or no answer in 15 s bring the one before it back */
+    key(&app, SDLK_RETURN);
     assert(app.sizes_shown && app.sizes.count == GUI_TEXT_MAX + 4 && app.sizes.focus == 3 && !app.menu.text_size);
     render(&app);
     { /* the pointer over a size: its focus; a click off the box closes it, nothing taken */
@@ -3589,7 +3626,7 @@ int main(int argc, char** argv) {
         assert(app.sizes_shown && app.sizes.focus == 5 && !app.menu.text_size);
         mouse_px(&app, c.box.x - 4, c.box.y + c.box.h / 2, true);
         assert(!app.sizes_shown && !app.menu.text_size && !app.confirm.shown);
-        key(&app, SDLK_RIGHT);
+        key(&app, SDLK_RETURN);
         assert(app.sizes_shown && app.sizes.focus == 3);
     }
     { /* in an area too short for them: the rows that fit, from the focus's; the arrow of those hidden above in the first
@@ -3645,6 +3682,55 @@ int main(int argc, char** argv) {
     pump(&app);
     assert(!app.confirm.shown && !app.menu.text_size && !app.size_until);
     app.clock = 0;
+    /* UI scale as a slider (#613): the row a bar, a tick a step, the knob on the size in use, in the focus colour on the
+       focused row. Left and Right step it, the size used at once and asked about as the box's is; Left/Right again
+       while it is asked go on stepping, the size before them kept to go back to, and back on it no question; a press
+       on the bar takes the step under it and a drag follows it, over the question too, until the button lifts */
+    {
+        SDL_Event up = {0};
+        GuiRect bar;
+        int span, cw = cell_w(&app);
+        render(&app);
+        bar = app.slider_bar;
+        span = bar.w - cw;
+        assert(app.editor.row == GUI_APP_TEXT && bar.w >= GUI_SIZE_STEPS * cw && span > 0);
+        assert(same_colour(
+            pixel(&app, (float)(bar.x + 3 * span / (GUI_SIZE_STEPS - 1) + cw / 2), (float)(bar.y + bar.h / 2)),
+            yellow)); /* Auto, the fourth step */
+        key(&app, SDLK_RIGHT);
+        assert(app.menu.text_size == 1 && app.confirm.shown && app.confirm.ask == GUI_ASK_TEXT && app.size_slid);
+        key(&app, SDLK_RIGHT);
+        assert(app.menu.text_size == 2 && app.confirm.shown && strstr(app.size_line, "Back to Auto in 15 s"));
+        key(&app, SDLK_LEFT);
+        key(&app, SDLK_LEFT);
+        assert(!app.menu.text_size && !app.confirm.shown && !app.size_until); /* back on Auto: nothing to ask */
+        key(&app, SDLK_LEFT);
+        assert(app.menu.text_size == -3 && app.confirm.shown);
+        key(&app, SDLK_ESCAPE);
+        assert(!app.menu.text_size && !app.confirm.shown);
+        for (int k = 0; k < 9; ++k) key(&app, SDLK_RIGHT); /* past its last: 4x, there it stays */
+        assert(app.menu.text_size == GUI_TEXT_MAX && app.confirm.shown);
+        key(&app, SDLK_ESCAPE);
+        assert(!app.menu.text_size);
+        render(&app);
+        bar = app.slider_bar;
+        span = bar.w - cw;
+        mouse_px(&app, bar.x + cw / 2 + 5 * span / (GUI_SIZE_STEPS - 1), bar.y + bar.h / 2, true); /* 2x's step */
+        assert(app.slider_drag && app.menu.text_size == 2 && app.confirm.shown);
+        render(&app); /* laid out again at 2x: the bar where it is now */
+        bar = app.slider_bar;
+        span = bar.w - cell_w(&app);
+        assert(bar.w && span > 0);
+        mouse_px(&app, bar.x + cell_w(&app) / 2 + 4 * span / (GUI_SIZE_STEPS - 1), bar.y + bar.h / 2, false);
+        assert(app.slider_drag && app.menu.text_size == 1 && app.confirm.shown);
+        up.type = SDL_EVENT_MOUSE_BUTTON_UP;
+        up.button.button = SDL_BUTTON_LEFT;
+        event(&app, &up);
+        assert(!app.slider_drag);
+        key(&app, SDLK_ESCAPE); /* Auto again, as it was before the press */
+        assert(!app.menu.text_size && !app.confirm.shown);
+        render(&app);
+    }
     /* a part of Auto is Auto's scale times it, rounded, never under 1x */
     {
         int was = app.auto_scale;
@@ -3818,7 +3904,8 @@ int main(int argc, char** argv) {
             assert(find_letters(&app, "\xe8\x8f\x9c\xe5\x8d\x95", normal, 1, &x, &y));
             snprintf(line, sizeof line, "- \xe4\xb8\xbb\xe9\xa2\x98%16s %.4s", "", app.app_form.theme);
             assert(find_letters(&app, line, normal, 1, &x, &y));
-            assert(hint_width("\xe4\xb8\x8a/\xe4\xb8\x8b", "linha") == 11 && up >= 0 && down >= 0 && up != down);
+            /* its button: the keys' 5 columns, a space, "linha", a column inside either side */
+            assert(hint_width("\xe4\xb8\x8a/\xe4\xb8\x8b", "linha") == 13 && up >= 0 && down >= 0 && up != down);
             assert(hint_pick("\xe4\xb8\x8a/\xe4\xb8\x8b", 1, false) == up &&
                    hint_pick("\xe4\xb8\x8a/\xe4\xb8\x8b", 2, false) == up);
             assert(hint_pick("\xe4\xb8\x8a/\xe4\xb8\x8b", 3, false) == down &&
@@ -4286,8 +4373,8 @@ int main(int argc, char** argv) {
     key(&app, SDLK_ESCAPE);
     assert(app.form == GUI_FORM_APP && app.editor.row == GUI_APP_EDITOR);
     /* Folders, every folder on one screen, a box a group: the app's (Data, Settings read-only, Logs, Caches,
-       Extractions), the recompiled library (its
-       Main, recompiled/, its Extras, Add Folder), the dumps one (its Main, dumps/, its Extras, Add Folder); one
+       Extractions), the dumps library (its Main, dumps/, its Extras, Add Folder), then the recompiled one (its
+       Main, recompiled/, its Extras, Add Folder); one
        dropped on a library's row is added to it and kept, once; the picker answers none here
        (SDL_FILE_DIALOG_DRIVER=none); Del or Enter asks before an Extra is taken off, the folder staying */
     key(&app, SDLK_DOWN);
@@ -4297,9 +4384,9 @@ int main(int argc, char** argv) {
     assert(app.form == GUI_FORM_FOLDERS && gui_editor_rows(&app.editor) == 10 && app.editor.row == 0);
     assert(FOLDER_ROW(GUI_ROW_PLACE, GUI_PLACE_DATA) == 0 && FOLDER_ROW(GUI_ROW_CONFIG, -1) == 1 &&
            FOLDER_ROW(GUI_ROW_PLACE, GUI_PLACE_STATE) == 2 && FOLDER_ROW(GUI_ROW_PLACE, GUI_PLACE_CACHE) == 3 &&
-           FOLDER_ROW(GUI_ROW_PLACE, GUI_PLACE_WORK) == 4 && FOLDER_ROW(GUI_ROW_PLACE, GUI_PLACE_GAMES) == 5 &&
-           FOLDER_ROW(GUI_ROW_ADD, GUI_LIBRARY_RECOMPILED) == 6 && FOLDER_ROW(GUI_ROW_DUMPS, -1) == 7 &&
-           FOLDER_ROW(GUI_ROW_ADD, GUI_LIBRARY_DUMPS) == 8);
+           FOLDER_ROW(GUI_ROW_PLACE, GUI_PLACE_WORK) == 4 && FOLDER_ROW(GUI_ROW_DUMPS, -1) == 5 &&
+           FOLDER_ROW(GUI_ROW_ADD, GUI_LIBRARY_DUMPS) == 6 && FOLDER_ROW(GUI_ROW_PLACE, GUI_PLACE_GAMES) == 7 &&
+           FOLDER_ROW(GUI_ROW_ADD, GUI_LIBRARY_RECOMPILED) == 8);
     /* no Back row over the rows: the foot's ESC, clicked, does what the key does, back on the App's row */
     {
         GuiFormBoxes f;
@@ -4319,8 +4406,9 @@ int main(int argc, char** argv) {
             assert(ui_form_side_rows_get_row_info(&app, 9 + GUI_FOLDER_GROUPS + 1, 100, &info) &&
                    info.attr == UI_ATTR_TITLE && !strcmp(info.label, "Defaults"));
             info = (UiRowInfo){0};
-            assert(ui_form_side_rows_get_row_info(&app, 9 + GUI_FOLDER_GROUPS + 2, 100, &info) && !info.attr &&
-                   !strcmp(info.label, "Reset to Defaults"));
+            /* greyed while no folder is picked: nothing to reset (#614) */
+            assert(ui_form_side_rows_get_row_info(&app, 9 + GUI_FOLDER_GROUPS + 2, 100, &info) &&
+                   info.attr == UI_ATTR_OFF && !strcmp(info.label, "Reset to Defaults"));
             assert(!ui_form_side_rows_get_row_info(&app, 9 + GUI_FOLDER_GROUPS + 3, 100, &info));
             assert(ui_form_side_rows_get_row_info(&app, 0, 100, &info) && info.attr == UI_ATTR_TITLE &&
                    !strcmp(info.label, "App Folders"));
@@ -4328,9 +4416,14 @@ int main(int argc, char** argv) {
         render(&app);
         { /* each group's title: in the page's colour on a band of ink in a theme of filled boxes, else in ink */
             SDL_Color title = rgb(app.theme.panels == GUI_PANELS_FILL ? app.theme.page : app.theme.ink);
+            int ax, ay, dx, dy, rx, ry;
             shows(&app, "App Folders", title);
             shows(&app, "Recompiled Library", title);
             shows(&app, "Dumps Library", title);
+            /* the dumps' library above the recompiled one, under the app's */
+            assert(find_text(&app, "App Folders", title, 1, &ax, &ay) &&
+                   find_text(&app, "Dumps Library", title, 1, &dx, &dy) &&
+                   find_text(&app, "Recompiled Library", title, 1, &rx, &ry) && ay < dy && dy < ry);
         }
         { /* each group in a box as far as it shows, half a cell wider than its rows, in the dim colour; Reset to
              Defaults, the last row, in one of its own */
@@ -4818,7 +4911,7 @@ int main(int argc, char** argv) {
         snprintf(line, sizeof line, "%.24s", data);
         shows_half(&app, line, rgb(app.theme.soft));
         shows(&app, "- Extractions", normal);
-        shows(&app, "- Reset to Defaults", normal);
+        shows(&app, "- Reset to Defaults", rgb(app.theme.soft)); /* every folder its default: greyed (#614) */
         assert(!strcmp(app.place_line[GUI_PLACE_GAMES], app.games_dir) &&
                !strcmp(app.app_form.folder[FOLDER_ROW(GUI_ROW_PLACE, GUI_PLACE_GAMES)], "default"));
         assert(strstr(app.place_about[GUI_PLACE_GAMES], "The recompiled games, ") &&
@@ -8170,6 +8263,44 @@ int main(int argc, char** argv) {
             text_px_is(&app, x + side + cw / 2, b.y + (40 * s - 16 * s + s) / 2, "Exit", normal, black);
             SDL_DestroyTexture(red);
         }
+        { /* a row with nothing to do now (UI_ATTR_OFF): greyed, still there, its text in the soft colour, focused or
+             not, activated or not; framed in the focus colour while focused; a failure's look over it */
+            int ty = b.y + (40 * s - 16 * s + s) / 2;
+            GuiRect in;
+            fill_rect(&app, b, app.theme.page);
+            ui_draw_row(&app, b, "Exit", NULL, UI_COLOR_NONE, UI_ATTR_OFF, false);
+            text_px_is(&app, b.x + cw / 2, ty, "- Exit", rgb(app.theme.soft), black);
+            fill_rect(&app, b, app.theme.page);
+            ui_draw_row(&app, b, "Exit", NULL, UI_COLOR_NONE, UI_ATTR_OFF | UI_ATTR_ACTIVE, true);
+            text_px_is(&app, b.x + cw / 2, ty, "- Exit", rgb(app.theme.soft), black);
+            assert(same_colour(pixel(&app, (float)b.x, (float)(b.y + b.h / 2)), yellow));
+            fill_rect(&app, b, app.theme.page);
+            ui_draw_row(&app, b, "Exit", NULL, UI_COLOR_NONE, UI_ATTR_OFF | UI_ATTR_FAILURE, false);
+            text_px_is(&app, b.x + cw / 2, ty, "- Exit", black, rgb(app.theme.failure));
+            /* where the focus inverts (YoRHa's bar), on the soft colour rather than the focus's; unfocused, on its box */
+            app.theme = *gui_theme_builtin("yorha");
+            assert(app.theme.focus_bar && app.theme.panels == GUI_PANELS_FILL);
+            in = ui_row_box(&app, b);
+            fill_rect(&app, b, app.theme.page);
+            ui_draw_row(&app, b, "Exit", NULL, UI_COLOR_NONE, UI_ATTR_OFF, true);
+            in.x += cw / 2 + gui_text_cols(app.theme.marker) * cw; /* the text after the marker */
+            text_px_is(&app, in.x, ty, "Exit", rgb(app.theme.page), rgb(app.theme.soft));
+            fill_rect(&app, b, app.theme.page);
+            ui_draw_row(&app, b, "Exit", NULL, UI_COLOR_NONE, UI_ATTR_OFF, false);
+            text_px_is(&app, in.x, ty, "Exit", rgb(app.theme.soft), rgb(app.theme.dim));
+            { /* a tile (Games' grid) the same */
+                GuiRect tile = gui_rect(b.x, b.y, 12 * cw, 4 * 16 * s + 8 * s);
+                int tx = tile.x + (tile.w - 4 * cw) / 2, tty = tile.y + tile.h - 16 * s - 2 * s;
+                fill_rect(&app, tile, app.theme.page);
+                ui_draw_tile(&app, tile, "Exit", NULL, UI_COLOR_NONE, UI_ATTR_OFF, true);
+                text_px_is(&app, tx, tty, "Exit", rgb(app.theme.page), rgb(app.theme.soft));
+                fill_rect(&app, tile, app.theme.page);
+                ui_draw_tile(&app, tile, "Exit", NULL, UI_COLOR_NONE, UI_ATTR_OFF, false);
+                text_px_is(&app, tx, tty, "Exit", rgb(app.theme.soft), rgb(app.theme.dim));
+            }
+            app.theme = *gui_theme_builtin("default");
+            render(&app);
+        }
         /* the side box: the focus's name over a rule and the keys in use, what it does left to the tips; the status
            box under it */
         r = m.place.side;
@@ -8215,16 +8346,21 @@ int main(int argc, char** argv) {
            focus colour; the default's on the page, no box */
         r = m.place.keys;
         assert(r.y > m.place.list.y + m.place.list.h && r.y + r.h == 800 - 8 * s);
-        { /* the keys in the foot's letters, a size under the rest's: ESC alone against the left edge of the first row,
-             F1's the last key, against the right edge of the keys' last row */
-            int fs = foot_scale(&app), rows;
+        { /* the keys in the foot's letters, a size under the rest's, each sentence a button as a tab is (a box a cell
+             and 4 pixels of its letters high, the sentence a column inside, a column between two, the rows 2 pixels
+             apart): ESC alone against the left edge of the first row, F1's the last key, against the right edge of the
+             keys' last row */
+            int fs = foot_scale(&app), rows, pitch = 20 * fs;
             assert(fs == s - 1);
-            rows = (r.h - 4 * fs) / (16 * fs);
-            assert(rows >= 1 && r.h == rows * 16 * fs + 4 * fs);
-            foot_px_is(&app, r.x, r.y + 2 * fs, "ESC", yellow, black);
+            rows = r.h / pitch;
+            assert(rows >= 1 && r.h == rows * pitch); /* one row as tall as before the buttons: 16 and 4 pixels */
+            foot_px_is(&app, r.x + 8 * fs, r.y + 2 * fs, "ESC", yellow, black);
+            assert(
+                same_colour(pixel(&app, (float)r.x, (float)(r.y + 10 * fs)), rgb(app.theme.dim))); /* its box's edge */
+            assert(same_colour(pixel(&app, (float)(r.x + 4 * fs), (float)r.y), rgb(app.theme.dim)));
             shows_foot(&app, "exit", normal);
             hides(&app, "ESC", yellow);
-            foot_px_is(&app, r.x + r.w - 7 * 8 * fs, r.y + 2 * fs + (rows - 1) * 16 * fs, "F1", yellow, black);
+            foot_px_is(&app, r.x + r.w - 8 * 8 * fs, r.y + 2 * fs + (rows - 1) * pitch, "F1", yellow, black);
             app.menu.text_size = 1; /* 1x: the foot's too, never under it */
             render(&app);
             assert(app.scale == 1 && foot_scale(&app) == 1);
@@ -8254,6 +8390,33 @@ int main(int argc, char** argv) {
         r = tab_rect(&app, m.place.tabs, GUI_TAB_MENU);
         mouse_px(&app, r.x + 4, r.y + 4, true);
         assert(!app.editing && app.menu.view == GUI_LOAD_NONE);
+        { /* a finger's row is ui.txt's phones' rows, every list's */
+            size_t size = 0;
+            char *text = (char*)snx_read_file(SNX_GUI_UI_TXT, &size), *at;
+            int rows = 0, px;
+            assert(text);
+            for (at = text; (at = strstr(at, "android.row_height = ")) != NULL; ++at, ++rows)
+                assert(sscanf(at, "android.row_height = %dpx", &px) == 1 && px == GUI_FINGER_ROW);
+            assert(rows >= 13);
+            free(text);
+        }
+        /* on a screen of fingers (Android, iOS) the tabs are a finger's row high, as the lists' rows there, their names
+           in their middle, and so are the foot's keys' buttons, in the text's letters; a tap low on a tab opens it */
+        app.fingers = true;
+        render(&app);
+        menu_boxes(&app, &m);
+        r = tab_rect(&app, m.place.tabs, GUI_TAB_GAMES);
+        assert(m.place.tabs.h == GUI_FINGER_ROW * s && r.h == m.place.tabs.h && r.y + r.h <= m.place.list.y);
+        text_px_is(&app, r.x + cw, r.y + (r.h - 16 * s) / 2, "Games", normal, black);
+        assert(button_h(&app) == GUI_FINGER_ROW * s && hint_pitch(&app) == (GUI_FINGER_ROW - 4) * s &&
+               foot_scale(&app) == s);
+        mouse_px(&app, r.x + 4, r.y + r.h - 4, true);
+        assert(app.menu.view == GUI_LOAD_GAMES);
+        key(&app, SDLK_ESCAPE);
+        assert(app.menu.view == GUI_LOAD_NONE);
+        app.fingers = false;
+        render(&app);
+        menu_boxes(&app, &m);
         app.menu.selected = GUI_KEYS;
         render(&app);
         r = m.place.tips;
@@ -8709,9 +8872,10 @@ int main(int argc, char** argv) {
                 menu_boxes(&app, &mb);
                 room = foot_room(&app, mb.place.keys, app.theme.footer_box);
                 app.scale = foot_scale(&app);
-                assert(find_text(&app, "ESC", yellow, 1, &x, &y) && x == room.x);
+                /* each in its button, a column inside its edges */
+                assert(find_text(&app, "ESC", yellow, 1, &x, &y) && x == room.x + GUI_BUTTON_PAD * 8 * app.scale);
                 assert(find_text(&app, "F1", yellow, 1, &x, &y) &&
-                       x + (int)(strlen("F1 help") * 8) * app.scale == room.x + room.w);
+                       x + (int)(strlen("F1 help") + GUI_BUTTON_PAD) * 8 * app.scale == room.x + room.w);
                 app.scale = scale;
                 hides_foot(&app, "Arrows/mouse", yellow);
                 hides_foot(&app, "Tab", yellow);

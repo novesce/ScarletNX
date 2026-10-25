@@ -80,8 +80,8 @@ list(APPEND SNX_TARGET_FLAGS ${SNX_ARCH_FLAGS})
 set(SNX_TARGET_C_COMPILER "${CMAKE_C_COMPILER}")
 if(SNX_TARGET_LDFLAGS)
     string(REPLACE ";" " " snx_cross_flags "${SNX_TARGET_FLAGS};${SNX_TARGET_LDFLAGS}")
-    file(WRITE "${CMAKE_BINARY_DIR}/target-cc" "#!/bin/sh\nexec '${CMAKE_C_COMPILER}' ${snx_cross_flags} \"$@\"\n")
-    file(CHMOD "${CMAKE_BINARY_DIR}/target-cc" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ
+    file(WRITE "${PROJECT_BINARY_DIR}/target-cc" "#!/bin/sh\nexec '${CMAKE_C_COMPILER}' ${snx_cross_flags} \"$@\"\n")
+    file(CHMOD "${PROJECT_BINARY_DIR}/target-cc" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ
          GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
-    set(SNX_TARGET_C_COMPILER "${CMAKE_BINARY_DIR}/target-cc")
+    set(SNX_TARGET_C_COMPILER "${PROJECT_BINARY_DIR}/target-cc")
 endif()

@@ -415,9 +415,11 @@ void fs_init(const char* keys, const char* title_keys) {
     memcpy(g_datadir, g_hle.fs.tree.base, n);
     if (n && g_datadir[n - 1] != '/' && g_datadir[n - 1] != '\\') g_datadir[n++] = '/';
     g_datadir[n] = 0;
-    /* RomFS and ExeFS are what games read most and never change: open and map them once, for the whole run, instead
-       of opening them on demand like the save and SD card files. ExeFS first: each mapped file holds a descriptor
-       (macOS allows 61440 a process), and a game with more files than that left its executables unmapped */
+    /* RomFS and ExeFS are what games read most and never change: map them for the rest of the run, instead of opening
+       them on demand like the save and SD card files. The ExeFS and a romfs.bin at startup; a romfs/ folder's files as
+       the game first reads them (romfs_map), within the same limits: each mapped file holds a descriptor (Windows'
+       C runtime has 8192, macOS allows 61440 a process) and a mapping (many Linux systems allow 65530, which guest
+       memory needs too), and a game reads few of its files at a time (one has 304,000) */
     static const char* const shared_paths[] = {"exefs", "romfs", "romfs.bin"};
     FsShare share = {.bytes = (uint64_t)g_settings.map_limit_mb << 20, .files = (unsigned)g_settings.map_limit_files};
     pm_lock(&g_hle.fs.tree.lock);
@@ -434,9 +436,12 @@ void fs_init(const char* keys, const char* title_keys) {
         FsNode* node;
         if (g_hle.fs.dump.patch.found) break; /* an update's, read over the game's dump: the game's files unread */
         if (fs_tree_lookup(&g_hle.fs.tree, NULL, shared_paths[i], &node)) continue;
+        share.lazy = !strcmp(shared_paths[i], "romfs");
         r = fs_tree_share(&g_hle.fs.tree, node, &share);
         if (r != FS_TREE_OK) fatal("Could not map %s%s (error %d)", g_datadir, shared_paths[i], r);
     }
+    g_host.fs.romfs = share; /* what is left of the limits */
+    g_host.fs.romfs.lazy = 1;
     pm_unlock(&g_hle.fs.tree.lock);
     LOG("fs: %u RomFS/ExeFS files mapped for the whole run, %.1f MB\n", share.shared,
         (double)share.mapped_bytes / 1048576.0);
@@ -446,8 +451,17 @@ void fs_init(const char* keys, const char* title_keys) {
     if (share.failed) WARN("fs: %u RomFS/ExeFS files could not be mapped, they are read on demand\n", share.failed);
 }
 
-/* Contents held in memory, read without the host: an injected file, or one mapped at startup */
-static int node_in_memory(const FsNode* node) { return node->is_virtual || node->fd >= 0; }
+/* Contents held in memory, read without the host: an injected file, or one mapped */
+static int node_in_memory(const FsNode* node) { return node->is_virtual || fs_tree_mapped(node); }
+/* tree.lock held: a RomFS file the game reads mapped, unless it is or the limits are reached (fs_tree_map). The first
+   file past them is said in the log */
+static void romfs_map(FsNode* node) {
+    unsigned skipped = g_host.fs.romfs.skipped;
+    if (!fs_tree_map(&g_hle.fs.tree, node, &g_host.fs.romfs) || skipped || g_host.fs.romfs.skipped == skipped) return;
+    LOG("fs: %u RomFS/ExeFS files mapped, past map_limit_mb=%d or map_limit_files=%d: the game's other files are read "
+        "on demand\n",
+        g_host.fs.romfs.shared, g_settings.map_limit_mb, g_settings.map_limit_files);
+}
 static const u8* node_memory(const FsNode* node) { return node->is_virtual ? node->virtual_data : node->map; }
 
 /* Callers hold tree.lock: content I/O is permitted only after resolving an indexed node. */
@@ -483,7 +497,7 @@ int fs_map_file(const char* path, PFileMap* map) {
     if (dump_has_exefs(path)) return -1;
     pm_lock(&g_hle.fs.tree.lock);
     if (!fs_tree_lookup(&g_hle.fs.tree, NULL, path, &node) && !node->is_dir) {
-        if (node->fd >= 0) { /* already mapped for the whole run: lend that view */
+        if (fs_tree_mapped(node)) { /* already mapped for the rest of the run: lend that view */
             map->data = node->map;
             map->size = node->size;
             map->borrowed = 1;
@@ -588,9 +602,12 @@ static void rnode_free(RNode* n) {
     }
 }
 /* dir's child named name, made where it has none. One of the other kind is replaced, everything under it gone: a mod's
-   file over the game's folder of its name, or its folder over a file */
-static RNode* rnode_child(RNode* dir, const char* name, int is_dir) {
-    RNode **at = &dir->children, *n;
+   file over the game's folder of its name, or its folder over a file. last: the child this returned before for dir
+   (NULL for none), where the search starts when name comes after it. Its callers place a folder's entries in strcmp
+   order, so each is found a step past the last, and a folder of n files is laid out in n steps, not n * n / 2 (one
+   game's folder of 75,940 took a minute at every start) */
+static RNode* rnode_child(RNode* dir, RNode* last, const char* name, int is_dir) {
+    RNode **at = last && strcmp(last->name, name) < 0 ? &last->next : &dir->children, *n;
     int c = 1;
     while (*at && (c = strcmp((*at)->name, name)) < 0) at = &(*at)->next;
     if (*at && !c) {
@@ -609,8 +626,9 @@ static RNode* rnode_child(RNode* dir, const char* name, int is_dir) {
    folders over those of the folder of its name */
 static void rnode_lay(RNode* into, const FsNode* dir) {
     const FsNode* c;
+    RNode* n = NULL;
     for (c = dir->children; c; c = c->next) {
-        RNode* n = rnode_child(into, c->name, c->is_dir);
+        n = rnode_child(into, n, c->name, c->is_dir);
         if (c->is_dir)
             rnode_lay(n, c);
         else {
@@ -822,6 +840,7 @@ static char* image_name(const u8* p, u32 length) {
    the tables don't hold */
 static int image_dir(RImage* im, u32 off, RNode* into, unsigned depth) {
     u32 child, file;
+    RNode* last = NULL;
     if (depth > ROM_DEPTH_MAX || (u64)off + ROM_DIR_ENTRY > im->dir_bytes) return -1;
     child = snx_ld_le32(im->dirs + off + 8);
     file = snx_ld_le32(im->dirs + off + 12);
@@ -841,7 +860,7 @@ static int image_dir(RImage* im, u32 off, RNode* into, unsigned depth) {
             free(name);
             return -1;
         }
-        n = rnode_child(into, name, 0);
+        n = last = rnode_child(into, last, name, 0);
         free(name);
         n->node = NULL;
         n->base = im->data + at;
@@ -857,7 +876,7 @@ static int image_dir(RImage* im, u32 off, RNode* into, unsigned depth) {
         length = snx_ld_le32(e + 20);
         if (length > im->dir_bytes - child - ROM_DIR_ENTRY || !(name = image_name(e + ROM_DIR_ENTRY, length)))
             return -1;
-        n = rnode_child(into, name, 1);
+        n = last = rnode_child(into, last, name, 1);
         free(name);
         if (image_dir(im, child, n, depth + 1)) return -1;
         child = snx_ld_le32(e + 4);
@@ -997,11 +1016,17 @@ static int rfile_read(RFile* rf, u64 rel, u8* dst, u64 size, int quiet) {
     if (!node) return image_read(rf->base + rel, dst, size, 0, quiet); /* the game's image's, under the mods' */
     if (!quiet && !__atomic_exchange_n(&rf->logged, 1, __ATOMIC_RELAXED))
         LOG("RomFS: reading %s (%.1f KB)\n", node->name, (double)node->size / 1024.0);
-    if (node->fd >= 0) { /* mapped for the whole run, and never changes */
+    if (fs_tree_mapped(node)) { /* mapped for the rest of the run, and never changes */
         memcpy(dst, node->map + rel, (size_t)size);
         return 0;
     }
     pm_lock(&g_hle.fs.tree.lock);
+    if (!quiet) romfs_map(node); /* the game's read: the runtime's own (the shader pass) maps nothing */
+    if (fs_tree_mapped(node)) {
+        pm_unlock(&g_hle.fs.tree.lock);
+        memcpy(dst, node->map + rel, (size_t)size);
+        return 0;
+    }
     if (node->is_virtual && node->attached) {
         memcpy(dst, node->virtual_data + rel, (size_t)size);
         pm_unlock(&g_hle.fs.tree.lock);
@@ -1364,6 +1389,7 @@ static SvcObj* file_new(FsNode* node, u32 mode, int storage, u32* rc) {
         return NULL;
     }
     /* a mapped node is readonly, so this handle only reads, from the mapping */
+    if (!(mode & 2)) romfs_map(node);
     FILE* host = node_in_memory(node) ? NULL : node_open(node, (mode & 2) ? "rb+" : "rb");
     if (!node_in_memory(node) && !host) {
         *rc = FS_NOTFOUND;

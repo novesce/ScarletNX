@@ -125,8 +125,8 @@ built in, drawn at the window's size ([lunasvg](https://github.com/sammycage/lun
   dead zone, background input, Joy-Cons). A player's *Controller* is *Any*, the next to connect, until Enter on it
   and a press on a controller give it that one (ESC leaves it as it was, Del makes it *Any* again); its *Button
   map* is the page above on its own keys, its A and B as its *Swap A/B* says.
-  **App** holds **Theme** and **Language**, which Left/Right or Enter go round either way, **UI scale**, which opens
-  its box of sizes (below), **Animations** (On by default, `animations = 1` in `app.ini`: a screen comes in from the
+  **App** holds **Theme** and **Language**, which Left/Right or Enter go round either way, **UI scale**, a slider
+  (below), **Animations** (On by default, `animations = 1` in `app.ini`: a screen comes in from the
   page's colour and a box's shade comes and goes, 0.15 s each; Off shows each at once), **Side panel** (below, F2 too),
   **Background recompile** (*Full*, `recompile_background = full` in `app.ini`: the queue's recompiles take every
   core, or the AOT threads picked; *Gentle*, `gentle`: half of them, at a low priority, ten steps of nice under the
@@ -138,11 +138,15 @@ built in, drawn at the window's size ([lunasvg](https://github.com/sammycage/lun
     (`app.ini`, which names the others, and each game's `.ini`: `XDG_CONFIG_HOME` moves it, a portable copy keeps its
     own), **Logs** (the games' logs and `threads.txt`, `recent.txt`, `last-run.log` and `last-recompile.log`), **Caches** (the recompile's
     `units/`, the shader caches, the dumps' icons, and Extractions by default) and **Extractions**;
-  - **Recompiled Library**: its **Main**, `recompiled/`, where recompiled games go, then its **Extra** folders, whose games
-    ready to run Games lists too, and **Add a folder**;
   - **Dumps Library**: its **Main**, the data folder's `dumps/` (with its subfolders, going with the data folder), then its
     **Extra** folders, whose dumps Games lists, and **Add a folder**;
+  - **Recompiled Library**: its **Main**, `recompiled/`, where recompiled games go, then its **Extra** folders, whose games
+    ready to run Games lists too, and **Add a folder**;
   - **Reset to Defaults**, last, which asks first.
+
+  A row with nothing to do now is greyed, still there, and Enter on it says why: Clean Old Settings with nothing to
+  clean, Move Old Files with nothing left, App's Reset to Defaults with every setting at its default, Folders' with
+  every folder its default.
 
   A row is its name, its folder (one too long for the row cut in its middle: its root and first folder, `...`, as
   many of its last folders as fit; the whole path under the boxes) and what it is. Data, Logs, Caches, Extractions and
@@ -234,9 +238,12 @@ built in, drawn at the window's size ([lunasvg](https://github.com/sammycage/lun
   Save (or Ctrl+S) writes `themes/<folder>/theme.ini` in the data folder and switches to it;
   a built-in is saved as a new theme, `mytheme` until renamed. ESC leaves, asking first if
   there are unsaved changes.
-- Settings > App's **UI scale** opens a box of sizes: a quarter, half or three quarters of Auto (Auto's scale times
-  it, rounded, 1x at the least), Auto (fit the screen), then 1x to 4x. The size picked is used at once, and a question
-  asks to keep it: Keep keeps it in `app.ini`; Back, ESC or no answer in 15 s bring the one before it back. Bigger
+- Settings > App's **UI scale** is a slider: a bar, a tick a size, with the size in use at its right: a quarter, half
+  or three quarters of Auto (Auto's scale times it, rounded, 1x at the least), Auto (fit the screen), then 1x to 4x.
+  Left/Right step it, and a click or a tap on the bar takes the size under it, a drag along it following; Enter opens a
+  box of the sizes. The size taken is used at once, and a question asks to keep it: Keep keeps it in `app.ini`; Back,
+  ESC or no answer in 15 s bring the one before it back. While the slider's question shows, Left/Right go on stepping
+  it, the size before the first step the one to go back to, its 15 s again, and back on that size no question is left. Bigger
   letters scroll the menu. The foot's letters (its keys, and the tips when they are
   there) are a size under the rest's, 1x at the least.
 - Settings > App's **Language** goes round Auto, English and each language compiled in, by its own name. Auto,
@@ -306,10 +313,11 @@ its defaults have it, what Next, OK or Enter on each would take (the notices rea
 they are, Keep, Later, the nickname `Player`), writes `setup.ini` and opens the menu; a page whose default fails (a
 `users.ini` that cannot be written) stays, saying why.
 
-- **Appearance**: a box of Settings > App's Language, Theme and UI scale, a row each, and Next (with Skip, on the first
-  page) under them. Up/Down go over the rows and Next; Left/Right (or a click, on the left arrow back) change the language among
-  the menu's and the theme, at once, the screen with them; UI scale opens its box of sizes, the size picked asked
-  about for 15 s as App's is; Enter does as App's (the language or the theme a step on, UI scale's box), and on
+- **Appearance**: a box of Settings > App's Language, Theme, UI scale and Side panel, and Games' View and Icon size
+  as its View box has them (Icon size greyed in the list), a row each, and Next (with Skip, on the first page) under
+  them. Up/Down go over the rows and Next; Left/Right (or a click, on the left arrow back) change the language among
+  the menu's, the theme and the others, at once, the screen with them; UI scale is App's slider, the size taken asked about for
+  15 s as App's is; Enter does as App's (the language or the theme a step on, UI scale's box), and on
   Next goes on. What was changed is kept in `app.ini` once the setup is done, in the folders Install picks; Auto
   stays Auto while the language is the system's.
 - **Install**: Installed, or Portable, which makes `.scarletnx/` beside the program and moves the menu's own files
@@ -359,7 +367,7 @@ cannot be read is named and the others still listed.
   that scrolls, the list three fifths of the screen as a run's output is, Recent Games and a group's heading each on
   a line of its own; the arrows go to the tile beside, above or under the focus, its column or the line's last,
   PgUp and PgDn by the lines that show, a click or a tap on a tile opens it, and the side box says the focused one as
-  the list's does); in the grid alone **Icon size** (*Medium*, `games_icons = medium`: a tile 12 cells by 4 rows;
+  the list's does); **Icon size**, the grid's, greyed in the list and saying so there (*Medium*, `games_icons = medium`: a tile 12 cells by 4 rows;
   *Small*, `small`: 8 by 3; *Large*, `large`: 16 by 6), then the **Side panel** of Settings > App (`side_box`, which
   F2 turns too). Enter, Left, Right or
   a click change the focused one,
@@ -489,9 +497,11 @@ a long one sliding, or wrap over its rows with `[tips] wrap`, the last sliding w
 screen's keys, the whole width (the setup's beside its tips), in letters a size under the rest's: its own keys, ESC alone
 at the left of the row, **F1** last, which opens a box over the screen with every key it has, those every screen has too
 (the arrows and the mouse, Enter, Space and a click, the pages, Tab and F2), until any key or a click closes it; on a
-phone, the words to tap, whole, in the text's letters, each row of them as tall as a list's row (40 pixels times
-the text's size) for a finger. The tips and the keys each in a box with a bar down
-its left (`[tips] box`, `[footer] box`) or on the page. Games lists the recent games and a
+phone, the words to tap, whole, in the text's letters, each row of them as tall as a list's row (48 pixels times
+the text's size) for a finger, and so are the tabs. The tips and the keys each in a box with a bar down
+its left (`[tips] box`, `[footer] box`) or on the page, each key with what it does a button as a tab is: a box as the
+theme's are (filled in the dim colour, framed in it, or on the foot's band framed in the soft one), its text a column
+inside, a column between two, as tall as a tab where it has a row of its own. Games lists the recent games and a
 page of the games, as many as the list's box holds, the focused one's path and kind beside them; the keys'
 screen, and a load's, is one box with where the keys go, the waiting line in its middle (a click in the box
 opens the picker). The Settings list their groups, and beside them the focused group's
@@ -510,8 +520,8 @@ Screen and Wide (a theme's `[head] place`, `[tips] place` and `[body] sizing` ar
 (a theme's `[body] gap` and `[body] scroll` are deprecated too): the menu's, Games',
 the Settings' two, the theme editor's, the choices of a question, of UI scale's box, of the Recompile box and of the
 setup's pages, the setup's Appearance rows, the box of users, that of a game's updates, DLCs and mods, and the OK of
-a box of files. Their rows are 2 pixels apart times the text's size (on Android and iOS 40 pixels high, about Android's 48 dp
-touch target at the 3x a phone held wide gets, where the desktop's are 17), the focused one kept in the middle (on a
+a box of files. Their rows are 2 pixels apart times the text's size (on Android and iOS 48 pixels high: a phone held wide gets
+3x, so 144, Android's 48 dp touch target at a density of 3 and more under it, iOS's 44 pt at its 3x; the desktop's are 17), the focused one kept in the middle (on a
 group's screen, the group open in the groups' list; Games' grid by its lines) as the keys, a pad, the wheel or a drag
 move it, and a list still when the mouse, a pen or a tap moves it, the cursor and the arrows of hidden rows inside
 each row, which a click takes whole as a tap does. That is the **Side panel**'s *Auto*, the

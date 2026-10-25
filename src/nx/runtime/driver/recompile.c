@@ -650,6 +650,8 @@ int snx_recompile_game(int argc, char** argv, const SnxPaths* paths) {
         llvm.triple = ios ? SNX_IOS_TRIPLE : NULL;
         llvm.opt = compile.opt[0];
         snx_ir_slp_vectorizer(g_settings.slp_vectorizer);
+        snx_ir_fpsr_flags(g_settings.fpsr_flags);
+        snx_ir_volatile_memory(g_settings.volatile_load_stores);
         llvm.tuning = snx_llvm_tuning(llvm.opt, error, sizeof error);
         if (!llvm.tuning) {
             snx_error("%s", error);

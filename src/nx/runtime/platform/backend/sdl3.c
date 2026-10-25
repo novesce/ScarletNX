@@ -331,7 +331,7 @@ void video_init(const char* title, const char* addons) {
     SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
     SDL_SetHint(SDL_HINT_PEN_MOUSE_EVENTS, "0");
 #ifdef __APPLE__
-    { /* the apps carry their MoltenVK (scripts/apple-app.sh), in the bundle's Frameworks, which SDL does not search:
+    { /* the apps carry their MoltenVK (cmake/apple_package.cmake), in the bundle's Frameworks, which SDL does not search:
          macOS's beside Resources/ (SDL's base folder), iOS's in the bundle itself. Elsewhere the system's loader */
         const char* base = SDL_GetBasePath();
         const char* const own[] = {"../Frameworks/libMoltenVK.dylib", "Frameworks/MoltenVK.framework/MoltenVK"};

@@ -106,8 +106,27 @@ rather than landing in the signal handler.
 - Landing is a memcpy into the mirror. A producer's GPU copy keeps the range's layout (block linear surfaces are
   swizzled on the GPU), and covers the range's padding: it is filled from guest memory when the producer takes the
   range.
+- Ownership readback uses its own reusable graphics command pool, fence and host-cached buffer. It flushes an open
+  frame without running completed-frame callbacks. Those callbacks can acquire an adjacent range on the same trapped
+  page, and would wait for the landing already running on their own thread. Frame recycling and result reconciliation
+  remain on the normal frame path, after the ownership map has removed the landing marks.
 
 ## Phases
+
+The Maxwell syncpoint's `CLEAN_L2` bit publishes pending render targets before its
+CPU-visible release. Each supported target is packed into a GPU-owned buffer in
+guest layout, oldest write first across physical aliases. The release waits for
+that publication's submission even when no shader storage result is pending.
+A later CPU access lands the owner before proceeding, so CPU reuse or a partial
+edit cannot be overwritten by a delayed render-target flush. A second clean with
+no new target writes records no additional image copies. Targets the existing
+publication path cannot pack use its synchronous writeback fallback.
+
+`vulkan_headless` checks full CPU reuse, a partial edit spanning pages, overlapping
+physical aliases in both draw orders, and a tiled image mapped to separate RAM
+pages through real clean-and-syncpoint commands. `vulkan_release` checks that a
+clean gates its release and that completing an older clean preserves a newer gate.
+Packed depth/stencil formats excluded by `flush_bytes` remain outside this path.
 
 1. Done. The trap layer and the map, Linux first, with `tests/memory_own.c` (synthetic owners, no Vulkan): read and write
    faults return the owner's bytes, a neighbor's writes on an edge page are not lost, the write-tracking markers
@@ -125,8 +144,11 @@ rather than landing in the signal handler.
 4. Done, inline-to-memory aside. DMA, 2D, inline-to-memory: every copy, layout change, remap and fill as a GPU copy or dispatch from the source's
    owner (or its guest bytes, staged whole) into a GPU-owned destination. `f2d_blit_memory`, the DMA engine's CPU
    loops and the render target flush and reload around them go. The clear before the renderer starts is kept for
-   the renderer. Inline-to-memory stays a CPU write: its data is born on the CPU (the pushbuffer), and the runtime's
-   own readers of what it writes (the shader translator, MME macros) would land every GPU-owned copy of it again.
+   the renderer. Inline-to-memory stays a CPU write: the runtime's own readers of its output (the shader translator,
+   MME macros) would land every GPU-owned copy of it again. Compute-inline payloads may themselves be produced by
+   earlier GPU work. Following Citron's Peach fix (`acfb1dcc1`), they use safe reads in stream order, resolving
+   pending results before the inline engine consumes them. The non-increasing payload is fetched once per entry,
+   including continuations and noncontiguous mappings; headers and other methods retain their submission snapshots.
    `vulkan_headless` holds the DMA engine and the 2D blit to `dma_ref.c` and `fermi2d_ref.c` on lavapipe.
 5. Windows and the other hosts. Until then their `plat_trap_*` fail, and a published result lands at once (a readback
    per result, correct and slow).

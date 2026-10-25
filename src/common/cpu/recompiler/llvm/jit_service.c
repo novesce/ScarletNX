@@ -1526,13 +1526,20 @@ void snx_jit_remove_image(SnxJitService* s, SnxU64 base) {
     free(pending);
 }
 
-void snx_jit_invalidate(SnxJitService* s, SnxU64 addr, SnxU64 size) {
+void snx_jit_invalidate_ranges(SnxJitService* s, SnxU64 addr, SnxU64 size, SnxJitInvalidatedRange callback,
+                               void* context) {
+    typedef struct { SnxU64 start, end; } InvalidatedRange;
     SnxU64 end = addr + size, from, to, pc;
-    size_t i, j;
+    size_t i, j, range_count = 0, range_capacity;
     Entry* e;
     Region* r;
+    InvalidatedRange* ranges = NULL;
+    int ranges_incomplete = 0;
     if (!size || end < addr) return;
     lock(&s->lock);
+    range_capacity = s->span_count;
+    if (callback && range_capacity) ranges = (InvalidatedRange*)calloc(range_capacity, sizeof(*ranges));
+    if (callback && range_capacity && !ranges) ranges_incomplete = 1;
     /* a batch compiling now reads s->epoch before its code, and skips the publish when it has changed */
     ++s->epoch;
     if ((end - addr) / 4 < s->entry_capacity / 8) { /* a few lines (IC IVAU's 64 bytes): each pc looked up */
@@ -1568,6 +1575,14 @@ void snx_jit_invalidate(SnxJitService* s, SnxU64 addr, SnxU64 size) {
             ++i;
             continue;
         }
+        if (callback) {
+            if (ranges && range_count < range_capacity) {
+                ranges[range_count].start = u->lo;
+                ranges[range_count++].end = u->hi;
+            } else {
+                ranges_incomplete = 1;
+            }
+        }
         for (j = 0; j < u->count; ++j) {
             GuestFn expected = u->leaders[j].code;
             e = find(s, u->leaders[j].pc);
@@ -1585,6 +1600,19 @@ void snx_jit_invalidate(SnxJitService* s, SnxU64 addr, SnxU64 size) {
     }
     cond_broadcast(&s->done); /* a thread waiting for one of them resolves it again */
     unlock(&s->lock);
+    if (callback) {
+        if (ranges_incomplete) {
+            /* A coarse range is safe and avoids leaving a caller unaware of retired JIT code on OOM. */
+            callback(context, addr, end);
+        } else {
+            for (i = 0; i < range_count; ++i) callback(context, ranges[i].start, ranges[i].end);
+        }
+    }
+    free(ranges);
+}
+
+void snx_jit_invalidate(SnxJitService* s, SnxU64 addr, SnxU64 size) {
+    snx_jit_invalidate_ranges(s, addr, size, NULL, NULL);
 }
 
 /* the CPUs the process may run on: its affinity mask where the host has one (a game started under taskset gets the

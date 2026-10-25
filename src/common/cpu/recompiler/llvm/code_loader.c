@@ -163,7 +163,7 @@ static int windows_arena(SnxCodeLoader* loader, char* error, size_t error_size) 
    until then). Every thread runs code from it, and only the loading thread sees it writable, while it writes a load
    (snx_code_writable): to the others the read-only data stays read-only, and no thread can write and run the code at
    once. Data is ordinary private memory mapped over the mapping's end, made read-write as loads reach it. An app
-   without the hardened runtime, as the ad hoc signed ScarletNX.app is (scripts/apple-app.sh), needs no entitlement for
+   without the hardened runtime, as the ad hoc signed ScarletNX.app is (cmake/apple_package.cmake), needs no entitlement for
    MAP_JIT and may have several such mappings, one per loader; with it, com.apple.security.cs.allow-jit allows one. 0,
    or -1 with the reason in error */
 static int apple_arena(SnxCodeLoader* loader, char* error, size_t error_size) {
