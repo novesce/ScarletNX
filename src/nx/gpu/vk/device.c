@@ -371,7 +371,7 @@ static int create_device(void) {
     u32 next = 0;
     int has_shader_clock = 0, has_feedback_dynamic = 0, has_cond = 0, has_provoking = 0, video_exts = 0;
     int has_portability = 0, has_reconvergence = 0;
-    int has_calibrated = 0;
+    int has_calibrated = 0, has_present_id = 0, has_present_wait = 0;
     if (!g_opt_headless) ext[next++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     {
         u32 n = 0;
@@ -399,6 +399,8 @@ static int create_device(void) {
             if (!strcmp(e[i].extensionName, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) has_budget = 1;
             /* the GPU's clock next to the client's, for the profiler's GPU track (gpuprof.c's calibration) */
             if (!strcmp(e[i].extensionName, VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME)) has_calibrated = 1;
+            if (!strcmp(e[i].extensionName, VK_KHR_PRESENT_ID_EXTENSION_NAME)) has_present_id = !g_opt_headless;
+            if (!strcmp(e[i].extensionName, VK_KHR_PRESENT_WAIT_EXTENSION_NAME)) has_present_wait = !g_opt_headless;
             /* a portability driver's subset must be enabled when it has one (MoltenVK) */
             if (!strcmp(e[i].extensionName, "VK_KHR_portability_subset")) {
                 ext[next++] = "VK_KHR_portability_subset";
@@ -513,9 +515,18 @@ static int create_device(void) {
         *tail = &qrobust;
         tail = &qrobust.pNext;
     }
+    VkPhysicalDevicePresentIdFeaturesKHR qpid = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR};
+    VkPhysicalDevicePresentWaitFeaturesKHR qpwait = {.sType =
+                                                        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR};
+    if (has_present_id && has_present_wait) {
+        *tail = &qpid;
+        qpid.pNext = &qpwait;
+        tail = &qpwait.pNext;
+    }
     if (has_shader_clock) *tail = &qclock;
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &f2);
     g_vk.has_vertex_robustness2 = qpipeline.pipelineRobustness && qrobust.robustBufferAccess2;
+    g_vk.has_present_wait = has_present_id && has_present_wait && qpid.presentId && qpwait.presentWait;
     g_vk.has_cond_render = has_cond && qcond.conditionalRendering;
     g_vk.has_provoking_last = has_provoking && qprov.provokingVertexLast;
     /* the dynamic state and the barriers within a pass only serve feedback loops */
@@ -661,6 +672,16 @@ static int create_device(void) {
         ext[next++] = VK_EXT_PIPELINE_ROBUSTNESS_EXTENSION_NAME;
         ext[next++] = VK_EXT_ROBUSTNESS_2_EXTENSION_NAME;
     }
+    /* when each present is displayed (display.c), which the game's pace goes by */
+    VkPhysicalDevicePresentIdFeaturesKHR fpid = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR, .pNext = chain, .presentId = VK_TRUE};
+    VkPhysicalDevicePresentWaitFeaturesKHR fpwait = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR, .pNext = &fpid, .presentWait = VK_TRUE};
+    if (g_vk.has_present_wait) {
+        chain = &fpwait;
+        ext[next++] = VK_KHR_PRESENT_ID_EXTENSION_NAME;
+        ext[next++] = VK_KHR_PRESENT_WAIT_EXTENSION_NAME;
+    }
     u32 nq = g_vk.compute_family == g_vk.gfx_family ? 1 : 2;
     if (g_vk.video_family != ~0u)
         qci[nq++] = (VkDeviceQueueCreateInfo){.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -720,7 +741,7 @@ static int create_device(void) {
 /* the swapchain destroyed. Its images' semaphores: a present may still wait on one after the device is idle (the
    presentation engine isn't covered by vkDeviceWaitIdle), so they go a swapchain later, when those presents are long
    done */
-static void swapchain_retire(void) {
+static void swapchain_retire(void) { /* sc_lock held */
     static VkSemaphore retired[VK_SC_MAX];
     static u32 nretired;
     for (u32 i = 0; i < nretired; i++) vkDestroySemaphore(g_vk.dev, retired[i], NULL);
@@ -737,7 +758,9 @@ static void swapchain_retire(void) {
 int vk_surface_recreate(void) {
     vk_rec_sync(); /* the device wait covers only what was submitted */
     vkDeviceWaitIdle(g_vk.dev);
+    pm_lock(&g_vk.sc_lock);
     if (g_vk.swapchain) swapchain_retire();
+    pm_unlock(&g_vk.sc_lock);
     vkDestroySurfaceKHR(g_vk.instance, g_vk.surface, NULL);
     g_vk.surface = VK_NULL_HANDLE;
     if (backend_vk_surface(g_vk.instance, &g_vk.surface)) {
@@ -761,7 +784,9 @@ int vk_window_release(void) {
     }
     vk_rec_sync();
     vkDeviceWaitIdle(g_vk.dev); /* a lost device answers at once */
+    pm_lock(&g_vk.sc_lock);
     if (g_vk.swapchain) swapchain_retire();
+    pm_unlock(&g_vk.sc_lock);
     if (g_vk.surface) vkDestroySurfaceKHR(g_vk.instance, g_vk.surface, NULL);
     g_vk.surface = VK_NULL_HANDLE;
     /* every hold of this thread's at once: it won't return to the callers that took them */
@@ -871,11 +896,13 @@ int vk_swapchain_create(int srgb) {
     VkSemaphore done[VK_SC_MAX];
     u32 nimg = 0, ndone = 0;
     VkSemaphoreCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    pm_lock(&g_vk.sc_lock); /* until the new swapchain is g_vk's: the old one is retired from here */
     cr = vkCreateSwapchainKHR(g_vk.dev, &ci, NULL, &sc);
     if (cr != VK_SUCCESS) { /* tried again on each present while it fails: said a few times */
         WARN_LIMIT(4, "vulkan: the swapchain could not be made: %s (%d)\n", vk_result_str(cr), (int)cr);
         if (cr == VK_ERROR_SURFACE_LOST_KHR) g_vk.sc_lost = 1;
         if (old) swapchain_retire();
+        pm_unlock(&g_vk.sc_lock);
         return 0;
     }
     vkGetSwapchainImagesKHR(g_vk.dev, sc, &nimg, NULL);
@@ -885,10 +912,13 @@ int vk_swapchain_create(int srgb) {
         while (ndone) vkDestroySemaphore(g_vk.dev, done[--ndone], NULL);
         vkDestroySwapchainKHR(g_vk.dev, sc, NULL);
         if (old) swapchain_retire();
+        pm_unlock(&g_vk.sc_lock);
         return 0;
     }
     if (old) swapchain_retire();
     g_vk.swapchain = sc;
+    pm_unlock(&g_vk.sc_lock);
+    vk_display_fifo(mode == VK_PRESENT_MODE_FIFO_KHR);
     g_vk.sc_extent = ext;
     g_vk.sc_win_w = ww;
     g_vk.sc_win_h = wh;
@@ -899,8 +929,8 @@ int vk_swapchain_create(int srgb) {
     g_vk.sc_count = nimg;
     vkGetSwapchainImagesKHR(g_vk.dev, sc, &g_vk.sc_count, g_vk.sc_images);
     memcpy(g_vk.sc_done, done, sizeof done[0] * nimg);
-    LOG("vulkan: swapchain %ux%u, %u images%s, %s\n", ext.width, ext.height, g_vk.sc_count,
-        g_vk.sc_srgb ? ", sRGB" : "",
+    LOG("vulkan: swapchain %ux%u, %u images%s%s, %s\n", ext.width, ext.height, g_vk.sc_count,
+        g_vk.sc_srgb ? ", sRGB" : "", g_vk.has_present_wait ? ", presents waited for" : "",
         mode == VK_PRESENT_MODE_MAILBOX_KHR     ? "mailbox"
         : mode == VK_PRESENT_MODE_IMMEDIATE_KHR ? "immediate"
                                                 : "fifo");
@@ -909,6 +939,7 @@ int vk_swapchain_create(int srgb) {
 
 int vk_init(void) {
     pm_init(&g_vklock);
+    pm_init(&g_vk.sc_lock);
     if (g_opt_headless) {
         /* Load libvulkan/vulkan-1 directly. No SDL video driver or headless-surface extension is needed. */
         if (!VK_OK(volkInitialize())) return 0;
