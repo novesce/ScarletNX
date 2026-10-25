@@ -462,6 +462,13 @@ add_executable(snx-test-nvn-header nvn_header.c)
 snx_test_target(snx-test-nvn-header 99)
 target_include_directories(snx-test-nvn-header PRIVATE "${PROJECT_SOURCE_DIR}/src")
 add_test(NAME nvn_header COMMAND snx-test-nvn-header)
+# nvn_direct's TIC and TSC encoders (src/nx/gpu/nvn/nvn_tic.c) read back through the renderer's decoders
+add_executable(snx-test-nvn-descriptors nvn_descriptors.c "${PROJECT_SOURCE_DIR}/src/nx/gpu/nvn/nvn_tic.c"
+    "${PROJECT_SOURCE_DIR}/src/nx/gpu/nvn/nvn_tex.c")
+snx_test_target(snx-test-nvn-descriptors 99)
+target_include_directories(snx-test-nvn-descriptors PRIVATE "${PROJECT_SOURCE_DIR}/src")
+target_link_libraries(snx-test-nvn-descriptors PRIVATE m)
+add_test(NAME nvn_descriptors COMMAND snx-test-nvn-descriptors)
 
 add_executable(snx-test-a64-fp-arithmetic a64_fp_arithmetic_test.c
     "${PROJECT_SOURCE_DIR}/src/common/cpu/aarch64/cpu_helpers.c")
