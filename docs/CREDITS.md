@@ -12,6 +12,7 @@ Generated modules include runtime ABI code. Game assets, keys and firmware are e
 | jsmolka's gba-tests (test ROMs, downloaded for the `agb_gba_*` tests, not shipped) | MIT |
 | hactool / cJSON / ConvertUTF (`src/nx/runtime/driver/hactool`, with ScarletNX's changes) | ISC / MIT / Unicode license |
 | LibHac storage code, ported into hactool (`src/nx/runtime/driver/hactool/storage.c`) | MIT |
+| NVN's types and function prototypes (`src/nx/gpu/nvn/nvn.h`), h1k421's reconstruction, as [nxnative](https://github.com/seedds/nxnative) carries it | MIT (in the file) |
 | OpenSSL | Apache 2.0 |
 | DejaVu Sans 2.37 (the shared fonts' stand-in, `cmake/shared_fonts.cmake`) | the Bitstream Vera license ([text](../dist/licenses/DejaVu/LICENSE)) |
 | yuzu's controller button glyphs (`font_nintendo_extended.cpp`, as Eden carries it) | GPL-2.0-or-later |
