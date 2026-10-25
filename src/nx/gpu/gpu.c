@@ -414,6 +414,7 @@ static void channel_reset(GpuChannel* ch) {
     reset_3d(ch->r3d);
     memcpy(ch->r3d_shadow, ch->r3d, sizeof ch->r3d_shadow); /* the reset values count as tracked */
     ch->r3d_dirty = ~0u; /* nothing the renderer derived from another channel's registers holds for these */
+    ch->ds.owner = ch->id;
     /* Eden's Fermi2D dst.depth and src.depth: the 2D surfaces' depth, as NVIDIA's driver assumes */
     ch->r2d[FERMI2D_DST + FERMI2D_SURFACE_DEPTH] = ch->r2d[FERMI2D_SRC + FERMI2D_SURFACE_DEPTH] = 1;
 }
@@ -1157,7 +1158,7 @@ void gpu_channel_close(u32 channel) {
     pm_unlock(&g_qlk);
     dma_snap_reset(channel);
     if (ch) {
-        if (ch->render_pred) g_renderer->render_predicate_drop(ch->render_pred);
+        if (ch->owner.pred) g_renderer->render_predicate_drop(ch->owner.pred);
         free(ch->inline_indices);
         free(ch->i2m.inner_buffer);
         free(ch);
