@@ -320,6 +320,21 @@ int main(void) {
         CHECK(size == 0x3c && g_mem[0x1000] == 0xcc);
     }
 
+    /* IManagerDisplayService 6002, SetLayerVisibility: Minecraft calls it at boot. The runtime has one layer and
+       always presents it, so the command succeeds and changes nothing */
+    {
+        SvcObj* manager = nn_visrv_sf_IManagerDisplayService_new();
+        IpcCtx c;
+        u8 raw[16];
+        memset(raw, 0, sizeof raw);
+        memset(&c, 0, sizeof c);
+        c.cmd = 6002;
+        c.raw = raw;
+        c.raw_size = sizeof raw;
+        CHECK(manager->dispatch(manager, &c) == 0 && c.out_size == 0);
+        svcobj_unref(manager);
+    }
+
     printf("vi_service: %u checks passed\n", test_checks);
     (void)test_objects, (void)test_kobjs;
     free(g_mem);

@@ -32,8 +32,14 @@ elseif(APPLE) # the architecture, SDK and oldest system version (cmake/apple.cma
 else() # a Linux cross build's target and sysroot, and the CPU baseline (cmake/cross.cmake)
     set(snx_rtlib_flags ${SNX_TARGET_FLAGS})
 endif()
-list(APPEND snx_rtlib_flags -O2 -fvisibility=hidden -fno-strict-aliasing -fwrapv -w -fno-semantic-interposition
+list(APPEND snx_rtlib_flags -O2 -fvisibility=hidden -w -fno-semantic-interposition
     -foptimize-sibling-calls -fno-stack-protector)
+# its own flags, which no target carries (cmake/banned_flags.cmake checks those)
+include("${PROJECT_SOURCE_DIR}/cmake/banned_flags.cmake")
+if(SNX_TRAPV)
+    list(APPEND snx_rtlib_flags ${SNX_TRAPV_FLAGS})
+endif()
+snx_check_banned_flags("The runtime library's flags (snx_rtlib_flags)" "${snx_rtlib_flags}")
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
     list(APPEND snx_rtlib_flags -mcx16)
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")

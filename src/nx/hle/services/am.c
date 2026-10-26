@@ -373,6 +373,12 @@ static int nn_am_service_ICommonStateGetter_GetHdcpAuthenticationStateChangeEven
     *event = ev_handle(g_hle.am.resolution_event);
     R_SUCCEED();
 }
+/* HDCP authenticates on the console's TV output; Eden answers 1 (common_state_getter.cpp) */
+static int nn_am_service_ICommonStateGetter_GetHdcpAuthenticationState(SvcObj* self, i32* state) {
+    (void)self;
+    *state = 1;
+    R_SUCCEED();
+}
 /* apm's configuration of the mode the console runs in */
 static int nn_am_service_ICommonStateGetter_GetCurrentPerformanceConfiguration(SvcObj* self, u32* configuration) {
     (void)self;
@@ -660,6 +666,11 @@ static int nn_am_service_IApplicationFunctions_GetDesiredLanguage(SvcObj* self, 
     set_language_code(am_desired_language(g_settings.language, supported), code->v);
     R_SUCCEED();
 }
+/* the NACP's user_account_switch_lock: whether the game locks switching users (RawNACP's byte at 0x3026) */
+int am_user_account_switch_lock(void) {
+    const u8* p = am_nacp(0x3026, 1);
+    return p ? p[0] != 0 : 0;
+}
 /* the NACP's display version, "1.0.0" for a game without one */
 void am_display_version(char version[16]) {
     const u8* p = am_nacp(NACP_DISPLAY_VERSION, 16);
@@ -698,6 +709,30 @@ static int nn_am_service_IApplicationFunctions_GetSaveDataSize(SvcObj* self, u8 
         *normal_size = (i64)am_nacp_u64(NACP_ACCOUNT_SAVE_SIZE + (device ? 16 : 0));
         *journal_size = (i64)am_nacp_u64(NACP_ACCOUNT_SAVE_SIZE + 8 + (device ? 16 : 0));
     }
+    R_SUCCEED();
+}
+/* the largest save data the console allows, as Eden answers (application_functions.cpp) */
+static int nn_am_service_IApplicationFunctions_GetSaveDataSizeMax(SvcObj* self, i64* normal_size,
+                                                                  i64* journal_size) {
+    (void)self;
+    *normal_size = 0xFFFFFFF;
+    *journal_size = 0xFFFFFFF;
+    R_SUCCEED();
+}
+/* a cache storage is made on the console's NAND; this runtime keeps no cache storage, so nothing is required, as
+   Eden's stub answers (application_functions.cpp) */
+static int nn_am_service_IApplicationFunctions_CreateCacheStorage(SvcObj* self, u16 index, i64 normal_size,
+                                                                 i64 journal_size, u32* target_media,
+                                                                 i64* required_size) {
+    (void)self, (void)index, (void)normal_size, (void)journal_size;
+    *target_media = 1; /* Nand */
+    *required_size = 0;
+    R_SUCCEED();
+}
+/* a game is running as soon as it tells AM it is: Eden answers true (application_functions.cpp) */
+static int nn_am_service_IApplicationFunctions_NotifyRunning(SvcObj* self, u8* became_running) {
+    (void)self;
+    *became_running = 1;
     R_SUCCEED();
 }
 static int nn_am_service_IApplicationFunctions_ExtendSaveData(SvcObj* self, u8 type, const nn_account_Uid* uid,

@@ -81,6 +81,13 @@ static int nn_account_IAccountServiceForApplication_GetProfile(SvcObj* self, con
     *profile = acc_for_user(nn_account_profile_IProfile_new_data(g_hle.acc.users, g_hle.acc.user_next, "acc profiles and managers"), uid);
     R_SUCCEED();
 }
+/* both games and applets may register a user, as Eden's ProfileManager::CanSystemRegisterUser answers */
+static int nn_account_IAccountServiceForApplication_IsUserRegistrationRequestPermitted(SvcObj* self, u64 pid,
+                                                                                      u8* permitted) {
+    (void)self, (void)pid;
+    *permitted = 1;
+    R_SUCCEED();
+}
 /* with one user, that user, chosen without asking; with more, none, and the game asks the user selector (am.c),
    which answers the user the game plays as */
 static int nn_account_IAccountServiceForApplication_TrySelectUserWithoutInteractionDeprecated(
@@ -116,6 +123,12 @@ static int nn_account_IAccountServiceForApplication_ListOpenContextStoredUsers(S
 static int nn_account_IAccountServiceForApplication_ListQualifiedUsers(SvcObj* self, IpcBuf users) {
     (void)self;
     acc_list_all(users);
+    R_SUCCEED();
+}
+/* the game's own control.nacp says whether switching users is locked (Eden reads the same NACP field) */
+static int nn_account_IAccountServiceForApplication_IsUserAccountSwitchLocked(SvcObj* self, u8* locked) {
+    (void)self;
+    *locked = am_user_account_switch_lock() ? 1 : 0;
     R_SUCCEED();
 }
 

@@ -238,13 +238,21 @@ typedef struct {
 } GpuDmaOp;
 /* A 2D engine blit (maxwell/fermi2d.c) the renderer does on the GPU: each destination pixel of columns x0 to x1 - 1
    and rows y0 to y1 - 1 the source pixel at column scol[x - x0] and row srow[y - y0] (nearest sampled, the tables
-   the engine works out), bpp bytes each. The sides are surface planes as the DMA engine's are (no origin) */
+   the engine works out), bpp bytes each. The sides are surface planes as the DMA engine's are (no origin). fmt 0
+   copies the pixels' bytes; else both are float formats (GPU_BLIT_FLOAT) and each component is converted */
 typedef struct {
     GpuDmaSide src, dst;
     u32 bpp, x0, x1, y0, y1;
     const u32* scol;
     const u32* srow;
+    u32 fmt;
 } GpuBlit;
+/* a blit's fmt between float formats: the source's components (1 to 4) of sb bytes (2 or 4), the destination's (dn
+   of db bytes), sx when the source's fourth component is padding. A component the source lacks is 0, its alpha 1.
+   bpp is the source's pixel, sn * sb bytes. texconv.glsl's TC_BLIT_FLOAT takes it as it is */
+#define GPU_BLIT_FLOAT(sn, sb, dn, db, sx) ((sn) | (sb) << 4 | (dn) << 8 | (db) << 12 | (u32)(sx) << 16)
+/* the bytes of a blit's destination pixel */
+#define GPU_BLIT_DST_BPP(b)                ((b)->fmt ? ((b)->fmt >> 8 & 15) * ((b)->fmt >> 12 & 15) : (b)->bpp)
 
 /* ---- gpu.c: guest memory through the GPU's address space. A read lands the renderer's pending results over the
    range first, a write lets it land what would overwrite the write later, and records the write (gpu_mem_written).

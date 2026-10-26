@@ -14,6 +14,9 @@
 
 u8* g_mem;
 const u64 g_user_id[2] = {0x0123456789ABCDEFull, 0xFEDCBA9876543210ull};
+/* acc.c's IsUserAccountSwitchLocked asks am.c, which this test doesn't compile: the NACP field is a switch here */
+static int test_account_switch_lock;
+int am_user_account_switch_lock(void) { return test_account_switch_lock; }
 char g_exedir[1024];
 static unsigned test_checks, test_objects, test_kobjs;
 static u32 test_next_handle = 0x100;
@@ -967,6 +970,28 @@ static void test_acc_resource_cache(void) {
     svcobj_unref(acc);
 }
 
+/* GetXpadIds lists the four basic Xpads and writes only those four IDs */
+static void test_xpad_ids(void) {
+    IpcBuf ids = {0x4000, 0x28, 0};
+    i64 count = 0;
+    int i;
+    memset(g_mem + 0x4000, 0xAA, 0x28);
+    CHECK(nn_hid_IHidServer_GetXpadIds(NULL, ids, &count) == 0 && count == 4);
+    for (i = 0; i < 4; i++) CHECK(snx_ld_le32(g_mem + 0x4000 + i * 4) == (u32)i);
+    CHECK(g_mem[0x4010] == 0xAA); /* only the four IDs were written */
+}
+
+/* user registration is permitted, and the NACP's switch lock is what the game said */
+static void test_account_replies(void) {
+    u8 value = 0;
+    CHECK(nn_account_IAccountServiceForApplication_IsUserRegistrationRequestPermitted(NULL, 0, &value) == 0 &&
+          value == 1);
+    test_account_switch_lock = 0;
+    CHECK(nn_account_IAccountServiceForApplication_IsUserAccountSwitchLocked(NULL, &value) == 0 && value == 0);
+    test_account_switch_lock = 1;
+    CHECK(nn_account_IAccountServiceForApplication_IsUserAccountSwitchLocked(NULL, &value) == 0 && value == 1);
+}
+
 /* prepo's play reports, each firmware's command {uid,} pid, X event, A report: kept nowhere, and succeeded, and
    refused without the pid */
 static void test_prepo_reports(void) {
@@ -987,6 +1012,10 @@ static void test_prepo_reports(void) {
         r.c.has_pid = 0; /* declared, so held to its declaration: no pid is a bad request */
         CHECK(prepo->dispatch(prepo, &r.c) == RC(11, 420));
     }
+    /* GetTransmissionStatus: nothing is queued, so the status is 0, as Eden answers */
+    request(&r, 10300);
+    call(prepo, &r);
+    CHECK(r.c.out_size == 4 && reply32(&r, 0) == 0);
     svcobj_unref(prepo);
 }
 
@@ -1362,6 +1391,8 @@ int main(void) {
     CHECK(g_mem != NULL);
     test_mm();
     test_hid();
+    test_xpad_ids();
+    test_account_replies();
     test_mii_default();
     test_acc_thumbnail();
     test_apm();

@@ -31,6 +31,7 @@ Generated modules include runtime ABI code. Game assets, keys and firmware are e
 | Tracy (the profiler client, built only with `SNX_TRACY`) | BSD-3-Clause |
 | ENet / zstd (an Eden room's connection and its datagrams, `src/common/network/net_room.c`) | MIT / BSD-3-Clause |
 | lunasvg / plutovg (the splash's SVGs and the user's picture) | MIT / MIT, with FreeType's rasterizer and stroker (FreeType License) and stb (MIT or public domain) |
+| GUI menu icons (`src/gui/icons.hex`), drawn after Lucide 1.61.0's (some derived from Feather) | GPL-3.0-or-later, after Lucide's ISC and Feather's MIT (in `src/gui/FONT-NOTICE.txt`) |
 | GUI VGA BIOS font (SeaBIOS `vgafont16`, originally Joseph Gil's font collection) | Public domain |
 | GUI Latin letters past CP437 (GNU Unifont 18.0.01's 8x16 glyphs, `src/gui/unifont-latin.hex`, fitted to the VGA font) | GPL-2.0-or-later with the GNU font embedding exception, or OFL-1.1 |
 | GUI wide letters the languages show, as Chinese (GNU Unifont 18.0.01's 16x16 glyphs, `src/gui/unifont-wide.hex`) | GPL-2.0-or-later with the GNU font embedding exception, or OFL-1.1 |
@@ -44,7 +45,6 @@ a source keep that source's copyright lines and license, most with the revision 
 
 | Where | From | License |
 | --- | --- | --- |
-| `src/nx/gpu/gpu.c` (safe reads of compute-inline payloads) and `src/nx/gpu/shader/spirv_translate.c` (constant geometry invocation information) | Citron, Zephyron's Princess Peach: Showtime! fixes in [`acfb1dcc1ad9adf25b960c4f8f25c5bf78849406`](https://github.com/citron-neo/emulator/commit/acfb1dcc1ad9adf25b960c4f8f25c5bf78849406), `video_core/dma_pusher.cpp` and `shader_recompiler/backend/spirv/emit_spirv_context_get_set.cpp`; original code copyright 2018 and 2021 yuzu Emulator Project | GPL-2.0-or-later |
 | `src/nx/runtime/driver/hactool/storage.c` and `storage.h` (the storages added to hactool) | LibHac, as Ryubing maintains it | MIT |
 | `src/3ds/gpu/`, `src/3ds/audio/`, `src/3ds/services/dsp.c`, `src/3ds/services/cfg.c` (the config blocks' defaults), `src/3ds/services/hid.c` (HID's samples, their layout and pace) | Azahar (Citra) | GPL-2.0-or-later |
 | `src/vita/hle/gxm.c` (sceGxm's state and its calls' semantics), `src/vita/gpu/usse.c` and `usse_constants.inc` (the USSE shader translator), `src/vita/gpu/gxp.h` (the GXP program layout), `src/vita/gpu/texture.h` (SceGxmTexture's words), `src/vita/gpu/swizzle.glsl` and `tests/glsl/vita_swizzle_glsl.cpp` (the swizzled and tiled texture layouts), `texture_levels` in `src/vita/gpu/render.c` (where a texture's mipmaps lie), `src/vita/hle/audiodec.c` and `videodec.c` (the decoders' structures and their ATRAC9 configuration word), `src/vita/hle/trophy.c` (the trophy calls' error codes and unlock rules) | Vita3K (`modules/SceGxm/`, `shader/`, `gxm/`, `renderer/src/texture/format.cpp`, `modules/SceAudiodec/`, `modules/SceVideodec/`, `modules/SceNpTrophy/SceNpTrophy.cpp`) | GPL-2.0-or-later |

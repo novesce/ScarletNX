@@ -186,8 +186,6 @@ static void vkr_method_barrier(int kind)
 		return;
 	}
 	vk_render_end();
-	if (kind == 6 && vk_rt_clean())
-		vk_release_visibility();
 	/* CPU-visible releases wait for completion in the release path. */
 	rec_CmdPipelineBarrier2(vk_cmd(), &di);
 	vk_unlock();

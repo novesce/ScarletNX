@@ -415,13 +415,19 @@ SNX_INLINE void dc_zva(u8* M, u64 a) { memset(MP(a & ~(u64)63), 0, 64); }
    The monitor is value based: a store-exclusive succeeds when the monitor is armed for the same address and size
    and a compare-and-swap from the value the load read succeeds. It is cleared after each store-exclusive. Status
    0 is success. Unlike hardware it sees no ABA and ordinary stores don't clear it (docs/DIVERGENCES.md). */
-SNX_INLINE u32 snx_cas64(u64* p, u64 expected, u64 desired) {
+/* Guest memory holds whatever the guest stored last, at any width: the helpers' typed accesses to it go through
+   these, which may alias every other access as a char's would, so none is assumed apart from another of a different
+   type once the helpers are inlined into each other */
+typedef u16 __attribute__((may_alias)) snx_guest_u16;
+typedef u32 __attribute__((may_alias)) snx_guest_u32;
+typedef u64 __attribute__((may_alias)) snx_guest_u64;
+SNX_INLINE u32 snx_cas64(snx_guest_u64* p, u64 expected, u64 desired) {
     return __atomic_compare_exchange_n(p, &expected, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
 }
-SNX_INLINE u32 snx_cas32(u32* p, u32 expected, u32 desired) {
+SNX_INLINE u32 snx_cas32(snx_guest_u32* p, u32 expected, u32 desired) {
     return __atomic_compare_exchange_n(p, &expected, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
 }
-SNX_INLINE u32 snx_cas16(u16* p, u16 expected, u16 desired) {
+SNX_INLINE u32 snx_cas16(snx_guest_u16* p, u16 expected, u16 desired) {
     return __atomic_compare_exchange_n(p, &expected, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
 }
 SNX_INLINE u32 snx_cas8(u8* p, u8 expected, u8 desired) {
@@ -438,15 +444,15 @@ u32 snx_cas128(CPU* c, u64* p, u64 o0, u64 o1, u64 n0, u64 n1);
          : sizeof(T) == 4 ? __builtin_bswap32((u32)(v))                                                              \
          : sizeof(T) == 8 ? __builtin_bswap64((u64)(v))                                                              \
                           : (v)))
-#define LDACQ(T, a)    SNX_GUEST_T(T, __atomic_load_n((T*)MP(a), __ATOMIC_SEQ_CST))
+#define LDACQ(T, a)    SNX_GUEST_T(T, __atomic_load_n((snx_guest_##T*)MP(a), __ATOMIC_SEQ_CST))
 #else
-#define LDACQ(T, a)    __atomic_load_n((T*)MP(a), __ATOMIC_SEQ_CST)
+#define LDACQ(T, a)    __atomic_load_n((snx_guest_##T*)MP(a), __ATOMIC_SEQ_CST)
 #endif
 /* LDXR/LDAXR of 1 << sz bytes */
 SNX_INLINE u64 ldx(CPU* c, u8* M, u64 a, u32 sz) {
     u64 v;
     if (sz == 0)
-        v = LDACQ(u8, a);
+        v = __atomic_load_n(MP(a), __ATOMIC_SEQ_CST);
     else if (sz == 1)
         v = LDACQ(u16, a);
     else if (sz == 2)
@@ -466,11 +472,11 @@ SNX_INLINE u32 stx(CPU* c, u8* M, u64 a, u32 sz, u64 v) {
         if (sz == 0)
             stored = snx_cas8((u8*)MP(a), (u8)c->excl_val, (u8)v);
         else if (sz == 1)
-            stored = snx_cas16((u16*)MP(a), SNX_GUEST16((u16)c->excl_val), SNX_GUEST16((u16)v));
+            stored = snx_cas16((snx_guest_u16*)MP(a), SNX_GUEST16((u16)c->excl_val), SNX_GUEST16((u16)v));
         else if (sz == 2)
-            stored = snx_cas32((u32*)MP(a), SNX_GUEST32((u32)c->excl_val), SNX_GUEST32((u32)v));
+            stored = snx_cas32((snx_guest_u32*)MP(a), SNX_GUEST32((u32)c->excl_val), SNX_GUEST32((u32)v));
         else
-            stored = snx_cas64((u64*)MP(a), SNX_GUEST64(c->excl_val), SNX_GUEST64(v));
+            stored = snx_cas64((snx_guest_u64*)MP(a), SNX_GUEST64(c->excl_val), SNX_GUEST64(v));
     }
     c->excl_on = 0;
     return !stored;
@@ -498,7 +504,8 @@ SNX_INLINE u32 stxp(CPU* c, u8* M, u64 a, u32 sz, u64 v1, u64 v2) {
     u32 stored = 0;
     if (c->excl_on && c->excl_addr == a && c->excl_size == (sz | 0x10)) {
         if (sz == 2)
-            stored = snx_cas64((u64*)MP(a), SNX_GUEST64(c->excl_val), SNX_GUEST64((u64)(u32)v1 | ((u64)v2 << 32)));
+            stored = snx_cas64((snx_guest_u64*)MP(a), SNX_GUEST64(c->excl_val),
+                               SNX_GUEST64((u64)(u32)v1 | ((u64)v2 << 32)));
         else
             stored = snx_cas128(c, (u64*)MP(a), c->excl_val, c->excl_val2, v1, v2);
     }

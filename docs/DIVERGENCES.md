@@ -120,7 +120,7 @@ merely from execution without an undefined-instruction exception.
    signed overflow/invalid shifts. In particular, `2 * INT32_MIN * INT32_MIN`
    needs a wider intermediate before saturation. See C7.2.206, .247-.250 and
    .274. These are portability/UB corrections, not a claim that all old runtime
-   builds produced incorrect integer results; production also uses `-fwrapv`.
+   builds produced incorrect integer results (they used `-fwrapv`, which is now banned).
 6. **A57 FP state:** MSR FPCR retains only `0x07c00000` for the Switch target
    (a target with FEAT_FP16 also keeps FZ16, `0x07c80000`); MSR FPSR retains only
    `0xf800009f`. This follows the TRM, rather than the more permissive Unicorn

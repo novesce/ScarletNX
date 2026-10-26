@@ -549,6 +549,14 @@ static int nn_hid_IHidServer_SetSupportedNpadIdType(SvcObj* self, u64 aruid, Ipc
     pm_unlock(&g_host.hid.lock);
     R_SUCCEED();
 }
+/* the basic Xpads a game enumerates: 0-3, as Eden's GetXpadIds answers since 10.0.0 (hid_server.cpp) */
+static int nn_hid_IHidServer_GetXpadIds(SvcObj* self, IpcBuf ids, i64* count) {
+    u32 i;
+    (void)self;
+    for (i = 0; i < 4 && (u64)(i + 1) * 4 <= ids.size; i++) w32(GP(ids.addr + i * 4), i);
+    *count = 4;
+    R_SUCCEED();
+}
 static int nn_hid_IHidServer_AcquireNpadStyleSetUpdateEventHandle(SvcObj* self, nn_hid_NpadIdType id, u64 aruid,
                                                                   u64 event_ptr, u32* event) {
     int e = hid_entry(id);

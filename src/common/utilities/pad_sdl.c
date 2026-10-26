@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
    Copyright 2026 the ScarletNX contributors */
 #include "common/utilities/pad_sdl.h"
+#include <stdio.h>
 
 /* each control's button; the triggers are axes */
 static const SDL_GamepadButton BUTTONS[SNX_PAD_CONTROLS] = {
@@ -39,4 +40,17 @@ int snx_pad_symmetric(SDL_Gamepad* g) {
         case SDL_GAMEPAD_TYPE_PS5: return 1;
         default: return 0;
     }
+}
+int snx_pad_slot(const char* guid, int alike, const char* const* players, int count, unsigned taken) {
+    char want[48];
+    int i;
+    if (alike)
+        snprintf(want, sizeof want, "%s/%d", guid, alike + 1);
+    else
+        snprintf(want, sizeof want, "%s", guid);
+    for (i = 0; i < count; i++)
+        if (!(taken >> i & 1u) && players[i] && !SDL_strcasecmp(players[i], want)) return i;
+    for (i = 0; i < count; i++)
+        if (!(taken >> i & 1u) && (!players[i] || !players[i][0])) return i;
+    return -1;
 }

@@ -18,8 +18,10 @@ name beside it, opens its launcher: a small SDL3 menu for the command-line drive
 after a game, without its code, says so and never opens it. It uses an
 embedded public-domain 8x16 VGA BIOS font, with GNU Unifont's 8x16 glyphs fitted to it for the Latin letters its CP437
 lacks and its 16x16 ones, two columns each, for the wide letters a language shows (Chinese), and nearest-neighbor
-integer scaling; its words are English or a language compiled into it ([Languages](#languages)). No font files or
-localization packages are needed.
+integer scaling; its words are English or a language compiled into it ([Languages](#languages)). An item of a menu
+has an icon beside its name, 16x16 in the font's stroke (`src/gui/icons.hex`): the menu's, the groups of the Settings and
+their rows that open a screen or do something (the others keep its columns), a game's box's actions, the setup's pages
+and the game's menu's. No font files or localization packages are needed.
 
 ```sh
 ./build/scarletnx
@@ -56,7 +58,10 @@ built in, drawn at the window's size ([lunasvg](https://github.com/sammycage/lun
   words between slashes presses the word clicked, `Left` or `Right` of `Left/Right`; the text after it
   presses the key when its words all press one. `Arrows`, `mouse`, `pad` and `D-pad` press nothing.
 - The menu, top to bottom: the three loads, **Install Keys**, **Settings**, **Share Log**, on
-  Android **Open Data Folder**, and **Exit**. The games, and the recent ones, are the Games tab's.
+  Android **Open Data Folder**, and **Exit**. The games, and the recent ones, are the Games tab's. A load whose driver
+  is neither beside ScarletNX nor on PATH, as those an app leaves out ([APPLE](APPLE.md)), is greyed out, still there,
+  and Enter or a tap on it says which driver it misses rather than opening its screen; the drivers are looked for
+  again each second, and with F5.
 - Space, Enter or a left click explicitly activates an item, marking it bright
   pink. Activation is tracked separately from hover/focus, so the activated item
   stays pink while another item is hovered in yellow. Mouse controls also work
@@ -116,8 +121,9 @@ built in, drawn at the window's size ([lunasvg](https://github.com/sammycage/lun
   side with the console button it sends (where the console's is, unless the player's map says otherwise, A and B
   swapped when the group's **Swap A/B** is on), and what the focus does at the bottom. Up/Down move, Left/Right
   change a control's button and Enter (or the pad's A) waits for a press on the pad, which takes it; a change keeps
-  the whole map as `gamepad_map`, and Del puts it back to the `.ini`'s. The first pad plugged in is shown, its held
-  buttons lit; with none, the middle says why (a joystick SDL has no mapping for is named, with its GUID and the
+  the whole map as `gamepad_map`, and Del puts it back to the `.ini`'s. The first pad plugged in is shown, on a
+  player's map that player's, as the games give the pads their players (each in the order it came takes the player
+  whose *Controller* names it, else the first naming none), its held buttons lit; with none, the middle says why (a joystick SDL has no mapping for is named, with its GUID and the
   file its line goes in). The launcher reads pads only on this page.
   Controllers' **Player** row, first, goes round *All* and 1 to 8, as Eden's tabs (Left/Right or Enter): *All*
   shows the settings every player shares; a player its own, *Controller*, *Connected*, *Type*, *Swap A/B*,
@@ -136,7 +142,8 @@ built in, drawn at the window's size ([lunasvg](https://github.com/sammycage/lun
   back to App, and **Folders**, every folder on one screen, the whole of it, a box a group:
   - **App Folders**: **Data** (`recompiled/`, `dumps/`, `themes/` and `prod.keys`), **Settings**, shown only
     (`app.ini`, which names the others, and each game's `.ini`: `XDG_CONFIG_HOME` moves it, a portable copy keeps its
-    own), **Logs** (the games' logs and `threads.txt`, `recent.txt`, `last-run.log` and `last-recompile.log`), **Caches** (the recompile's
+    own), **Logs** (the games' logs and `threads.txt`, `recent.txt`, `last-run.log`, `last-recompile.log` and the
+    launcher's `scarletnx-console.log` and `scarletnx-error.log`), **Caches** (the recompile's
     `units/`, the shader caches, the dumps' icons, and Extractions by default) and **Extractions**;
   - **Dumps Library**: its **Main**, the data folder's `dumps/` (with its subfolders, going with the data folder), then its
     **Extra** folders, whose dumps Games lists, and **Add a folder**;
@@ -253,13 +260,24 @@ built in, drawn at the window's size ([lunasvg](https://github.com/sammycage/lun
   which it took. A language written in two scripts goes by its script, written or implied by its country (`zh-CN`,
   `zh-SG` simplified, `zh-TW`, `zh-HK`, `zh-MO` traditional): a system in one never takes a catalog of the other. The
   words change at once; a phrase the language has not translated stays English.
-- **Share Log** saves the last run's output, the queue's recompiles' (`last-recompile.log`) and the game log to
-  `scarletnx.log`. After a run or a recompile of the queue that ended abnormally (not by ESC) it blinks red, as
+- **Share Log** saves the last run's output, the queue's recompiles' (`last-recompile.log`), the launcher's own log
+  and its fatal errors (below) and the game log to `scarletnx.log`. After a run or a recompile of the queue that ended abnormally (not by ESC) it blinks red, as
   Install Keys does, until its log is saved or a run ends well. On the
   desktop it goes in the working folder with its path copied. On Android it goes to the
   data folder's `state/` and is shared.
 - **Open Data Folder**, on Android, opens the data folder, the app's own storage, in the
   system's Files app ([ANDROID](ANDROID.md)).
+- The launcher's log, `scarletnx-console.log` in its state folder (Settings > App > Folders' Logs; on iOS in `logs/`
+  of the app's Documents, [APPLE](APPLE.md)), holds what it says: its start (its build and data folder), each failure
+  once in a session (what the box over the screen says, shown or not), the warnings it gives as it opens, a dump whose
+  icon the driver did not give with what the driver said. Each line starts with the time and the launcher's process
+  ID, `2026-10-25 11:30:02 [4242] `, so two launchers open at once write theirs apart, and the lines go to stderr
+  too. A fatal error, the launcher's that stops it as it starts or a game's, is also kept in `scarletnx-error.log`
+  beside it, a game's after its name (a game of no data folder, an `--outdir`'s, beside its own log). Each start adds
+  to them. Launchers open at once on one Logs folder each keep their runs' output apart: the first `last-run.log` and
+  `last-recompile.log`, the next `last-run-2.log` and `last-recompile-2.log`, and on to 8, each held while its
+  launcher is open (a lock on the file, which leaves it to be read); the log says which a launcher took, and Share Log
+  sends its own.
 - **Exit** closes the launcher, once asked (ESC on the menu asks too, and while a recompile of the queue runs or waits
   the question names it), a screen saying for half a second which of its
   files it keeps for the next start (Settings, the picks of Settings > App, the libraries' folders, the recent games), a second
@@ -346,7 +364,10 @@ GBA's. It reads the `recompiled/` of the
 folder the driver works in, which the menu passes it as `--data`: a portable copy's `.scarletnx/` beside the
 AppImage (or the GUI), else the user's data folder, a build tree's menu's too ([USAGE](USAGE.md#folders)), then each
 Extra of Settings > App > Folders. Each game is shown by the name in its `control.nacp`, which the recompile copies into
-its data, else by its folder's or file's name, sorted by it in each folder. Only immediate files are listed:
+its data, else by its folder's or file's name, sorted by it in each folder, with its icon: a game's own, a dump's
+the one its driver gives (`scarletnx -x --icon`), asked once a session into Caches' `icons/`. A dump the driver gave
+none for says why after its kind (the side box, the tips), and the launcher's log has all the driver said (above); the
+next start asks again. Only immediate files are listed:
 executables (execute permission on UNIX, `.exe` on Windows), `.cia`, `.cci`, `.3ds`, `.cxi`, `.app`, `.hbb`, `.bcci`, `.bcxi`, `.bcia`, `.zcci`, `.zcxi` and `.zcia` files
 (case-insensitive, no execute permission needed), which run with the 3DS driver, and `.vpk` files, which run with the Vita driver. Hidden files, shared libraries and
 directories are excluded. The folders are looked at once a second while the menu is open (their

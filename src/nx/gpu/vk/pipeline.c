@@ -451,7 +451,7 @@ static u32* sh_spirv(VkSh* s, const u8* code, u64 h, int stage, const u32 mask[2
         if (image_slots > g_vk.props.limits.maxDescriptorSetStorageImages)
             image_slots = g_vk.props.limits.maxDescriptorSetStorageImages;
         int needs_unformatted = 0;
-        for (int i = 0; i < s->si.nimg; i++) needs_unformatted |= s->si.img[i].kind != 1;
+        for (int i = 0; i < s->si.nimg; i++) needs_unformatted |= s->si.img[i].kind == 0;
         /* a vertex program's stores need the device's vertexPipelineStoresAndAtomics */
         if ((stage != ST_FS && (stage != ST_VS || !g_vk.feat.vertexPipelineStoresAndAtomics)) ||
             (u32)s->si.nimg > image_slots || (needs_unformatted && !g_vk.feat.shaderStorageImageWriteWithoutFormat)) {
@@ -881,15 +881,8 @@ static VkPipeline pipe_create(const Pipe* e) {
     VkPipelineCreationFeedback made = {0};
     VkPipelineCreationFeedbackCreateInfo fi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO,
                                                .pPipelineCreationFeedback = &made};
-    /* Select strict vertex bounds without enabling robustness2 globally for
-       storage/uniform buffers or compute pipelines. Per-pipeline selection
-       requires the feature to be supported, not enabled device-wide. */
-    VkPipelineRobustnessCreateInfoEXT robustness = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO_EXT,
-        .pNext = &fi,
-        .vertexInputs = VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2_EXT};
     VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-                                        .pNext = g_vk.has_vertex_robustness2 ? (void*)&robustness : (void*)&fi,
+                                        .pNext = &fi,
                                         .colorAttachmentCount = k->ncolor,
                                         .pColorAttachmentFormats = cf,
                                         .depthAttachmentFormat = (VkFormat)k->depth,
@@ -1505,9 +1498,9 @@ static void pf_key(char* out, size_t n, size_t* guest) {
                      (unsigned)sizeof(PfSource), (unsigned)sizeof(PfPipe), (unsigned)sizeof(ShXfb));
     *guest = g > 0 && (size_t)g < n ? (size_t)g : 0;
     if (*guest)
-        snprintf(out + *guest, n - *guest, " %s%s driver=%u api=%u uuid=%s ftz=%d sizes=%u,%u vertex_bounds=%d", snx_build_info(), exe,
+        snprintf(out + *guest, n - *guest, " %s%s driver=%u api=%u uuid=%s ftz=%d sizes=%u,%u", snx_build_info(), exe,
                  d->driverVersion, d->apiVersion, uuid, g_vk_ftz, (unsigned)sizeof(ShaderInfo),
-                 (unsigned)sizeof(PfShader), g_vk.has_vertex_robustness2);
+                 (unsigned)sizeof(PfShader));
 }
 
 /* ---- the shaders of the programs the game ships (gpu/shipped_pass.c finds them), translated before a draw asks */

@@ -1161,6 +1161,34 @@ msgstr ""
 
 #: src/gui/main.c
 #, c-format
+msgid "%s cannot be made: %s"
+msgstr ""
+
+#: src/gui/main.c
+msgid "Cannot start the run: out of memory"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "the driver gave no answer in %d s"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "the driver ended with status %d"
+msgstr ""
+
+#: src/gui/main.c
+msgid "the driver ended without one"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "Cannot find %s beside ScarletNX or on PATH."
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
 msgid "The dumps' icons are not asked for (%s)"
 msgstr ""
 
@@ -1657,6 +1685,11 @@ msgstr ""
 
 #: src/gui/main.c
 #, c-format
+msgid ". No icon: %s"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
 msgid "Ready to run, with %zu update(s), DLC(s), mod(s) or cheat(s) to pick from"
 msgstr ""
 
@@ -1853,10 +1886,6 @@ msgstr ""
 
 #: src/gui/main.c
 msgid "Queue"
-msgstr ""
-
-#: src/gui/main.c
-msgid "Cannot start the run: out of memory"
 msgstr ""
 
 #: src/gui/main.c
@@ -2201,6 +2230,11 @@ msgstr ""
 #: src/gui/main.c
 #, c-format
 msgid "Used, not kept for the next start: %s could not be written"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "%d launchers hold the run logs of %s: this one's runs keep none"
 msgstr ""
 
 #: src/gui/main.c
@@ -2992,11 +3026,6 @@ msgstr ""
 #: src/gui/main.c
 #, c-format
 msgid "%s is compiling (%d%%): the game plays once the queue ends"
-msgstr ""
-
-#: src/gui/main.c
-#, c-format
-msgid "Cannot find %s beside ScarletNX or on PATH."
 msgstr ""
 
 #: src/gui/main.c

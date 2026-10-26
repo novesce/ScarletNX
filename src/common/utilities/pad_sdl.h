@@ -14,4 +14,9 @@ int snx_pad_held(SDL_Gamepad* g, int control);
 /* g's face labels (SNX_PAD_LABEL_ of south, east, west, north), and whether its sticks sit side by side */
 void snx_pad_labels(SDL_Gamepad* g, int labels[4]);
 int snx_pad_symmetric(SDL_Gamepad* g);
+/* The player a pad takes as it is plugged in, as the games give them their pads: the first free one whose controller
+   names it (its SDL GUID's text, "/2" after it for the second alike, "/3" the third), else the first free one that
+   names none (NULL or ""); -1 for none. alike: the pads with its GUID that took a player before it; players: each
+   player's controller (gamepad_p<N>_device), count of them; taken: a bit for each player that has a pad */
+int snx_pad_slot(const char* guid, int alike, const char* const* players, int count, unsigned taken);
 #endif

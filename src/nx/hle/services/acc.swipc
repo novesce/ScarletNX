@@ -19,7 +19,7 @@ interface nn::account::IAccountServiceForApplication is acc:u0, acc:u1, acc:su {
     [4] GetLastOpenedUser() -> nn::account::Uid uid;
     [5] GetProfile(nn::account::Uid uid) -> object<nn::account::profile::IProfile> profile;
     @stub [6] GetProfileDigest(nn::account::Uid uid) -> nn::account::ProfileDigest digest;
-    @stub [50] IsUserRegistrationRequestPermitted(pid) -> b8 permitted;
+    [50] IsUserRegistrationRequestPermitted(pid) -> b8 permitted;
     [51] TrySelectUserWithoutInteractionDeprecated(b8 is_network_service_account_required) -> nn::account::Uid uid;
     # 19.0.0+, which a game built for it sends instead of 51
     [52] TrySelectUserWithoutInteraction(b8 is_network_service_account_required) -> nn::account::Uid uid;
@@ -32,7 +32,10 @@ interface nn::account::IAccountServiceForApplication is acc:u0, acc:u1, acc:su {
     [131] ListOpenContextStoredUsers(array<nn::account::Uid, 0xa> users);
     @stub [140] InitializeApplicationInfo(pid);
     [141] ListQualifiedUsers(array<nn::account::Uid, 0xa> users);
-    @stub [150] IsUserAccountSwitchLocked() -> b8 locked;
+    [150] IsUserAccountSwitchLocked() -> b8 locked;
+    # 13.0.0+, which Tears of the Kingdom and Super Mario Bros. Wonder call at boot: Eden answers it with success and
+    # reads nothing (acc.cpp, InitializeApplicationInfoV2)
+    @stub [160] InitializeApplicationInfoV2(pid);
 }
 
 interface nn::account::profile::IProfile {

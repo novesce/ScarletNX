@@ -8,6 +8,7 @@
 #include "nx/runtime/options.h"
 #include "nx/runtime/platform/plat.h"
 #include "common/utilities/common.h"
+#include "common/utilities/pad_sdl.h" /* snx_pad_slot */
 #include <SDL3/SDL.h>
 #include <string.h>
 #include <stdio.h>
@@ -324,6 +325,16 @@ int main(void) {
     pump();
     CHECK(with(fifth, SDL_GAMEPAD_BUTTON_EAST) == A);
     CHECK(!strcmp(gamepad_name(0), SDL_GetJoystickName(xbox)) && !strcmp(gamepad_name(3), SDL_GetJoystickName(fifth)));
+    /* the player a pad takes (snx_pad_slot, by which the launcher's button map finds a player's too): the one that names
+       its GUID (any case, /2 for the second alike), else the first free one naming none (NULL or "") */
+    {
+        const char* players[4] = {NULL, "abc", "", "abc/2"};
+        CHECK(snx_pad_slot("abc", 0, players, 4, 0) == 1 && snx_pad_slot("ABC", 0, players, 4, 0) == 1);
+        CHECK(snx_pad_slot("abc", 1, players, 4, 1u << 1) == 3);
+        CHECK(snx_pad_slot("def", 0, players, 4, 0) == 0 && snx_pad_slot("def", 0, players, 4, 1u << 0) == 2);
+        CHECK(snx_pad_slot("def", 0, players, 4, 1u << 0 | 1u << 2) == -1);
+        CHECK(snx_pad_slot("abc", 0, players, 4, 1u << 1) == 0); /* its player has another: the next naming none */
+    }
     /* a player's pad by its slot, as the menu's button map draws it: none where one left */
     CHECK(gamepad_of_player(0) == 0 && gamepad_of_player(2) == -1 && gamepad_of_player(4) == 3);
     CHECK(gamepad_of_player(5) == -1 && gamepad_of_player(-1) == -1 && gamepad_of_player(SNX_GAMEPADS) == -1);

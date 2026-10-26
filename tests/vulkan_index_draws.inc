@@ -6,6 +6,22 @@
    green one, so a quad drawn from the wrong vertices shows red, and a strip that takes its restart index (2, the red
    quad's top right corner) for a vertex draws a second triangle with red in it */
 
+/* a program at address of count instructions (a scheduling word before every three), a fragment program's header
+   taking a screen-linear RGBA input when fragment is set */
+static int index_program(u64 address, const u64* ops, u32 count, int fragment) {
+    u64 code[64] = {0};
+    u32 at = 10;
+    if (fragment) {
+        code[3] = 0xff; /* screen-linear RGBA input */
+        code[9] = 15;
+    }
+    for (u32 i = 0; i < count; i++) {
+        if (!(i % 3)) code[at++] = 0x001f8000fc0007e0ull;
+        code[at++] = ops[i];
+    }
+    return invalidate_write_code(address, code, 64);
+}
+
 /* the 4x4 target's pixels after a draw call: how many are green and blue (the clear), and whether any has red */
 typedef struct {
     u32 green, blue, red;
@@ -159,8 +175,8 @@ static int check_index_draws(void) {
     }
     for (u32 i = 0; i < 4; i++) fragment[i] = 0xe000000000070000ull | (0x20ull + i) << 30 | i;
     fragment[4] = 0xe30000000007000full;
-    CHECK(mesh_program(address, vertex, 5, 0));
-    CHECK(mesh_program(address + 0x10000, fragment, 5, 1));
+    CHECK(index_program(address, vertex, 5, 0));
+    CHECK(index_program(address + 0x10000, fragment, 5, 1));
     u32* r = channel->r3d;
     r[0x582] = (u32)(address >> 32);
     r[0x583] = (u32)address;

@@ -102,7 +102,7 @@ void gui_apple_log_start(void) {
         freopen(path, "a", stdout);
         setvbuf(stdout, NULL, _IONBF, 0);
         setvbuf(stderr, NULL, _IONBF, 0);
-        fprintf(stderr, "\n===== ScarletNX starts %s", ctime(&now));
+        fprintf(stderr, "\n===== ScarletNX starts, pid %ld, %s", (long)getpid(), ctime(&now));
         fprintf(stderr, "device:\n");
         sysctl_line("hw.machine");
         sysctl_line("hw.model");

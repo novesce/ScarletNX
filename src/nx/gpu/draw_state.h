@@ -90,7 +90,9 @@ typedef struct {
     u8 window_origin;                      /* DS_ORIGIN_ */
     u8 sprite_origin;                      /* a point sprite's T is 0 at its top */
     u8 depth_mode;                         /* 1: depth from 0 to 1, 0: from -1 to 1 */
-    u8 pad[3];
+    u8 point_nudge;                        /* points on a pixel border go to the pixel after it (OpenGL's point
+                                              center and half-integer pixel centers, where that rule is known) */
+    u8 pad[2];
     struct {
         u8 fail, zfail, pass, cmp; /* DS_STENCIL_, DS_CMP_ */
         u32 ref, cmask, wmask;

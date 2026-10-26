@@ -18,9 +18,6 @@
 #include "nx/runtime/platform/overlay.h"
 #include "nx/runtime/platform/fatal_screen.h"
 #include "nx/runtime/platform/touch.h"
-#ifndef _WIN32
-#include <sys/stat.h>
-#endif
 #include "nx/runtime/platform/ui.h"
 #include "nx/runtime/platform/vpad.h"
 #include "nx/runtime/platform/gamepad.h"
@@ -748,18 +745,33 @@ static int fatal_screen(const char* msg) {
    thread doesn't come (held up elsewhere), Windows' own box (it takes any thread) and none on Linux: the error is in
    the log and on stderr. Nothing for an unattended run, where nobody would close it */
 void win_fatal_box(const char* msg) {
-#ifdef SDL_PLATFORM_IOS
-    /* a phone shows no stderr and no log of the app's: the Files app shows this file, in the app's Documents */
+    /* beside the launcher's log (docs/USAGE.md#folders), whose Share Log sends it, for a game of a data folder: in that
+       folder's state folder; another folder's game beside its own log, or before it has one in its folder; on iOS in
+       the app's Documents' logs/, which the Files app shows, since a phone shows no stderr */
     {
-        FILE* file;
-        mkdir("logs", 0755);
-        file = fopen("logs/scarletnx-error.log", "a");
-        if (file) {
-            fprintf(file, "%s\n", msg);
-            fclose(file);
-        }
-    }
+#ifdef SDL_PLATFORM_IOS
+        char* folder = snx_strdup("logs");
+#else
+        char here[sizeof g_exedir], *moved, *folder;
+        size_t n = strlen(g_exedir);
+        snprintf(here, sizeof here, "%.*s", (int)(n ? n - 1 : 0), g_exedir); /* without its separator */
+        moved = snx_user_path(here[0] ? here : ".", SNX_USER_STATE);
+        folder = moved && strcmp(moved, here[0] ? here : ".") ? snx_menu_dir(here[0] ? here : ".", SNX_USER_STATE)
+                 : g_statedir[0]                              ? snx_strdup(g_statedir)
+                 : here[0]                                    ? snx_strdup(here)
+                                                              : NULL; /* nothing known yet: stderr has it */
+        free(moved);
 #endif
+        char* path = folder && !snx_mkdirs(folder) ? snx_path_join(folder, SNX_ERROR_LOG) : NULL;
+        char* line = snx_format("%s: %s", g_exename[0] ? g_exename : "scarletnx", msg);
+        if (path && snx_log_lines(path, line)) {
+            char why[256];
+            fprintf(stderr, "%s could not be written (%s)\n", path, snx_os_error(why, sizeof why));
+        }
+        free(line);
+        free(path);
+        free(folder);
+    }
     if (g_opt_headless || unattended_active()) return;
     if (SDL_IsMainThread()) {
         /* an error another thread left first: this one followed from it */

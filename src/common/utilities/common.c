@@ -32,6 +32,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <sys/file.h> /* flock */
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <sys/statvfs.h>
@@ -231,6 +232,96 @@ FILE* snx_fopen(const char* path, const char* mode) {
     return f;
 #else
     return fopen(path, mode);
+#endif
+}
+int snx_log_lines(const char* path, const char* text) {
+    char stamp[64];
+    time_t now = time(NULL);
+    struct tm local = {0};
+    size_t lines = 1, n = 0, w;
+    const char *c, *line;
+    char* out;
+    int failed;
+#ifdef _WIN32
+    unsigned long pid = (unsigned long)GetCurrentProcessId();
+    FILE* f;
+    localtime_s(&local, &now);
+#else
+    unsigned long pid = (unsigned long)getpid();
+    int fd;
+    localtime_r(&now, &local);
+#endif
+    w = strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M:%S", &local);
+    snprintf(stamp + w, sizeof stamp - w, " [%lu] ", pid);
+    w = strlen(stamp);
+    for (c = text; *c; ++c) lines += *c == '\n';
+    out = (char*)snx_alloc(strlen(text) + lines * w + 2);
+    for (line = text; *line;) { /* each line its stamp, its newline */
+        const char* end = strchr(line, '\n');
+        size_t len = end ? (size_t)(end - line) : strlen(line), kept = len;
+        if (kept && line[kept - 1] == '\r') --kept; /* a Windows program's \r\n: the line ends as the others do */
+        memcpy(out + n, stamp, w);
+        memcpy(out + n + w, line, kept);
+        n += w + kept;
+        out[n++] = '\n';
+        line += len + (end != NULL);
+    }
+#ifdef _WIN32
+    f = snx_fopen(path, "ab");
+    failed = !f || fwrite(out, 1, n, f) != n;
+    if (f && fclose(f)) failed = 1;
+#else
+    fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    failed = fd < 0 || write(fd, out, n) != (ssize_t)n;
+    if (fd >= 0) {
+        int saved = errno;
+        close(fd);
+        errno = saved;
+    }
+#endif
+    free(out);
+    return failed ? -1 : 0;
+}
+int snx_lock_file(const char* path, intptr_t* lock) {
+#ifdef _WIN32
+    wchar_t* p = wide(path);
+    OVERLAPPED past = {0}; /* not far: windef.h defines it */
+    HANDLE h = p ? CreateFileW(p, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)
+                 : INVALID_HANDLE_VALUE;
+    free(p);
+    if (h == INVALID_HANDLE_VALUE) {
+        errno = EACCES;
+        return -1;
+    }
+    past.OffsetHigh = 0x7fffffffu; /* past any end, so the bytes are never what is locked */
+    if (!LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &past)) {
+        DWORD error = GetLastError();
+        CloseHandle(h);
+        if (error == ERROR_LOCK_VIOLATION || error == ERROR_IO_PENDING) return 1;
+        errno = EACCES;
+        return -1;
+    }
+    *lock = (intptr_t)h;
+    return 0;
+#else
+    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (fd < 0) return -1;
+    if (flock(fd, LOCK_EX | LOCK_NB)) {
+        int error = errno;
+        close(fd);
+        errno = error;
+        return error == EWOULDBLOCK ? 1 : -1;
+    }
+    *lock = fd;
+    return 0;
+#endif
+}
+void snx_unlock_file(intptr_t lock) {
+#ifdef _WIN32
+    CloseHandle((HANDLE)lock); /* its lock with it */
+#else
+    close((int)lock);
 #endif
 }
 int snx_path_is_full(const char* path) {

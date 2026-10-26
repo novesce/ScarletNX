@@ -712,7 +712,7 @@ typedef struct {
     VkImageLayout l1, l2;
     u32 n;
     u32 e; /* a filter */
-    u64 v[3]; /* a clear value */
+    VkClearValue v; /* a clear value */
 } XferArgs;
 #define XFER_REGIONS(x) ((const void*)((const u8*)(x) + REC_AL(sizeof *(x))))
 static void copy_buffer_run(const void* p) {
@@ -737,11 +737,11 @@ static void image_to_buffer_run(const void* p) {
 }
 static void clear_color_run(const void* p) {
     const XferArgs* x = p;
-    vkCmdClearColorImage(x->cb, (VkImage)x->h1, x->l1, (const VkClearColorValue*)x->v, x->n, XFER_REGIONS(x));
+    vkCmdClearColorImage(x->cb, (VkImage)x->h1, x->l1, &x->v.color, x->n, XFER_REGIONS(x));
 }
 static void clear_depth_run(const void* p) {
     const XferArgs* x = p;
-    vkCmdClearDepthStencilImage(x->cb, (VkImage)x->h1, x->l1, (const VkClearDepthStencilValue*)x->v, x->n,
+    vkCmdClearDepthStencilImage(x->cb, (VkImage)x->h1, x->l1, &x->v.depthStencil, x->n,
                                 XFER_REGIONS(x));
 }
 u64 g_rec_xfers, g_rec_barriers; /* copies and blits, and barriers, put in the frame's ring (gpuprof.c's gaps) */
@@ -818,7 +818,7 @@ void rec_CmdClearColorImage(VkCommandBuffer cb, VkImage img, VkImageLayout l, co
         vkCmdClearColorImage(cb, img, l, c, n, r);
         return;
     }
-    memcpy(rec_xfer(clear_color_run, cb, (u64)img, l, 0, 0, n, r, n * sizeof *r)->v, c, sizeof *c);
+    rec_xfer(clear_color_run, cb, (u64)img, l, 0, 0, n, r, n * sizeof *r)->v.color = *c;
     rec_commit();
 }
 void rec_CmdClearDepthStencilImage(VkCommandBuffer cb, VkImage img, VkImageLayout l, const VkClearDepthStencilValue* c,
@@ -827,7 +827,7 @@ void rec_CmdClearDepthStencilImage(VkCommandBuffer cb, VkImage img, VkImageLayou
         vkCmdClearDepthStencilImage(cb, img, l, c, n, r);
         return;
     }
-    memcpy(rec_xfer(clear_depth_run, cb, (u64)img, l, 0, 0, n, r, n * sizeof *r)->v, c, sizeof *c);
+    rec_xfer(clear_depth_run, cb, (u64)img, l, 0, 0, n, r, n * sizeof *r)->v.depthStencil = *c;
     rec_commit();
 }
 

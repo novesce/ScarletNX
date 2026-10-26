@@ -43,7 +43,7 @@ interface nn::hid::IHidServer is hid {
     @stub [32] SendKeyboardLockKeyEvent(u32 events, aruid aruid);
     [40] AcquireXpadIdEventHandle(u64 unknown) -> handle<copy, event> event;
     @stub [51] ActivateXpad(nn::hid::BasicXpadId id, aruid aruid);
-    @stub [55] GetXpadIds(array<nn::hid::BasicXpadId, 0xa> ids) -> i64 count;
+    [55] GetXpadIds(array<nn::hid::BasicXpadId, 0xa> ids) -> i64 count;
     @stub [56] ActivateJoyXpad(nn::hid::JoyXpadId id);
     [58] GetJoyXpadLifoHandle(nn::hid::JoyXpadId id) -> handle<copy, shared_memory> lifo;
     @stub [59] GetJoyXpadIds(array<nn::hid::JoyXpadId, 0xa> ids) -> i64 count;

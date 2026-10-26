@@ -123,6 +123,7 @@ interface nn::prepo::detail::ipc::IPrepoService is prepo:u, prepo:a, prepo:a2 {
     @stub [10106] SaveReport(pid, buffer<u8, 9> event_id, buffer<u8, 5> report);
     @stub [10107] SaveReportWithUser(bytes<0x10, 8> uid, pid, buffer<u8, 9> event_id, buffer<u8, 5> report);
     @stub [10200] RequestImmediateTransmission();
+    [10300] GetTransmissionStatus() -> i32 status;
     @stub [10400] GetSystemSessionId() -> u64 id;
 }
 # caps:u, caps:a, caps:su and caps:ss are four interfaces on the console

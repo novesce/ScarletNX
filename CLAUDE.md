@@ -30,6 +30,14 @@ get wrong and points to the skills that carry the procedures.
   shaders (`docs/BLOCKLINEAR.md`), with no CPU fallback. The CPU copies guest memory to and from staging in whole
   ranges and nothing more. Never read GPU or PCIe-mapped memory from the CPU: a readback is the last resort, for
   bytes the guest's CPU must see, and it reads host-cached memory the GPU copied into.
+- **Strict aliasing, no `-fno-strict-aliasing`.** The configure stops on that flag anywhere in ScarletNX's own targets
+  (`cmake/banned_flags.cmake`). An object is accessed through its own type, a character type or `memcpy`
+  (`common/utilities/endian.h` for guest and wire bytes), a union member, or a local copied in and out.
+- **Signed overflow is a bug, no `-fwrapv`.** The same check stops on `-fwrapv` and `-fno-strict-overflow`, the
+  runtime library the game modules link included. Arithmetic that wraps is done in unsigned types and converted back,
+  a product that can overflow gets a wider intermediate. `-DSNX_TRAPV=ON` builds our code and that library with
+  `-ftrapv` and a trap on left shifts of negative values (which `-fwrapv` also defined and `-ftrapv` misses) to find
+  the ones left (a build for the tests and a game run, never one to ship).
 - **Test-only code lives in `tests/`.** `src/` holds what ScarletNX's programs build and ship. A CPU reference the
   GPU's output is checked against, a decoder or a helper that only tests compile goes in `tests/support/` (the CPU
   decoders of ASTC, ETC2 and BCn, the `*_ref.c` engine references, the NVN decoders), with its declarations in a

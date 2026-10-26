@@ -27,7 +27,8 @@ u32 snx_cas128(CPU* c, u64* p, u64 o0, u64 o1, u64 n0, u64 n1) {
     return c->rt->cas128(p, o0, o1, n0, n1);
 }
 #else
-__extension__ typedef unsigned __int128 snx_u128;
+/* guest memory, may_alias as cpu.h's snx_guest_u64 */
+__extension__ typedef unsigned __int128 __attribute__((may_alias)) snx_u128;
 #if defined(__x86_64__)
 __attribute__((target("cx16")))
 #endif

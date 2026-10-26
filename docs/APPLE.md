@@ -47,8 +47,9 @@ menu's driver:
   process, so the app ends with the game.
 - **Share Log** opens the share sheet with `scarletnx.log`.
 - **Logs.** Everything the app prints goes to `logs/scarletnx-console.log` in its Documents, after a banner with the
-  device, the system and the limits the app has, and a fatal error is also written to `logs/scarletnx-error.log`. A
-  phone shows no console, so these are what to read when a run fails.
+  device, the system and the limits the app has, with the menu's own lines ([GUI](GUI.md)), and a fatal error, the
+  menu's or a game's, is also written to `logs/scarletnx-error.log`. A phone shows no console, so these are what to read
+  when a run fails; Share Log sends both.
 
 The IPA is unsigned: AltStore, SideStore or a developer account signs it for the device (a Mac can too:
 [Installing from a Mac](#installing-from-a-mac)), with

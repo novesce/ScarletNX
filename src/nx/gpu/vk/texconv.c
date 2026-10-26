@@ -232,19 +232,19 @@ int vk_tc_dma_remap(VkCommandBuffer cb, const GpuDmaOp* o, u32 lines, VkBuffer i
     return tc_dispatch(cb, &p, (units + 63) / 64, lines, 1, in, in_off, (in_size + 3) & ~3ull, out, out_off,
                        out_at + (u64)out_pitch * lines - out_off);
 }
-int vk_tc_blit(VkCommandBuffer cb, u32 bpp, u32 nb, u32 rows, VkBuffer in, u64 in_size, u64 src_at, u32 in_pitch,
-               u64 col_at, u64 row_at, VkBuffer out, u64 out_at, u32 out_pitch) {
+int vk_tc_blit(VkCommandBuffer cb, u32 bpp, u32 fmt, u32 nb, u32 rows, VkBuffer in, u64 in_size, u64 src_at,
+               u32 in_pitch, u64 col_at, u64 row_at, VkBuffer out, u64 out_at, u32 out_pitch) {
     u64 out_off = out_at & ~(storage_align() - 1);
     u32 units = (nb + 3) / 4;
     if ((col_at | row_at | out_at | out_pitch) & 3) return 0;
-    TcParams p = {.mode = TC_BLIT,
+    TcParams p = {.mode = fmt ? TC_BLIT_FLOAT : TC_BLIT,
                   .units = units,
                   .rows = rows,
                   .in_pitch = in_pitch, /* bytes, for this mode */
                   .out_pitch = out_pitch / 4,
                   .in_bias = (u32)src_at,
                   .out_bias = (u32)((out_at - out_off) / 4),
-                  .remap = bpp,
+                  .remap = fmt ? fmt : bpp,
                   .const_a = (u32)(col_at / 4),
                   .const_b = (u32)(row_at / 4),
                   .line_out = nb};

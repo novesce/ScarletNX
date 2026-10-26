@@ -6,8 +6,8 @@
 // four texels an invocation owns, and random ETC2 and EAC blocks of every kind (with the T, H and planar modes made
 // often) against tests/support/etc2.c and random BC1 to BC7 blocks of every kind (every BC6H and BC7 mode
 // made often) against tests/support/bcn.c, in images whose sides aren't multiples of 4, and vi's pixel formats
-// against present.c's former CPU conversion. tests/astc_vulkan.c runs the
-// SPIR-V build of the same file on a Vulkan device.
+// against present.c's former CPU conversion, and the 2D blit's half floats against tests/support/half.c.
+// tests/astc_vulkan.c runs the SPIR-V build of the same file on a Vulkan device.
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -21,6 +21,9 @@ extern "C" uint32_t etc2_pixel_bytes(int kind);
 extern "C" void bcn_decode_image(const uint8_t* src, uint32_t w, uint32_t h, int kind, uint8_t* dst);
 extern "C" uint32_t bcn_block_bytes(int kind);
 extern "C" uint32_t bcn_pixel_bytes(int kind);
+// tests/support/half.h's
+extern "C" float half_to_float(uint16_t h);
+extern "C" uint16_t float_to_half(float f);
 
 namespace texconv_shader {
 using namespace glsl;
@@ -270,27 +273,27 @@ static void dma_remaps() {
 // with and without their restart index, 16 and 32-bit restart indices made all ones; odd counts, inputs and outputs
 // that start past the bound offset, and more elements than a row of units (gl_GlobalInvocationID.y counts rows; 0: n)
 static void index_case(uint32_t mode, uint32_t remap, uint32_t count, uint32_t units) {
-    uint32_t isz = mode == 33 ? 1 : mode == 34 ? 2 : mode == 35 ? 4 : remap ? remap : 4, in_bias = 4 * (random_word() % 4);
-    uint32_t n = mode == 36 ? count / 4 : mode == 35 ? count : (count + 1) / 2, out_bias = random_word() % 5;
+    uint32_t isz = mode == 34 ? 1 : mode == 35 ? 2 : mode == 36 ? 4 : remap ? remap : 4, in_bias = 4 * (random_word() % 4);
+    uint32_t n = mode == 37 ? count / 4 : mode == 36 ? count : (count + 1) / 2, out_bias = random_word() % 5;
     std::vector<uint8_t> inb(in_bias + (count * isz + 3) / 4 * 4);
     for (auto& b : inb) b = (uint8_t)(random_word() % 6 == 0 ? 0xFF : random_word() % 12); // restart indices often
-    uint32_t ri = mode == 36 ? 0 : inb[in_bias] | (isz > 1 ? 0xFFu << 8 : 0) | (isz > 2 ? 0xFFFF0000u : 0);
-    if (mode == 33 && random_word() % 3 == 0) ri = 0xFF;
-    if (isz > 1 && mode != 36) // the restart index somewhere in the buffer
+    uint32_t ri = mode == 37 ? 0 : inb[in_bias] | (isz > 1 ? 0xFFu << 8 : 0) | (isz > 2 ? 0xFFFF0000u : 0);
+    if (mode == 34 && random_word() % 3 == 0) ri = 0xFF;
+    if (isz > 1 && mode != 37) // the restart index somewhere in the buffer
         std::memcpy(&inb[in_bias + isz * (random_word() % count)], &ri, isz);
-    std::vector<uint32_t> want(out_bias + (mode == 36 ? 6 * n : n), 0xDEADBEEFu);
+    std::vector<uint32_t> want(out_bias + (mode == 37 ? 6 * n : n), 0xDEADBEEFu);
     const uint8_t* ib = &inb[in_bias];
     for (uint32_t j = 0; j < count; j++) {
-        uint32_t v = mode == 36 && !remap ? j : le_bytes(ib + j * isz, isz);
-        if (mode == 36) {
+        uint32_t v = mode == 37 && !remap ? j : le_bytes(ib + j * isz, isz);
+        if (mode == 37) {
             if (j / 4 >= n) continue;
             static const uint32_t at[4][2] = {{0, 3}, {1, 1}, {2, 4}, {5, 5}}; // where each corner goes: 0 1 2 0 2 3
             want[out_bias + 6 * (j / 4) + at[j & 3][0]] = v;
             want[out_bias + 6 * (j / 4) + at[j & 3][1]] = v;
-        } else if (mode == 35)
+        } else if (mode == 36)
             want[out_bias + j] = v == ri ? 0xFFFFFFFFu : v;
         else {
-            uint32_t w = (mode == 33 ? remap && v == (ri & 0xFF) : v == (ri & 0xFFFF)) ? 0xFFFFu : v;
+            uint32_t w = (mode == 34 ? remap && v == (ri & 0xFF) : v == (ri & 0xFFFF)) ? 0xFFFFu : v;
             uint32_t& d = want[out_bias + j / 2];
             d = j & 1 ? (d & 0xFFFFu) | w << 16 : w;
         }
@@ -306,14 +309,14 @@ static void index_case(uint32_t mode, uint32_t remap, uint32_t count, uint32_t u
         c.in_bias = in_bias;
         c.out_bias = out_bias;
         c.remap = remap;
-        c.const_a = mode == 33 ? ri & 0xFF : mode == 34 ? ri & 0xFFFF : ri;
+        c.const_a = mode == 34 ? ri & 0xFF : mode == 35 ? ri & 0xFFFF : ri;
         c.line_out = n;
         c.src = in.data();
         c.dst = out.data();
     });
     for (uint32_t i = 0; i < want.size(); i++) {
         // an odd count's last pair has a high half that no index is drawn from: only its low half counts
-        uint32_t mask = mode != 35 && mode != 36 && count % 2 && i == want.size() - 1 ? 0xFFFFu : ~0u;
+        uint32_t mask = mode != 36 && mode != 37 && count % 2 && i == want.size() - 1 ? 0xFFFFu : ~0u;
         CHECK(((uint32_t)out[i] & mask) == (want[i] & mask), "index mode %u remap %u count %u word %u: %08x, not %08x",
               mode, remap, count, i, (uint32_t)out[i], want[i]);
     }
@@ -321,12 +324,12 @@ static void index_case(uint32_t mode, uint32_t remap, uint32_t count, uint32_t u
 static void index_buffers() {
     for (int i = 0; i < 300; i++) {
         uint32_t count = 1 + random_word() % 300, units = random_word() % 2 ? 0 : 1 + random_word() % 70;
-        index_case(33, random_word() % 2, count, units);
-        index_case(34, 0, count, units);
+        index_case(34, random_word() % 2, count, units);
         index_case(35, 0, count, units);
+        index_case(36, 0, count, units);
         if (count >= 4) {
             static const uint32_t sizes[4] = {0, 1, 2, 4};
-            index_case(36, sizes[random_word() % 4], count, units);
+            index_case(37, sizes[random_word() % 4], count, units);
         }
     }
 }
@@ -339,6 +342,34 @@ static void depth_float() {
         std::memcpy(&want, &f, 4);
         CHECK(c.tc_d24_float(z) == want, "depth %06x: %08x, not %08x", z, c.tc_d24_float(z), want);
     }
+}
+
+// the 2D blit's half floats (TC_BLIT_FLOAT) against half.c: every half to a float, and to a half every float near
+// one, the ties between neighbors and a step off them, and random words
+static uint32_t float_bits(float f) {
+    uint32_t x;
+    std::memcpy(&x, &f, 4);
+    return x;
+}
+static void half_check(Conv& c, uint32_t x) {
+    float f;
+    std::memcpy(&f, &x, 4);
+    CHECK(c.tc_float_half(x) == float_to_half(f), "float %08x: half %04x, not %04x", x, c.tc_float_half(x),
+          float_to_half(f));
+}
+static void halves() {
+    Conv c;
+    for (uint32_t h = 0; h < 0x10000; h++) {
+        uint32_t x = float_bits(half_to_float((uint16_t)h));
+        CHECK(c.tc_half_float(h) == x, "half %04x: %08x, not %08x", h, c.tc_half_float(h), x);
+        for (uint32_t d = 0; d < 5; d++) half_check(c, x + d - 2);
+        if ((h & 0x7FFF) < 0x7C00 && (h & 0x7FFF) != 0x7BFF) { // finite, with a finite neighbor away from zero
+            uint32_t tie = float_bits((half_to_float((uint16_t)h) + half_to_float((uint16_t)(h + 1))) / 2);
+            for (uint32_t d = 0; d < 3; d++) half_check(c, tie + d - 1);
+        }
+    }
+    half_check(c, 0x477FF000u); // 65520, the tie past the largest half: infinity
+    for (int i = 0; i < 1 << 20; i++) half_check(c, random_word());
 }
 
 static void rgb32f() {
@@ -467,6 +498,7 @@ int main() {
     dma_remaps();
     index_buffers();
     depth_float();
+    halves();
     rgb32f();
     depth_stencil();
     for (int i = 0; i < 200; i++) etc2_kinds();

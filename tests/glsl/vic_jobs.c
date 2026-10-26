@@ -200,7 +200,7 @@ static void job_random(void) {
         if (below(2)) {
             int m[3][4], r, c, sh_ = (int)below(4);
             for (r = 0; r < 3; r++)
-                for (c = 0; c < 4; c++) m[r][c] = below(3) ? M601[r][c] << sh_ : (int)(rnd() & 0xFFFFF) - 0x80000;
+                for (c = 0; c < 4; c++) m[r][c] = below(3) ? M601[r][c] * (1 << sh_) : (int)(rnd() & 0xFFFFF) - 0x80000;
             for (k = 0; k < 4; k++)
                 w64(sl + 0x60 + 8 * k, f20(m[0][k]) | f20(m[1][k]) << 20 | f20(m[2][k]) << 40 |
                                            (k == 0 ? (u64)(below(3) ? sh_ : below(16)) << 60 : 0) |

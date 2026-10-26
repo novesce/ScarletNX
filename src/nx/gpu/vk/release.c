@@ -43,7 +43,6 @@ enum { PRED_NONE = -3, PRED_ZERO = -2, PRED_NONZERO = -1 };
 
 static Release g_rq[RQ_N];
 static u64 g_rhead, g_rtail; /* releases queued, performed */
-static u64 g_visibility_gate; /* image publication recorded by a CPU cache clean */
 static u32 g_rincr[SYNC_N];  /* increments queued per syncpoint */
 static PMutex g_rlock = PMUTEX_INIT;
 static PCond g_rcv;
@@ -138,7 +137,6 @@ static void release_through(u64 gate, u64 cgate) {
     vk_compute_land_through(cgate);
     vk_land_through(gate);
     vk_result_end();
-    if (g_visibility_gate <= gate) g_visibility_gate = 0;
     for (;;) {
         Release r;
         pm_lock(&g_rlock);
@@ -187,7 +185,6 @@ static void release_thread(void* p) {
 static void submit_through(u64 gate) {
     if (gate > vk_last_submit()) vk_submit(VK_NULL_HANDLE, 0, VK_NULL_HANDLE);
 }
-void vk_release_visibility(void) { g_visibility_gate = vk_submit_number(); }
 /* r once everything recorded before it has landed: now, when nothing is pending or queued */
 static void release(Release* r) {
     int queued;
@@ -200,7 +197,7 @@ static void release(Release* r) {
     queued = g_rtail != g_rhead;
     pm_unlock(&g_rlock);
     /* a samples-passed report always waits for the GPU: its count is the draws' */
-    if (!r->samples && !g_visibility_gate && !vk_buf_pending_any() && !vk_gfx_image_in_flight(0) && !r->cgate && !queued) {
+    if (!r->samples && !vk_buf_pending_any() && !vk_gfx_image_in_flight(0) && !r->cgate && !queued) {
         perform(r);
         vk_unlock();
         return;
@@ -212,7 +209,6 @@ static void release(Release* r) {
        pending through most of its releases */
     u64 recording = vk_submit_number();
     r->gate = r->samples || vk_buf_pending_unsubmitted() || vk_gfx_image_in_flight(1) ? recording : vk_last_submit();
-    if (r->gate < g_visibility_gate) r->gate = g_visibility_gate;
     pm_lock(&g_rlock);
     if (g_rhead - g_rtail == RQ_N) { /* full: the oldest goes now */
         u64 oldest = g_rq[g_rtail % RQ_N].gate, coldest = g_rq[g_rtail % RQ_N].cgate;

@@ -24,7 +24,7 @@
 // - no out or inout parameters, and arrays are never passed, returned or assigned whole (in C++ they decay);
 // - vectors are read and written one component at a time (.x or [i]); multi-component swizzles (.xy) are C++
 //   compile errors, which is how a body that strays is caught;
-// - signed integers do not overflow (the tests build with -fwrapv all the same), and literals carry the u suffix
+// - signed integers do not overflow (it is undefined in C++, and -fwrapv is banned), and literals carry the u suffix
 //   where GLSL would make them uint;
 // - shared memory is reached through a macro both sides define: the .comp indexes its shared array, the test's
 //   struct a pointer to the workgroup's storage, which dispatch_workgroups gives each invocation. barrier() and
