@@ -3,6 +3,7 @@
    Copyright 2026 the ScarletNX contributors */
 #include "agb/ppu/ppu.h"
 #include "agb/board/board.h"
+#include "common/utilities/endian.h"
 #include <string.h>
 
 /* The scanline buffers the composite pass reads. The board renders one line at a time, on one thread. */
@@ -18,16 +19,13 @@ typedef struct {
 static AgbScanline scan;
 
 static uint16_t vram16(const AgbBoard* board, uint32_t offset) {
-    const uint8_t* p = board->memory.vram + (offset & 0x1FFFE);
-    return (uint16_t)(p[0] | p[1] << 8);
+    return snx_ld_le16(board->memory.vram + (offset & 0x1FFFE));
 }
 static uint16_t palette(const AgbBoard* board, uint32_t index) {
-    const uint8_t* p = board->memory.palette + (index & 0x1FF) * 2;
-    return (uint16_t)((p[0] | p[1] << 8) & 0x7FFF);
+    return (uint16_t)(snx_ld_le16(board->memory.palette + (index & 0x1FF) * 2) & 0x7FFF);
 }
 static uint16_t oam16(const AgbBoard* board, uint32_t offset) {
-    const uint8_t* p = board->memory.oam + (offset & 0x3FE);
-    return (uint16_t)(p[0] | p[1] << 8);
+    return snx_ld_le16(board->memory.oam + (offset & 0x3FE));
 }
 static uint32_t rgb888(uint16_t color) {
     uint32_t r = (uint32_t)(color & 31), g = (uint32_t)((color >> 5) & 31), b = (uint32_t)((color >> 10) & 31);

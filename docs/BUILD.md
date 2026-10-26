@@ -467,9 +467,13 @@ takes the version in `LLVM_VERSION` (CI gives it the container's, whose `opt` pr
 and with `SNX_SYSROOT` set it cross-builds for another architecture. `SNX_A64_DISASM=OFF` leaves out `scarletnx
 --mcp`'s A64 disassembler, which is for working on the runtime.
 
-`scarletnx-3ds` and `scarletnx-gnuabi` are names of `scarletnx` on Linux and macOS (`SNX_MULTICALL`,
-`src/multicall`), links beside it as `scarletnx-switch` is: one program carries LLVM, SDL and the code the drivers
-share once. Windows, whose zips keep no links, has three programs, as Android and iOS do.
+`scarletnx` is every driver the build has (`src/multicall`): each driver is a library with no `main` of its own,
+and the program, whichever drivers are on (`SNX_BUILD_NX` among them), runs the one its name says, so LLVM, SDL and
+the code the drivers share are in it once. `scarletnx-switch`, `scarletnx-3ds`, `scarletnx-vita`, `scarletnx-gnuabi`
+and `scarletnx-agb` are links to it on Linux and macOS, made in the build folder and installed. Windows, whose zips
+keep no links, installs `scarletnx.exe` alone, which takes a driver's name as its first argument
+(`scarletnx.exe scarletnx-3ds ...`, how the launcher runs them); its build folder has hard links of those names, for
+the tests. Android's and iOS's apps start the program their own way.
 
 [Nightly AppImages](https://github.com/scarletnx/nightly/releases/latest), x86_64 and aarch64 · [Launch](USAGE.md).
 

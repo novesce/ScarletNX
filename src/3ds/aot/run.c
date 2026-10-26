@@ -151,17 +151,17 @@ int snx_ctr_aot_run(const char* directory, const SnxCtrSource* game, SnxCtrModel
         free(hints);
         free(old);
     }
-    /* like the Switch driver's recompile: only when needed, an existing module is no error */
-    if ((flags & SNX_CTR_RECOMPILE) || !snx_ctr_native_open(module_path, &image, &native, error, error_size)) {
-        snx_ctr_native_close(&native);
+    /* like the Switch driver's recompile: only when needed, an existing module is no error. Decided from the module's
+       file, before it is loaded, which happens once */
+    if ((flags & SNX_CTR_RECOMPILE) || !snx_ctr_module_current(module_path, &image)) {
         printf("Recompiling ARM11 (offline static AOT)\n");
         int status = snx_ctr_aot_compile(directory, game, error, error_size);
         if (status) {
             result = status == 3 ? 3 : 1;
             goto done;
         }
-        if (!snx_ctr_native_open(module_path, &image, &native, error, error_size)) goto done;
     }
+    if (!snx_ctr_native_open(module_path, &image, &native, error, error_size)) goto done;
     /* last, as the Switch driver deploys it: a copy beside its module is a game ready to play */
     if (!deploy_runtime(directory, runtime, error, error_size)) goto done;
     if (flags & SNX_CTR_COMPILE_ONLY) {

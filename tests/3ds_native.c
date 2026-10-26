@@ -53,6 +53,8 @@ int main(int argc, char** argv) {
     char* path = argc == 4 ? snx_strdup(argv[3]) : snx_ctr_game_file(argv[1], SNX_CTR_MODULE_SUFFIX);
     SnxCtrNative native;
     bool ok = snx_ctr_native_open(path, &image, &native, error, sizeof error);
+    /* what the run decides to compile by, read from the file before it loads it, says what loading it says */
+    assert(snx_ctr_module_current(path, &image) == ok);
     if (!strcmp(argv[2], "reject")) {
         assert(!ok && *error && !native.library && !native.module);
     } else {

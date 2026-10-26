@@ -281,8 +281,3 @@ int snx_gnuabi_main(int argc, char** argv) {
 #endif
     return run_status; /* not reached: the guest's thread ends the process */
 }
-#ifndef SNX_MULTICALL
-int main(int argc, char** argv) {
-    return snx_gnuabi_main(argc, argv);
-}
-#endif

@@ -160,10 +160,10 @@ setting Stats corner
 table g_graphics_ini
 setting Resolution scale
     key resolution
-    float 0.25 4
+    float 0.25 16
     default 1
     startup
-    help The scale of the game's 3D rendering, 0.25 to 4: 1 = the console's, 2 = double, 0.5 = half
+    help The scale of the game's 3D rendering, 0.25 to 16: 1 = the console's, 2 = double, 0.5 = half
 setting Shadows
     key shadows
     int 0 1
@@ -634,6 +634,16 @@ setting GDB JIT symbols
     help 1 = with the GDB stub (-S or -s, Linux only), hands the code the JIT compiles at run time to GDB, which
     help names it. While GDB is attached it stops the whole game to read each compile, which slows a 32-bit game (its
     help blocks compile one at a time) to a crawl. Each compile's object is also kept in memory for the whole run
+setting Alias pool
+    key alias_pool
+    int 0 1
+    default 1
+    startup
+    words Off|On
+    help 1 = a view of guest memory (MapMemory, MapProcessMemory, code memory's owner and slave) shares its source's
+    help host pages, as the console's do, where the host's pages are 4 KiB (Linux and Android). 0 = every view is a
+    help copy: a write through it reaches the source at its unmap, or at a flushed line (IC IVAU, DC CVAC) after the
+    help write, as hosts without a pool run (Windows among them). For tests of that path, and a diagnosis
 setting Profiler
     key profile
     int 0 1

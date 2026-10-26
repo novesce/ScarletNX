@@ -2,6 +2,7 @@
    Copyright 2026 the ScarletNX contributors */
 #include "3ds/aot/ctr_module.h"
 #include "common/utilities/common.h"
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -59,6 +60,16 @@ bool snx_ctr_native_open(const char* path, const SnxCtrImage* image, SnxCtrNativ
         return false;
     }
     return true;
+}
+static int descriptor_fields(const unsigned char* record, const void* image) {
+    SnxCtrModule fields;
+    memcpy(&fields, record, offsetof(SnxCtrModule, arm_blocks));
+    return snx_ctr_module_fields(&fields, image);
+}
+bool snx_ctr_module_current(const char* path, const SnxCtrImage* image) {
+    const uint64_t magic = SNX_CTR_MODULE_MAGIC;
+    return path && image &&
+           snx_file_has_record(path, &magic, sizeof magic, offsetof(SnxCtrModule, arm_blocks), descriptor_fields, image);
 }
 char* snx_ctr_game_file(const char* directory, const char* suffix) {
     /* resolved, so "." and a trailing separator name the folder they are */

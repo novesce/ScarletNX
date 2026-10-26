@@ -46,10 +46,6 @@ static char* host(VitaProcess* p, uint32_t address) { return (char*)vita_ptr(p, 
 static uint32_t guest(VitaProcess* p, const void* pointer) {
     return pointer ? (uint32_t)((const unsigned char*)pointer - p->mem) : 0;
 }
-static uint16_t rd16(VitaProcess* p, uint32_t a) { return (uint16_t)(p->mem[a] | p->mem[(uint32_t)(a + 1)] << 8); }
-static void wr16(VitaProcess* p, uint32_t a, uint32_t v) {
-    p->mem[a] = (unsigned char)v, p->mem[(uint32_t)(a + 1)] = (unsigned char)(v >> 8);
-}
 static void set_errno(VitaProcess* p, VitaThread* t, uint32_t e) { vita_write32(p, t->tls + VITA_TLS_ERRNO, e); }
 /* the game's fatal end: its libraries' abort */
 static uint32_t fatal(VitaProcess* p, VitaThread* t, const char* what) {
@@ -75,11 +71,11 @@ static uint32_t data(VitaProcess* p) {
         if (c >= '\t' && c <= '\r') bits |= C_CN;
         else if (iscntrl(c)) bits |= C_BB;
         if (c >= 0x80) bits = 0; /* the "C" locale's */
-        wr16(p, d + CTYPE_TABLE + 2 + (uint32_t)c * 2, bits);
-        wr16(p, d + LOWER_TABLE + 2 + (uint32_t)c * 2, c < 0x80 ? (uint32_t)tolower(c) : (uint32_t)c);
-        wr16(p, d + UPPER_TABLE + 2 + (uint32_t)c * 2, c < 0x80 ? (uint32_t)toupper(c) : (uint32_t)c);
+        vita_write16(p, d + CTYPE_TABLE + 2 + (uint32_t)c * 2, bits);
+        vita_write16(p, d + LOWER_TABLE + 2 + (uint32_t)c * 2, c < 0x80 ? (uint32_t)tolower(c) : (uint32_t)c);
+        vita_write16(p, d + UPPER_TABLE + 2 + (uint32_t)c * 2, c < 0x80 ? (uint32_t)toupper(c) : (uint32_t)c);
     }
-    wr16(p, d + LOWER_TABLE, 0xffff), wr16(p, d + UPPER_TABLE, 0xffff);
+    vita_write16(p, d + LOWER_TABLE, 0xffff), vita_write16(p, d + UPPER_TABLE, 0xffff);
     for (uint32_t i = 2; i < 8; ++i) vita_write32(p, d + EMPTY_VTABLE + i * 4, VITA_RETURN);
     return p->libc.data = d;
 }
@@ -221,13 +217,13 @@ static uint32_t lc_strcspn(VitaProcess* p, VitaThread* t) {
 /* the wide strings: 16-bit wchar_t */
 static uint32_t wide_length(VitaProcess* p, uint32_t s) {
     uint32_t n = 0;
-    while (rd16(p, s + n * 2)) ++n;
+    while (vita_read16(p, s + n * 2)) ++n;
     return n;
 }
 static uint32_t lc_wcslen(VitaProcess* p, VitaThread* t) { return wide_length(p, arg(p, t, 0)); }
 static int wide_compare(VitaProcess* p, uint32_t a, uint32_t b, uint32_t n) {
     for (uint32_t i = 0; i < n; ++i) {
-        uint32_t x = rd16(p, a + i * 2), y = rd16(p, b + i * 2);
+        uint32_t x = vita_read16(p, a + i * 2), y = vita_read16(p, b + i * 2);
         if (x != y || !x) return x < y ? -1 : x > y;
     }
     return 0;
@@ -241,7 +237,7 @@ static uint32_t lc_wcsncmp(VitaProcess* p, VitaThread* t) {
 static uint32_t lc_wcschr(VitaProcess* p, VitaThread* t) {
     uint32_t s = arg(p, t, 0), c = arg(p, t, 1) & 0xffff;
     for (;; s += 2) {
-        uint32_t u = rd16(p, s);
+        uint32_t u = vita_read16(p, s);
         if (u == c) return s;
         if (!u) return 0;
     }
@@ -250,7 +246,7 @@ static uint32_t lc_wcsstr(VitaProcess* p, VitaThread* t) {
     uint32_t s = arg(p, t, 0), w = arg(p, t, 1), n = wide_length(p, w);
     for (;; s += 2) {
         if (!wide_compare(p, s, w, n)) return s;
-        if (!rd16(p, s)) return 0;
+        if (!vita_read16(p, s)) return 0;
     }
 }
 /* _Towctrans(c, which): wctrans's "tolower" (1) or "toupper" (2) */
@@ -333,7 +329,7 @@ static void put_text(Out* o, const char* s) {
 }
 /* format's characters, wide (16-bit) ones or bytes */
 static uint32_t unit_at(VitaProcess* p, uint32_t address, bool wide, uint32_t i) {
-    return wide ? rd16(p, address + i * 2) : p->mem[(uint32_t)(address + i)];
+    return wide ? vita_read16(p, address + i * 2) : p->mem[(uint32_t)(address + i)];
 }
 static void format(Args* a, uint32_t fmt, bool wide, Out* o) {
     VitaProcess* p = a->p;
@@ -441,7 +437,7 @@ static void format(Args* a, uint32_t fmt, bool wide, Out* o) {
             }
             case 'n': {
                 uint32_t to = next_word(a);
-                if (to && shorts) wr16(p, to, (uint32_t)o->length);
+                if (to && shorts) vita_write16(p, to, (uint32_t)o->length);
                 else if (to) vita_write32(p, to, (uint32_t)o->length);
                 break;
             }
@@ -467,8 +463,8 @@ static uint32_t to_buffer(VitaProcess* p, uint32_t buffer, uint64_t size, const 
 static uint32_t to_wide(VitaProcess* p, uint32_t buffer, uint32_t size, const Out* o) {
     if (!buffer || !size) return UINT32_MAX;
     size_t n = o->length < size ? o->length : size - 1;
-    for (size_t i = 0; i < n; ++i) wr16(p, buffer + (uint32_t)i * 2, o->units[i]);
-    wr16(p, buffer + (uint32_t)n * 2, 0);
+    for (size_t i = 0; i < n; ++i) vita_write16(p, buffer + (uint32_t)i * 2, o->units[i]);
+    vita_write16(p, buffer + (uint32_t)n * 2, 0);
     return o->length < size ? (uint32_t)o->length : UINT32_MAX;
 }
 static void to_host(FILE* f, const Out* o) {
@@ -617,7 +613,7 @@ static uint32_t lc_sscanf(VitaProcess* p, VitaThread* t) {
             if (end == field) break;
             uint32_t to = skip ? 0 : next_word(&a);
             if (to && longs >= 2) vita_write64(p, to, v);
-            else if (to && shorts == 1) wr16(p, to, (uint32_t)v);
+            else if (to && shorts == 1) vita_write16(p, to, (uint32_t)v);
             else if (to && shorts >= 2) p->mem[to] = (unsigned char)v;
             else if (to) vita_write32(p, to, (uint32_t)v);
         } else if (strchr("feEgGaA", c)) {

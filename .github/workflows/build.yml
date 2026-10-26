@@ -462,15 +462,16 @@ jobs:
             echo "SNX_DEPS_CACHE=$GITHUB_WORKSPACE/.cache/deps"
             echo "SNX_CCACHE_START=$(date +%s)"
           } >> "$GITHUB_ENV"
-      # the Linux runtime and the programs of the tests below, no more: the services' tests are configured even without
-      # the Switch runtime, and need its libraries
+      # the Linux runtime (scarletnx with the GNU ABI driver alone, scarletnx-gnuabi a link to it) and the programs of
+      # the tests below, no more: the services' tests are configured even without the Switch runtime, and need its
+      # libraries
       - name: Build
         run: |
           cmake --preset linux-ppc64-cross -DSNX_OPT_FLAGS="-O2 -g0" \
-            -DSNX_BUILD_NX=OFF -DSNX_BUILD_3DS=OFF -DSNX_BUILD_VITA=OFF -DSNX_BUILD_GUI=OFF \
+            -DSNX_BUILD_NX=OFF -DSNX_BUILD_3DS=OFF -DSNX_BUILD_VITA=OFF -DSNX_BUILD_AGB=OFF -DSNX_BUILD_GUI=OFF \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cmake --build --preset linux-ppc64-cross --parallel "$(getconf _NPROCESSORS_ONLN)" \
-            --target scarletnx-gnuabi-run snx-test-cas128 snx-test-endian snx-test-gnuabi-runtime snx-test-gnuabi-vfs \
+            --target scarletnx snx-test-cas128 snx-test-endian snx-test-gnuabi-runtime snx-test-gnuabi-vfs \
             snx-test-gnuabi-hostfs snx-test-gnuabi-network
       - name: Trim the compiler cache
         shell: bash

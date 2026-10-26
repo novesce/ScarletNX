@@ -334,12 +334,11 @@ static uint32_t create_vertex_program(VitaProcess* p, VitaThread* t) {
     want.attribute_count = attribute_count, want.stream_count = stream_count;
     for (uint32_t a = 0; a < attribute_count; ++a) {
         const unsigned char* q = vita_ptr(p, attributes + a * 8);
-        want.attributes[a] = (GxmAttribute){(uint16_t)gxp_u16(q), (uint16_t)gxp_u16(q + 2), q[4], q[5],
-                                            (uint16_t)gxp_u16(q + 6)};
+        want.attributes[a] = (GxmAttribute){snx_ld_le16(q), snx_ld_le16(q + 2), q[4], q[5], snx_ld_le16(q + 6)};
     }
     for (uint32_t s = 0; s < stream_count; ++s) {
         const unsigned char* q = vita_ptr(p, streams + s * 4);
-        want.streams[s] = (GxmStream){(uint16_t)gxp_u16(q), (uint16_t)gxp_u16(q + 2)};
+        want.streams[s] = (GxmStream){snx_ld_le16(q), snx_ld_le16(q + 2)};
     }
     uint32_t slot = GXM_PROGRAMS;
     for (uint32_t i = 0; i < GXM_PROGRAMS; ++i) {
@@ -423,7 +422,7 @@ static uint32_t program_find_parameter_by_name(VitaProcess* p, VitaThread* t) {
     char name[256];
     if (!program || !vita_string(p, arg(p, t, 1), name, sizeof name)) return 0;
     const unsigned char* gxp = vita_ptr(p, program);
-    uint32_t count = gxp_u32(gxp + GXP_PARAMETER_COUNT);
+    uint32_t count = snx_ld_le32(gxp + GXP_PARAMETER_COUNT);
     for (uint32_t i = 0; i < count; ++i) {
         const unsigned char* q = gxp_parameter(gxp, i);
         if (!strcmp(gxp_parameter_name(q), name)) return program + (uint32_t)(q - gxp);
@@ -590,7 +589,7 @@ static uint32_t reserve(VitaProcess* p, VitaThread* t, bool fragment) {
         gxp = v ? v->program : 0;
     }
     if (!gxp) return SCE_GXM_ERROR_NULL_PROGRAM;
-    uint32_t size = gxp_u32(vita_ptr(p, gxp + GXP_DEFAULT_UNIFORM_COUNT)) * 4;
+    uint32_t size = snx_ld_le32(vita_ptr(p, gxp + GXP_DEFAULT_UNIFORM_COUNT)) * 4;
     uint32_t ring = fragment ? c->fragment_ring : c->vertex_ring, ring_size = fragment ? c->fragment_ring_size
                                                                                       : c->vertex_ring_size;
     uint32_t* used = fragment ? &c->fragment_ring_used : &c->vertex_ring_used;
@@ -864,23 +863,23 @@ static uint32_t program_get_type(VitaProcess* p, VitaThread* t) {
     return gxp_fragment(vita_ptr(p, arg(p, t, 0))) ? 1 : 0; /* SCE_GXM_FRAGMENT_PROGRAM, SCE_GXM_VERTEX_PROGRAM */
 }
 static uint32_t program_get_parameter_count(VitaProcess* p, VitaThread* t) {
-    return gxp_u32(vita_ptr(p, arg(p, t, 0) + GXP_PARAMETER_COUNT));
+    return snx_ld_le32(vita_ptr(p, arg(p, t, 0) + GXP_PARAMETER_COUNT));
 }
 static uint32_t program_get_parameter(VitaProcess* p, VitaThread* t) {
     uint32_t program = arg(p, t, 0), index = arg(p, t, 1);
     const unsigned char* g = vita_ptr(p, program);
-    if (index >= gxp_u32(g + GXP_PARAMETER_COUNT)) return 0;
+    if (index >= snx_ld_le32(g + GXP_PARAMETER_COUNT)) return 0;
     return program + (uint32_t)(gxp_parameter(g, index) - g);
 }
 /* the default uniform buffer's bytes: its 32-bit words */
 static uint32_t program_get_default_uniform_buffer_size(VitaProcess* p, VitaThread* t) {
-    return gxp_u32(vita_ptr(p, arg(p, t, 0) + GXP_DEFAULT_UNIFORM_COUNT)) * 4;
+    return snx_ld_le32(vita_ptr(p, arg(p, t, 0) + GXP_DEFAULT_UNIFORM_COUNT)) * 4;
 }
 /* _sceGxmProgramFindParameterBySemantic(program, semantic, index): the attribute with that semantic and index */
 static uint32_t program_find_parameter_by_semantic(VitaProcess* p, VitaThread* t) {
     uint32_t program = arg(p, t, 0), semantic = arg(p, t, 1), index = arg(p, t, 2);
     const unsigned char* g = vita_ptr(p, program);
-    for (uint32_t i = 0, n = gxp_u32(g + GXP_PARAMETER_COUNT); i < n; ++i) {
+    for (uint32_t i = 0, n = snx_ld_le32(g + GXP_PARAMETER_COUNT); i < n; ++i) {
         const unsigned char* q = gxp_parameter(g, i);
         if (gxp_parameter_category(q) == GXP_CATEGORY_ATTRIBUTE && gxp_parameter_semantic(q) == semantic &&
             gxp_parameter_semantic_index(q) == index)
@@ -890,7 +889,7 @@ static uint32_t program_find_parameter_by_semantic(VitaProcess* p, VitaThread* t
 }
 static uint32_t parameter_get_name(VitaProcess* p, VitaThread* t) {
     uint32_t q = arg(p, t, 0);
-    return q ? q + gxp_u32(vita_ptr(p, q)) : 0;
+    return q ? q + snx_ld_le32(vita_ptr(p, q)) : 0;
 }
 static uint32_t parameter_get_category(VitaProcess* p, VitaThread* t) {
     return gxp_parameter_category(vita_ptr(p, arg(p, t, 0)));
@@ -950,13 +949,11 @@ static uint32_t color_surface_get_stride(VitaProcess* p, VitaThread* t) { return
 /* ---- textures ---- */
 static uint32_t texture_get_type(VitaProcess* p, VitaThread* t) { return vita_read32(p, arg(p, t, 0) + 4) & 0xe0000000u; }
 static uint32_t texture_get_mipmap_count(VitaProcess* p, VitaThread* t) {
-    GxmTexture x;
-    memcpy(x.w, vita_ptr(p, arg(p, t, 0)), sizeof x.w);
+    GxmTexture x = texture_read(p, arg(p, t, 0));
     return gxm_texture_mip_count(&x);
 }
 static uint32_t texture_get_stride(VitaProcess* p, VitaThread* t) {
-    GxmTexture x;
-    memcpy(x.w, vita_ptr(p, arg(p, t, 0)), sizeof x.w);
+    GxmTexture x = texture_read(p, arg(p, t, 0));
     return gxm_texture_type(&x) == GXM_TEXTURE_LINEAR_STRIDED ? gxm_texture_stride(&x) : 0;
 }
 

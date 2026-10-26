@@ -13,6 +13,7 @@
 #include "nx/runtime/platform/log.h"
 #include "nx/runtime/platform/plat.h"
 #include "nx/runtime/platform/tracy.h"
+#include "snx_settings.h"
 #include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -673,8 +674,9 @@ void mem_init(void) {
     runs_stale_nl();
     mem_unlock();
     /* a view shares pages only at the same place in a host page as its source, which a game picking addresses in
-       4 KiB steps leaves to chance with larger pages: they copy, as hosts without a pool do */
-    g_pool_on = g_host_page == PAGE && !plat_alias_init(g_pool_size);
+       4 KiB steps leaves to chance with larger pages: they copy, as hosts without a pool do. Alias pool off asks for
+       the copy path on a host that has a pool, as Windows runs it (tests, and a player's diagnosis) */
+    g_pool_on = g_settings.alias_pool && g_host_page == PAGE && !plat_alias_init(g_pool_size);
     LOG("memory: %llu KiB host pages, %s\n", (unsigned long long)(g_host_page >> 10),
         g_pool_on ? "views share their source's pages (alias pool)" : "views are copies (no alias pool)");
 }
@@ -829,6 +831,9 @@ u64 kmem_alloc(u64 size, u32 state, u32 perm) {
 }
 
 /* ============================================================ views and the pool's own pages */
+/* whether a view of mapped memory shares its source's pages: the pool is on, so mem_alias_begin moved the source into
+   it and mem_alias_map maps the same pages. Without the pool a view is a copy (mem_alias_unmap writes it back) */
+int mem_pool_active(void) { return g_pool_on; }
 /* All under the renderer's lock and g_mem_lk, as every change of host memory. A promotion or demotion copies the
    source while it is mapped again: a guest thread writing it meanwhile loses the write, as it would race the lock the
    caller is about to take on the console. The renderer is told of every range whose pages changed underneath */

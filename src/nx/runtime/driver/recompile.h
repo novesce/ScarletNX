@@ -17,7 +17,7 @@ char* snx_own_runtime(const SnxPaths* paths);
    0, or nonzero with a line saying why */
 int snx_deploy_runtime(const char* run, const char* exe);
 /* -r: recompiles the game the arguments name. Not snx_recompile, the recompiler library's, which the Linux runtime
-   links into the same program (SNX_MULTICALL) */
+   links into the same program (src/multicall) */
 int snx_recompile_game(int argc, char** argv, const SnxPaths* paths);
 /* a setting of the recompile (settings.txt's recompile and llvm tables), which --KEY=VALUE sets; NULL for another key */
 const IniOpt* snx_recompile_setting(const char* key);

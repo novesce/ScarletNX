@@ -23,13 +23,6 @@
 #endif
 #endif
 #endif
-#ifdef SNX_MENU_THEN_GAME
-/* UIKit's app is SDL's: this makes the main below SDL_main, run from the real main SDL provides, which starts the app
-   (UIApplicationMain) whose run loop the menu's window needs. Without it SDL_Init fails with "Application didn't
-   initialize properly" and the screen stays black */
-#include <SDL3/SDL_main.h>
-#endif
-
 #ifdef SNX_WITH_GUI
 /* the game's settings as scarletnx --settings prints them, for the menu built into this program (snx_menu_settings) */
 static char* runtime_settings(void) {
@@ -84,11 +77,3 @@ int snx_switch_main(int argc, char** argv) {
 #endif
     return snx_main(argc, argv);
 }
-#ifndef SNX_MULTICALL
-/* Android's game activity finds it by name in libscarletnx.so (platform/android_run.c does the same) */
-__attribute__((visibility("default"))) int main(int argc, char** argv);
-
-int main(int argc, char** argv) {
-    return snx_switch_main(argc, argv);
-}
-#endif

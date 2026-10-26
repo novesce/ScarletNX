@@ -4,6 +4,7 @@
    there: the runtime answers their functions), SceRtc, SceAppMgr, SceAppUtil's save data (in savedata0:, io.c). The
    network is net.c's */
 #include "vita/hle/hle.h"
+#include "common/utilities/endian.h"
 #include "common/utilities/common.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -67,7 +68,7 @@ static int64_t days_from_civil(int64_t year, int64_t month, int64_t day) {
 static int64_t date_seconds(VitaProcess* p, uint32_t date) {
     const unsigned char* b = vita_ptr(p, date);
     int64_t f[6];
-    for (unsigned i = 0; i < 6; ++i) f[i] = b[i * 2] | b[i * 2 + 1] << 8;
+    for (unsigned i = 0; i < 6; ++i) f[i] = snx_ld_le16(b + i * 2);
     return days_from_civil(f[0], f[1], f[2]) * 86400 + f[3] * 3600 + f[4] * 60 + f[5];
 }
 static uint32_t rtc_get_time_t(VitaProcess* p, VitaThread* t) {
@@ -125,7 +126,7 @@ static uint32_t rtc_set_time_t(VitaProcess* p, VitaThread* t) {
     uint16_t f[6] = {(uint16_t)(tm.tm_year + 1900), (uint16_t)(tm.tm_mon + 1), (uint16_t)tm.tm_mday,
                      (uint16_t)tm.tm_hour,          (uint16_t)tm.tm_min,       (uint16_t)tm.tm_sec};
     unsigned char* b = vita_ptr(p, out);
-    for (unsigned i = 0; i < 6; ++i) b[i * 2] = (unsigned char)f[i], b[i * 2 + 1] = (unsigned char)(f[i] >> 8);
+    for (unsigned i = 0; i < 6; ++i) snx_st_le16(b + i * 2, f[i]);
     vita_write32(p, out + 12, 0);
     return 0;
 }
@@ -151,8 +152,8 @@ static void date_time_now(unsigned char* b) {
     uint16_t f[6] = {(uint16_t)(tm.tm_year + 1900), (uint16_t)(tm.tm_mon + 1), (uint16_t)tm.tm_mday,
                      (uint16_t)tm.tm_hour,          (uint16_t)tm.tm_min,       (uint16_t)tm.tm_sec};
     uint32_t us = (uint32_t)(now.tv_nsec / 1000);
-    for (unsigned i = 0; i < 6; ++i) b[i * 2] = (unsigned char)f[i], b[i * 2 + 1] = (unsigned char)(f[i] >> 8);
-    for (unsigned i = 0; i < 4; ++i) b[12 + i] = (unsigned char)(us >> (i * 8));
+    for (unsigned i = 0; i < 6; ++i) snx_st_le16(b + i * 2, f[i]);
+    snx_st_le32(b + 12, us);
 }
 static uint32_t rtc_current_local(VitaProcess* p, VitaThread* t) {
     uint32_t out = vita_arg(p, t, 0);

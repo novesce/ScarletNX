@@ -375,6 +375,10 @@ typedef struct App {
     int size_was;
     Uint64 size_until;
     char size_line[128];
+    /* a resolution past 4x or under 0.25x: its row flashes in the warning colour and the foot says why, until
+       warn_until; warn_key is its .ini key, empty for none */
+    char warn_key[64];
+    Uint64 warn_until;
     SDL_Texture* users_pictures[SNX_USERS_MAX]; /* theirs, users_side pixels square, made as the box is drawn */
     int users_side;
     /* the box opening a game with updates, DLCs or mods beside it shows (addons_open): a box to check each of them
@@ -2648,11 +2652,12 @@ void ui_draw_row(App* app, GuiRect r, const char* text, unsigned icon, const voi
         fill_rect(app, b, t->dim);
     if (!failing && !inverted && (!filled || look)) outline(app, b, look ? t->focus : t->dim);
     {
-        SDL_Color ink = rgb(failing || inverted     ? t->page
-                            : off                   ? t->soft
-                            : attr & UI_ATTR_ACTIVE ? t->active
-                            : look                  ? t->focus
-                                                    : ui_colour(app, color, t->ink));
+        SDL_Color ink = rgb(failing || inverted      ? t->page
+                            : off                    ? t->soft
+                            : attr & UI_ATTR_WARNING ? t->warning
+                            : attr & UI_ATTR_ACTIVE  ? t->active
+                            : look                   ? t->focus
+                                                     : ui_colour(app, color, t->ink));
         int x = b.x + cell_w(app) / 2, side = user_side(app, b.h);
         if (image && side > 0) { /* the marker, the image as big as the head's user picture, then the text */
             SDL_FRect at;
@@ -2683,11 +2688,12 @@ void ui_draw_tile(App* app, GuiRect r, const char* text, const void* image, unsi
     int off = (attr & UI_ATTR_OFF) != 0;
     int s = app->scale, cw = cell_w(app), ch = cell_h(app), side = SDL_min(r.w - 4 * s, r.h - ch - 6 * s);
     int cols = gui_text_cols(text), room = (r.w - cw) / cw;
-    SDL_Color ink = rgb(failing || inverted     ? t->page
-                        : off                   ? t->soft
-                        : attr & UI_ATTR_ACTIVE ? t->active
-                        : look                  ? t->focus
-                                                : ui_colour(app, color, t->ink));
+    SDL_Color ink = rgb(failing || inverted      ? t->page
+                        : off                    ? t->soft
+                        : attr & UI_ATTR_WARNING ? t->warning
+                        : attr & UI_ATTR_ACTIVE  ? t->active
+                        : look                   ? t->focus
+                                                 : ui_colour(app, color, t->ink));
     SDL_Color soft = rgb(failing || inverted ? t->page : t->soft);
     GuiRect in = gui_rect(r.x + cw / 2, r.y, r.w - cw, r.h); /* half a cell either side */
     if (failing || inverted)
@@ -6157,9 +6163,15 @@ static const char* driver_name(int item) {
         default: return NULL;
     }
 }
+int (*snx_menu_has_driver)(const char* name) = NULL;
+/* whether item's driver is the menu's own program, run with the driver's name first (snx_menu_has_driver) */
+static bool driver_in_self(const App* app, int item) {
+    const char* name = driver_name(item);
+    return app->self && item != GUI_SWITCH && name && snx_menu_has_driver && snx_menu_has_driver(name);
+}
 static char* find_driver(const App* app, int item) {
     const char* name = driver_name(item);
-    if (app->self && item == GUI_SWITCH) return snx_strdup(app->self);
+    if (app->self && (item == GUI_SWITCH || driver_in_self(app, item))) return snx_strdup(app->self);
     if (!name) return NULL;
 #ifdef _WIN32
     char* filename = snx_format("%s.exe", name);
@@ -6431,31 +6443,34 @@ static void space_start(App* app) {
 /* ---- the Settings: its groups, App then a group per section of the settings; a group's rows; the App's ---- */
 static const GuiThemeKey app_keys[] = {
     {"", SNX_TR_NOOP("Theme"), GUI_KEY_ACTION, offsetof(GuiAppForm, theme), sizeof(((GuiAppForm*)0)->theme), NULL, 0,
-     SNX_TR_NOOP("Built-in themes, then each themes/<name>/theme.ini")},
+     SNX_TR_NOOP("Built-in themes, then each themes/<name>/theme.ini"), 0, 0, 0, 0, NULL},
     {"", SNX_TR_NOOP("UI scale"), GUI_KEY_ACTION, offsetof(GuiAppForm, text), sizeof(((GuiAppForm*)0)->text), NULL, 0,
-     SNX_TR_NOOP("Auto fits the screen. A new scale asks to be kept")},
+     SNX_TR_NOOP("Auto fits the screen. A new scale asks to be kept"), 0, 0, 0, 0, NULL},
     {"", SNX_TR_NOOP("Language"), GUI_KEY_ACTION, offsetof(GuiAppForm, language), sizeof(((GuiAppForm*)0)->language),
-     NULL, 0, SNX_TR_NOOP("The launcher's language. Auto: the system's, else English")},
+     NULL, 0, SNX_TR_NOOP("The launcher's language. Auto: the system's, else English"), 0, 0, 0, 0, NULL},
     {"", SNX_TR_NOOP("Animations"), GUI_KEY_ACTION, offsetof(GuiAppForm, animations),
      sizeof(((GuiAppForm*)0)->animations), NULL, 0,
-     SNX_TR_NOOP("Screens and dialogs fade in and out, 0.15 s. Off: none")},
+     SNX_TR_NOOP("Screens and dialogs fade in and out, 0.15 s. Off: none"), 0, 0, 0, 0, NULL},
     {"", SNX_TR_NOOP("Side panel"), GUI_KEY_ACTION, offsetof(GuiAppForm, side), sizeof(((GuiAppForm*)0)->side), NULL, 0,
      SNX_TR_NOOP(
-         "The panel beside the list. Auto: where it fits. On: under the list where it does not. F2 turns it off and on")},
+         "The panel beside the list. Auto: where it fits. On: under the list where it does not. F2 turns it off and on"),
+     0, 0, 0, 0, NULL},
     {"", SNX_TR_NOOP("Background recompile"), GUI_KEY_ACTION, offsetof(GuiAppForm, background),
      sizeof(((GuiAppForm*)0)->background), NULL, 0,
      SNX_TR_NOOP("The Compile tab's: R's, B's and a game's first. Full: every core. Gentle: half of them, at a low "
-                 "priority. Either goes gently while a game plays")},
+                 "priority. Either goes gently while a game plays"), 0, 0, 0, 0, NULL},
     {"", SNX_TR_NOOP("Theme Editor"), GUI_KEY_ACTION, 0, 0, NULL, 0,
-     SNX_TR_NOOP("This theme's keys with a preview, saved as themes/<name>/theme.ini")},
+     SNX_TR_NOOP("This theme's keys with a preview, saved as themes/<name>/theme.ini"), 0, 0, 0, 0, NULL},
     {"", SNX_TR_NOOP("Folders"), GUI_KEY_ACTION, offsetof(GuiAppForm, places), sizeof(((GuiAppForm*)0)->places), NULL,
-     0, SNX_TR_NOOP("The data and the extractions, and the libraries Games lists: recompiled games and dumps")},
+     0,
+     SNX_TR_NOOP("The data and the extractions, and the libraries Games lists: recompiled games and dumps"), 0, 0, 0,
+     0, NULL},
     {"", SNX_TR_NOOP("Clean Old Settings"), GUI_KEY_ACTION, 0, 0, NULL, 0,
-     SNX_TR_NOOP("Removes the settings this version no longer reads. Asks first")},
+     SNX_TR_NOOP("Removes the settings this version no longer reads. Asks first"), 0, 0, 0, 0, NULL},
     {"", SNX_TR_NOOP("Move Old Files"), GUI_KEY_ACTION, offsetof(GuiAppForm, moves), sizeof(((GuiAppForm*)0)->moves),
-     NULL, 0, SNX_TR_NOOP("Moves what an older version left to where this one looks. Asks first")},
+     NULL, 0, SNX_TR_NOOP("Moves what an older version left to where this one looks. Asks first"), 0, 0, 0, 0, NULL},
     {"", SNX_TR_NOOP("Reset to Defaults"), GUI_KEY_ACTION, 0, 0, NULL, 0,
-     SNX_TR_NOOP("Every setting of the groups after App to its default. Asks first")}};
+     SNX_TR_NOOP("Every setting of the groups after App to its default. Asks first"), 0, 0, 0, 0, NULL}};
 enum {
     GUI_APP_THEME,
     GUI_APP_TEXT,
@@ -7639,7 +7654,7 @@ static int users_fill(App* app) {
                                        sizeof app->users_form.plays,
                                        NULL,
                                        0,
-                                       SNX_TR_NOOP("The user the games play as")};
+                                       SNX_TR_NOOP("The user the games play as"), 0, 0, 0, 0, NULL};
     for (i = 0; i < g_user_count && i < SNX_USERS_MAX; ++i) {
         snprintf(app->users_label[i], sizeof app->users_label[i], snx_tr("User %d"), i + 1);
         snprintf(app->users_form.nick[i], sizeof app->users_form.nick[i], "%s", g_users[i].nickname);
@@ -7651,7 +7666,8 @@ static int users_fill(App* app) {
             sizeof app->users_form.nick[0],
             NULL,
             0,
-            SNX_TR_NOOP("Its nickname, as the games and Eden rooms show it: 4 to 20 of A-Z a-z 0-9 space . _ -")};
+            SNX_TR_NOOP("Its nickname, as the games and Eden rooms show it: 4 to 20 of A-Z a-z 0-9 space . _ -"), 0,
+            0, 0, 0, NULL};
     }
     return i + 1;
 }
@@ -7772,6 +7788,8 @@ static void settings_reset_ask(App* app);
 /* ---- UI scale: picked in a box over the App's rows, then kept once said so, else back by itself after a while, as
    a screen mode is: a size can leave the menu too small or too big to read ---- */
 #define GUI_TEXT_KEEP_MS 15000
+#define GUI_WARN_MS       3500 /* a resolution warning's line and its row's flash */
+#define GUI_WARN_BLINK_MS 150  /* the flash's on and off, the row in the warning colour then its own */
 static const char* const size_labels[GUI_TEXT_MAX + 4] = {SNX_TR_NOOP("0.25 of Auto"),
                                                           SNX_TR_NOOP("0.5 of Auto"),
                                                           SNX_TR_NOOP("0.75 of Auto"),
@@ -8442,8 +8460,36 @@ static void render_pad(App* app) {
                              : "",
          rgb(app->editor.note[0] ? theme->failure : theme->soft), keys);
 }
+/* a resolution past 4x, under 0.5x, or one that is no whole number: its row flashes in the warning colour and the
+   foot says why, for a moment; one that is no whole number says Eden's line as well */
+static void resolution_warn(App* app, int why, int experimental) {
+    const char* base = why == 0 ? snx_tr("Over 4x: this takes a lot of GPU memory, and a game may slow down or crash. "
+                                         "Beyond this, severe graphical issues may occur")
+                      : why == 1 ? snx_tr("Under 0.5x: the picture may look very low quality. Beyond this, severe "
+                                          "graphical issues may occur")
+                                 : "";
+    app->warn_until = now_ms(app) + GUI_WARN_MS;
+    snprintf(app->warn_key, sizeof app->warn_key, "%s", "resolution");
+    if (experimental)
+        snprintf(app->editor.note, sizeof app->editor.note, "%s%s%s", base, base[0] ? ". " : "",
+                 snx_tr("Non-standard resolution, experimental."));
+    else
+        snprintf(app->editor.note, sizeof app->editor.note, "%s", base);
+}
+
+/* the warning's second over: its line goes and its row keeps its own colour */
+static void warn_tick(App* app) {
+    if (!app->warn_until || now_ms(app) < app->warn_until) return;
+    app->warn_until = 0;
+    app->warn_key[0] = 0;
+    app->editor.note[0] = 0;
+}
 static void editor_key(App* app, GuiKey key) {
     GuiEditorDo what;
+    int was_typing = app->editor.typing;
+    if (app->warn_until) app->editor.note[0] = 0;
+    app->warn_until = 0;
+    app->warn_key[0] = 0;
     /* a player's map row opens its button map, as every player's Button map page does; its Controller row waits for
        a press on the controller it takes */
     if (app->form == GUI_FORM_GROUP && key == GUI_SELECT && !app->editor.typing &&
@@ -8457,6 +8503,22 @@ static void editor_key(App* app, GuiKey key) {
         return;
     }
     what = gui_editor_key(&app->editor, key);
+    if (key == GUI_SELECT && was_typing && !app->editor.typing && app->form == GUI_FORM_GROUP &&
+        app->editor.object == (char*)app->settings.values) {
+        int row = setting_of(app, app->editor.row);
+        const char* setting = row >= 0 && row < app->settings.count ? app->settings.values[row].key : NULL;
+        if (setting && !strcmp(setting, "resolution")) {
+            const char* chosen = gui_settings_value(&app->settings, "resolution");
+            double value = chosen ? strtod(chosen, NULL) : 0;
+            int whole = value == (double)(long long)value;
+            if (value > 4.0)
+                resolution_warn(app, 0, !whole);
+            else if (value < 0.5)
+                resolution_warn(app, 1, !whole);
+            else if (!whole) /* any scale in the range that is no whole number */
+                resolution_warn(app, 2, 1);
+        }
+    }
     if (what == GUI_EDITOR_ACTION && app->form == GUI_FORM_SETTINGS && !app->editor.step) {
         open_group(app, app->editor.row);
         return;
@@ -8697,18 +8759,38 @@ static void form_boxes(App* app, GuiFormBoxes* f) {
 static int form_room(const App* app, int width) {
     return (ui_row_box(app, gui_rect(0, 0, width, 0)).w - cell_w(app) * 3 / 2) / cell_w(app);
 }
+/* a numeric setting's field: four value slots (0.25, 16.0) right-aligned, and the cursor's after them, so the value
+   keeps its place whether it is being typed or is only shown */
+#define GUI_NUMBER_VALUE 4
+#define GUI_NUMBER_FIELD (GUI_NUMBER_VALUE + 1)
 /* a row of a form as its box shows it, its marker first: its label, the value past the widest label (labels
    columns); one being typed ends where the typing is, its start giving way, in room columns */
 static void form_line(App* app, const GuiEditor* e, int r, int labels, int room, char* line, size_t size) {
     char label[256], value[400];
     const GuiThemeKey* k = gui_editor_key_of(e, r);
     const char* path;
-    int typing = e->typing && r == e->row, pad;
+    int typing = e->typing && r == e->row, pad, srow = -1;
     size_t n;
     gui_editor_label(e, r, label, sizeof label);
-    if (typing)
-        snprintf(value, sizeof value, "%s_", e->text);
-    else if (k && e->object == (char*)app->settings.values) { /* a setting: a pick, else its default and [default] */
+    if (k && k->numeric && !k->whole && e->object == (char*)app->settings.values)
+        srow = e->keys == app->view_keys   ? app->view_rows[k - app->view_keys]
+               : e->keys == app->peek_keys ? app->peek_rows[k - app->peek_keys]
+                                           : (int)(k - app->settings.keys);
+    if (typing) {
+        if (srow >= 0) { /* right in its four slots, the cursor in the fifth */
+            int cols = gui_text_cols(e->text);
+            snprintf(value, sizeof value, "%*s%.*s_", SDL_max(GUI_NUMBER_VALUE - cols, 0), "",
+                     SDL_min(cols, GUI_NUMBER_VALUE), e->text);
+        } else
+            snprintf(value, sizeof value, "%s_", e->text);
+    } else if (srow >= 0) { /* its value right in four slots, the fifth the cursor's while typing */
+        const GuiSetting* s = &app->settings.values[srow];
+        const char* picked = gui_settings_value(&app->settings, s->key);
+        const char* number = picked ? picked : s->fallback ? s->fallback : "";
+        int cols = gui_text_cols(number);
+        snprintf(value, sizeof value, "%*s%.*s %s", SDL_max(GUI_NUMBER_VALUE - cols, 0), "",
+                 SDL_min(cols, GUI_NUMBER_VALUE), number, picked ? "" : snx_tr("[default]"));
+    } else if (k && e->object == (char*)app->settings.values) { /* a setting: a pick, else its default and [default] */
         int row = e->keys == app->view_keys   ? app->view_rows[k - app->view_keys]
                   : e->keys == app->peek_keys ? app->peek_rows[k - app->peek_keys]
                                               : (int)(k - app->settings.keys);
@@ -8742,12 +8824,13 @@ static void form_line(App* app, const GuiEditor* e, int r, int labels, int room,
         snprintf(value, sizeof value, "%s", shown);
     }
     pad = SDL_max(labels - gui_text_cols(label), 0); /* the labels' columns, not their bytes */
+    if (k && k->numeric && !k->whole) pad = 0;      /* the scale's value left, its row under the box's width */
     if (value[0])
         snprintf(line, size, "%s%s%*s %s", app->theme.marker, label, pad, "", value);
     else /* no value to line up: padding would make a short row too long for its box, and slide */
         snprintf(line, size, "%s%s", app->theme.marker, label);
     n = (size_t)gui_text_cols(line);
-    if (typing && room > 4 && n > (size_t)room) { /* the typed end in view */
+    if (typing && room > 4 && n > (size_t)room && !(k && k->numeric && !k->whole)) { /* the typed end in view */
         const char* tail = gui_cols_skip(value, (int)(n - (size_t)room + 3));
         snprintf(line, size, "%s%s%*s ...%s", app->theme.marker, label, pad, "", tail);
     }
@@ -8817,6 +8900,13 @@ static bool form_row_info(App* app, const GuiEditor* e, size_t r, int labels, in
     }
     info->label = line + strlen(app->theme.marker); /* ui_draw_row puts the marker */
     if (form_row_off(app, e, (int)r)) info->attr |= UI_ATTR_OFF;
+    if (app->warn_until && now_ms(app) < app->warn_until && app->warn_key[0] &&
+        e->object == (char*)app->settings.values) {
+        int row = setting_of(app, (int)r);
+        if (row >= 0 && row < app->settings.count && app->settings.values[row].key &&
+            !strcmp(app->settings.values[row].key, app->warn_key) && (now_ms(app) / GUI_WARN_BLINK_MS) % 2 == 0)
+            info->attr |= UI_ATTR_WARNING;
+    }
     return true;
 }
 /* FormList's row: the theme editor's keys; else the groups, the one open beside them in the focus's look */
@@ -8858,7 +8948,10 @@ bool ui_form_side_rows_get_row_info(App* app, size_t row, int width, UiRowInfo* 
 static const char* form_about(const App* app, SDL_Color* color) {
     const GuiEditor* e = &app->editor;
     const GuiThemeKey* k = gui_editor_key_of(e, e->row);
-    *color = rgb(e->note[0] ? (e->leaving ? app->theme.failure : app->theme.focus) : app->theme.ink);
+    *color = rgb(e->note[0] ? (app->warn_until ? app->theme.warning
+                             : e->leaving ? app->theme.failure
+                                          : app->theme.focus)
+                            : app->theme.ink);
     if (e->note[0]) return e->note;
     if (k) return snx_tr(k->about);
     if (app->form == GUI_FORM_FOLDERS) return snx_tr("Nothing is moved"); /* Reset to Defaults: what, under the boxes */
@@ -10732,6 +10825,7 @@ static void tell(App* app);
 static void pump(App* app) {
     keys_left(app);
     text_left(app);
+    warn_tick(app);
     job_pump(app);
 #ifdef SDL_PLATFORM_IOS
     icons_pump(app);
@@ -11101,10 +11195,11 @@ static void launch(App* app, char* absolute, bool prepared) {
     }
     /* the driver, the file, the settings, --repo and its folder, the picked games and extraction folders, NULL */
     GuiSettings* s = settings_of(app);
-    const char** argv = (const char**)snx_alloc((size_t)(s->count + 16) * sizeof(*argv));
+    const char** argv = (const char**)snx_alloc((size_t)(s->count + 17) * sizeof(*argv));
     char* out = NULL; /* a dump's extraction in the picked extractions folder */
     size_t n = 1;
     argv[0] = direct ? absolute : driver;
+    if (!direct && driver_in_self(app, app->menu.selected)) argv[n++] = driver_name(app->menu.selected);
     if (make) argv[n++] = "-r";
     if (!direct) argv[n++] = game_option ? game_option : absolute;
     /* Switch options only, never guest argv for the CPU-only Linux driver or the 3DS one; R's recompile takes no

@@ -5,6 +5,7 @@
    are the guest's, read little-endian. An offset field counts from where it is */
 #ifndef SNX_VITA_GXP_H
 #define SNX_VITA_GXP_H
+#include "common/utilities/endian.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -55,26 +56,24 @@ enum { GXP_TYPE_F32, GXP_TYPE_F16, GXP_TYPE_C10, GXP_TYPE_U32, GXP_TYPE_S32, GXP
 #define GXP_DEFAULT_CONTAINER 14u
 #define GXP_TEXTURE_CONTAINER 15u
 
-static inline uint32_t gxp_u16(const unsigned char* p) { return p[0] | (uint32_t)p[1] << 8; }
-static inline uint32_t gxp_u32(const unsigned char* p) { return gxp_u16(p) | gxp_u16(p + 2) << 16; }
 static inline float gxp_f32(const unsigned char* p) {
-    uint32_t bits = gxp_u32(p);
+    uint32_t bits = snx_ld_le32(p);
     float f;
     memcpy(&f, &bits, 4);
     return f;
 }
 /* the bytes an offset field at field points to */
 static inline const unsigned char* gxp_at(const unsigned char* program, unsigned field) {
-    return program + field + gxp_u32(program + field);
+    return program + field + snx_ld_le32(program + field);
 }
-static inline bool gxp_fragment(const unsigned char* program) { return gxp_u32(program + GXP_FLAGS) & GXP_FLAG_FRAGMENT; }
+static inline bool gxp_fragment(const unsigned char* program) { return snx_ld_le32(program + GXP_FLAGS) & GXP_FLAG_FRAGMENT; }
 /* parameter i (16 bytes): its name, category, type, component count, container, semantic, its index, array size and
    resource index */
 static inline const unsigned char* gxp_parameter(const unsigned char* program, uint32_t i) {
     return gxp_at(program, GXP_PARAMETERS) + i * 16;
 }
 static inline const char* gxp_parameter_name(const unsigned char* parameter) {
-    return (const char*)parameter + (int32_t)gxp_u32(parameter);
+    return (const char*)parameter + (int32_t)snx_ld_le32(parameter);
 }
 static inline unsigned gxp_parameter_category(const unsigned char* q) { return q[4] & 15; }
 static inline unsigned gxp_parameter_type(const unsigned char* q) { return q[4] >> 4; }
@@ -82,8 +81,8 @@ static inline unsigned gxp_parameter_components(const unsigned char* q) { return
 static inline unsigned gxp_parameter_container(const unsigned char* q) { return q[5] >> 4; }
 static inline unsigned gxp_parameter_semantic(const unsigned char* q) { return q[6]; }
 static inline unsigned gxp_parameter_semantic_index(const unsigned char* q) { return q[7]; }
-static inline uint32_t gxp_parameter_array_size(const unsigned char* q) { return gxp_u32(q + 8); }
-static inline uint32_t gxp_parameter_resource(const unsigned char* q) { return gxp_u32(q + 12); }
+static inline uint32_t gxp_parameter_array_size(const unsigned char* q) { return snx_ld_le32(q + 8); }
+static inline uint32_t gxp_parameter_resource(const unsigned char* q) { return snx_ld_le32(q + 12); }
 /* bytes of one component of a parameter type */
 static inline unsigned gxp_type_size(unsigned type) {
     switch (type) {

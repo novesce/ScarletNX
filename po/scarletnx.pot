@@ -163,6 +163,16 @@ msgid "Removed: it was empty"
 msgstr ""
 
 #: src/gui/editor.c
+#, c-format
+msgid "Select to type it: a whole number from %g to %g"
+msgstr ""
+
+#: src/gui/editor.c
+#, c-format
+msgid "Select to type it: a number from %g to %g, three digits and two decimals at most"
+msgstr ""
+
+#: src/gui/editor.c
 msgid "Select to pick it, or type it as #RRGGBB"
 msgstr ""
 
@@ -180,6 +190,16 @@ msgstr ""
 
 #: src/gui/editor.c
 #, c-format
+msgid "A whole number from %g to %g, not \"%s\""
+msgstr ""
+
+#: src/gui/editor.c
+#, c-format
+msgid "A number from %g to %g, three digits and two decimals at most, not \"%s\""
+msgstr ""
+
+#: src/gui/editor.c
+#, c-format
 msgid "At most %u bytes"
 msgstr ""
 
@@ -192,7 +212,22 @@ msgid "A whole number, 0 to 10000"
 msgstr ""
 
 #: src/gui/editor.c
+#, c-format
+msgid "Closest value in range: %s"
+msgstr ""
+
+#: src/gui/editor.c
 msgid "Not saved: ESC again leaves without it, Save keeps it"
+msgstr ""
+
+#: src/gui/editor.c
+#, c-format
+msgid "Only the digits of a whole number from %g to %g"
+msgstr ""
+
+#: src/gui/editor.c
+#, c-format
+msgid "Only the digits of a number from %g to %g, three digits and two decimals at most"
 msgstr ""
 
 #: src/gui/editor.c
@@ -2421,6 +2456,18 @@ msgid "Looking for controllers..."
 msgstr ""
 
 #: src/gui/main.c
+msgid "Over 4x: this takes a lot of GPU memory, and a game may slow down or crash. Beyond this, severe graphical issues may occur"
+msgstr ""
+
+#: src/gui/main.c
+msgid "Under 0.5x: the picture may look very low quality. Beyond this, severe graphical issues may occur"
+msgstr ""
+
+#: src/gui/main.c
+msgid "Non-standard resolution, experimental."
+msgstr ""
+
+#: src/gui/main.c
 msgid "Paste one local folder's path"
 msgstr ""
 
@@ -2438,6 +2485,10 @@ msgstr ""
 
 #: src/gui/main.c
 msgid "The runtime listed no settings"
+msgstr ""
+
+#: src/gui/main.c src/gui/settings.c
+msgid "[default]"
 msgstr ""
 
 #: src/gui/main.c
@@ -3693,10 +3744,6 @@ msgstr ""
 
 #: src/gui/settings.c
 msgid "Mixed"
-msgstr ""
-
-#: src/gui/settings.c
-msgid "[default]"
 msgstr ""
 
 #: src/gui/steps.c

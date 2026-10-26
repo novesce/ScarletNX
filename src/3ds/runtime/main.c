@@ -676,6 +676,3 @@ int snx_ctr_main(int argc, char** argv) {
     free(runtime);
     return status;
 }
-#ifndef SNX_MULTICALL
-int main(int argc, char** argv) { return snx_ctr_main(argc, argv); }
-#endif

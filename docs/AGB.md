@@ -125,20 +125,20 @@ The trigonometry rounds to 1.14 fixed point like the BIOS's own tables.
 
 `cpu/recomp.c` takes the ROM's ARM and Thumb code through the existing ARM
 recompiler of `src/common/cpu/arm`, block by block, and links the emitted
-objects into a native module with the host compiler. Loading a ROM does this
+objects with the helpers they call (`armlib.c`) into a native module with the
+LLVM backend's own linker (`src/common/cpu/recompiler/llvm/link.c`), as the
+Switch's 32-bit modules are: no C compiler is needed. Loading a ROM does this
 automatically and caches the module in the game's folder as `<name>_code.so`,
 as the NX system type caches `<Game>_code.so`; `-r` rebuilds it. Blocks the
 discovery step does not reach, a branch through a register or the instruction
 after one the board interpreted, are compiled when they are first dispatched.
-The miss starts a discovery walk of its own; a build with the LLVM backend
-compiles each block it finds in the process at its first dispatch
-(`src/common/cpu/arm/exec.c`), and one without it puts them in a module of their
-own (`<name>_code.<n>.so`), so a miss costs those blocks and not the whole ROM.
+The miss starts a discovery walk of its own, and each block it finds is
+compiled in the process at its first dispatch (`src/common/cpu/arm/exec.c`), so
+a miss costs that block and not the whole ROM.
 When the run ends, the blocks it compiled are kept in the map as hints, at once,
 as the 3DS and Vita drivers keep theirs: the next run compiles them again in the
 process when it reaches them, and a recompile (`-r`, R in the launcher) builds
-every block the runs reached into the module. A build without the LLVM backend
-folds them into the module instead. A block built from RAM
+every block the runs reached into the module. A block built from RAM
 runs while RAM holds the words it was built from, and is built again once the
 game writes over them; the map names the ROM's hash, and a map of another ROM is
 refused with both.

@@ -105,20 +105,12 @@ if(SNX_BUILD_NX AND NOT SNX_TOOLS_ONLY)
     set(snx_gui_default ON)
 endif()
 option(SNX_BUILD_GUI "Build the keyboard-driven SDL3 launcher" ${snx_gui_default})
-# scarletnx-3ds and scarletnx-gnuabi as names of scarletnx, links beside it as scarletnx-switch is (src/multicall): one
-# program carries LLVM, SDL and the code the drivers share once. A zip keeps no links, so Windows has three programs,
-# and Android's and iOS's apps start their drivers their own way
-set(snx_multicall_default OFF)
-if(SNX_BUILD_NX AND NOT SNX_TOOLS_ONLY AND (SNX_BUILD_3DS OR SNX_BUILD_GNUABI OR SNX_BUILD_VITA) AND NOT WIN32 AND
-   NOT ANDROID AND
-   NOT IOS)
-    set(snx_multicall_default ON)
-endif()
-option(SNX_MULTICALL "Make scarletnx-3ds, scarletnx-vita and scarletnx-gnuabi names of scarletnx" ${snx_multicall_default})
-if(SNX_MULTICALL AND (NOT SNX_BUILD_NX OR SNX_TOOLS_ONLY OR WIN32 OR ANDROID OR IOS))
-    message(FATAL_ERROR "SNX_MULTICALL makes names of the runtime's program, scarletnx, which a build without the "
-                        "Switch runtime (SNX_BUILD_NX, SNX_TOOLS_ONLY) doesn't have, Windows has no links for, and "
-                        "Android's and iOS's apps don't start by name")
+# The program, scarletnx, is every driver the build has (src/multicall): each driver is a library, and the program
+# runs the one its name says. scarletnx-switch, scarletnx-3ds, scarletnx-vita, scarletnx-gnuabi and scarletnx-agb are
+# links to it on Linux and macOS
+if(DEFINED CACHE{SNX_MULTICALL}) # an option before, said and taken out of the cache
+    message(STATUS "SNX_MULTICALL is no longer an option: scarletnx is every driver the build has")
+    unset(SNX_MULTICALL CACHE)
 endif()
 if(SNX_BUILD_GUI AND SNX_TOOLS_ONLY)
     message(FATAL_ERROR "SNX_BUILD_GUI requires a runtime build, not a tools-only build")
@@ -144,18 +136,6 @@ if(SNX_TRACY AND SNX_DEPLOY)
     set(SNX_DEPLOY OFF CACHE BOOL "Copy the runtime next to every recompiled game in SNX_GAMES_DIR after building" FORCE)
     message(STATUS "SNX_TRACY: no post-build deploy of the profiling runtime (a run of the profiled driver still puts "
                    "it beside its game)")
-endif()
-# The client makes dlclose a no-op on Linux (a library unload would leave its symbols stale in the profiler), and the
-# 3DS driver unloads the AOT module it recompiled before loading the new one. So the profiled build keeps the drivers
-# as their own programs instead of names of scarletnx, and only scarletnx has the client.
-if(SNX_TRACY AND SNX_MULTICALL)
-    set(SNX_MULTICALL OFF)
-    foreach(name scarletnx-3ds scarletnx-vita scarletnx-gnuabi)
-        if(IS_SYMLINK "${PROJECT_BINARY_DIR}/${name}")
-            file(REMOVE "${PROJECT_BINARY_DIR}/${name}") # a link of an earlier configure would be written through
-        endif()
-    endforeach()
-    message(STATUS "SNX_TRACY: the drivers are their own programs (the client makes dlclose a no-op on Linux)")
 endif()
 # A project that adds ScarletNX (CPM, add_subdirectory) builds none of its tests unless it asks: a plain variable here
 # rather than BUILD_TESTING in the cache, which the including project's own tests read
@@ -196,9 +176,14 @@ endif()
 if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()
+# the program, wherever the build has a driver: it links the drivers' libraries by name, the ones configured below too,
+# by the conditions their folders are configured by here (a build of the host tools has no Vita driver, and with the
+# Switch's tools it stops here)
+if(SNX_BUILD_NX OR SNX_BUILD_3DS OR SNX_BUILD_GNUABI OR SNX_BUILD_AGB OR (SNX_BUILD_VITA AND NOT SNX_TOOLS_ONLY))
+    add_subdirectory(src/multicall)
+endif()
 if(SNX_TOOLS_ONLY AND SNX_BUILD_NX)
     include(GNUInstallDirs)
-    install(TARGETS scarletnx RUNTIME DESTINATION bin)
     install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/scarletnx)
     return()
 endif()
@@ -212,9 +197,6 @@ if(SNX_BUILD_AGB)
 endif()
 if(SNX_BUILD_GUI)
     add_subdirectory(src/gui)
-endif()
-if(SNX_MULTICALL) # after the drivers whose libraries it links
-    add_subdirectory(src/multicall)
 endif()
 # The icon both programs' desktop entries name, in every size (scripts/make-icons.py); Windows has it in the executables
 if(NOT WIN32)
@@ -253,12 +235,7 @@ add_subdirectory(tools)
 
 # `cmake --install` puts the runtime, the desktop entry and the licenses under CMAKE_INSTALL_PREFIX, which is
 # what the AppImage and the CI artifacts are made from (.github/workflows/build.yml)
-include(GNUInstallDirs)
-if(IOS) # the app itself (dist/apple), which cmake/apple_package.cmake packs
-    install(TARGETS scarletnx BUNDLE DESTINATION .)
-elseif(NOT ANDROID) # src/nx puts Android's in the app's libraries
-    install(TARGETS scarletnx RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-endif()
+include(GNUInstallDirs) # the program itself is src/multicall's
 if(NOT WIN32)
     install(FILES dist/scarletnx.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications COMPONENT desktop)
     install(FILES dist/io.github.scarletnx.scarletnx.metainfo.xml DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo COMPONENT desktop)

@@ -4,6 +4,7 @@
 #include "agb/board/memory.h"
 #include "agb/board/board.h"
 #include "agb/board/save.h"
+#include "common/utilities/endian.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -29,21 +30,6 @@ void agb_memory_free(AgbMemory* memory) {
     free(memory->oam);
     free(memory->sram);
     memset(memory, 0, sizeof(*memory));
-}
-
-static uint16_t load16(const uint8_t* p) { return (uint16_t)(p[0] | p[1] << 8); }
-static uint32_t load32(const uint8_t* p) {
-    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
-}
-static void store16(uint8_t* p, uint16_t value) {
-    p[0] = (uint8_t)value;
-    p[1] = (uint8_t)(value >> 8);
-}
-static void store32(uint8_t* p, uint32_t value) {
-    p[0] = (uint8_t)value;
-    p[1] = (uint8_t)(value >> 8);
-    p[2] = (uint8_t)(value >> 16);
-    p[3] = (uint8_t)(value >> 24);
 }
 
 static uint32_t vram_offset(uint32_t address) {
@@ -100,7 +86,7 @@ uint16_t agb_read16(AgbBoard* board, uint32_t address) {
     if ((address >> 24) == 0x0D && agb_save_eeprom(board)) return agb_eeprom_read(board);
     if (is_bios(address)) return (uint16_t)(board->bios_prefetch >> (address & 2) * 8);
     p = region8(board, address);
-    if (p) return load16(p);
+    if (p) return snx_ld_le16(p);
     return is_rom(address) ? (uint16_t)(rom8(board, address) | rom8(board, address + 1) << 8) : 0;
 }
 
@@ -115,7 +101,7 @@ uint32_t agb_read32(AgbBoard* board, uint32_t address) {
     }
     if (is_bios(address)) return board->bios_prefetch;
     p = region8(board, address);
-    if (p) return load32(p);
+    if (p) return snx_ld_le32(p);
     if (!is_rom(address)) return 0;
     return (uint32_t)rom8(board, address) | (uint32_t)rom8(board, address + 1) << 8 |
            (uint32_t)rom8(board, address + 2) << 16 | (uint32_t)rom8(board, address + 3) << 24;
@@ -140,7 +126,7 @@ void agb_write8(AgbBoard* board, uint32_t address, uint8_t value) {
             /* the OBJ half of VRAM has no byte writes at all, and OAM is halfword wide only */
             uint32_t object_base = (board->ppu.dispcnt & 7) >= 3 ? 0x14000 : 0x10000;
             if (address >> 24 == 0x06 && vram_offset(address) >= object_base) return;
-            store16(p - (address & 1), (uint16_t)(value * 0x0101u));
+            snx_st_le16(p - (address & 1), (uint16_t)(value * 0x0101u));
             break;
         }
         case 0x07: return;
@@ -165,7 +151,7 @@ void agb_write16(AgbBoard* board, uint32_t address, uint16_t value) {
         return;
     }
     p = region8(board, address);
-    if (p) store16(p, value);
+    if (p) snx_st_le16(p, value);
 }
 
 void agb_write32(AgbBoard* board, uint32_t address, uint32_t value) {
@@ -181,5 +167,5 @@ void agb_write32(AgbBoard* board, uint32_t address, uint32_t value) {
         return;
     }
     p = region8(board, address);
-    if (p) store32(p, value);
+    if (p) snx_st_le32(p, value);
 }

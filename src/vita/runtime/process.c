@@ -7,6 +7,7 @@
 #include "vita/hle/hle.h"
 #include "vita/loader/vpk.h"
 #include "common/utilities/common.h"
+#include "common/utilities/endian.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,19 +35,11 @@ uint64_t vita_now_ns(void) {
     return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
 #endif
 }
-static uint32_t le32(const unsigned char* p) {
-    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
-}
-uint32_t vita_read32(VitaProcess* p, uint32_t address) { return le32(p->mem + address); }
-void vita_write32(VitaProcess* p, uint32_t address, uint32_t value) {
-    unsigned char* b = p->mem + address;
-    b[0] = (unsigned char)value, b[1] = (unsigned char)(value >> 8);
-    b[2] = (unsigned char)(value >> 16), b[3] = (unsigned char)(value >> 24);
-}
-void vita_write64(VitaProcess* p, uint32_t address, uint64_t value) {
-    vita_write32(p, address, (uint32_t)value);
-    vita_write32(p, address + 4, (uint32_t)(value >> 32));
-}
+uint16_t vita_read16(VitaProcess* p, uint32_t address) { return snx_ld_le16(p->mem + address); }
+uint32_t vita_read32(VitaProcess* p, uint32_t address) { return snx_ld_le32(p->mem + address); }
+void vita_write16(VitaProcess* p, uint32_t address, uint16_t value) { snx_st_le16(p->mem + address, value); }
+void vita_write32(VitaProcess* p, uint32_t address, uint32_t value) { snx_st_le32(p->mem + address, value); }
+void vita_write64(VitaProcess* p, uint32_t address, uint64_t value) { snx_st_le64(p->mem + address, value); }
 bool vita_string(VitaProcess* p, uint32_t address, char* out, size_t size) {
     if (!size) return false;
     out[0] = 0;

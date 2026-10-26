@@ -3,6 +3,7 @@
 #include "vita/loader/vpk.h"
 #include "vita/loader/inflate.h"
 #include "common/utilities/common.h"
+#include "common/utilities/endian.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,8 +24,6 @@ typedef struct {
     uint32_t directory_size, count;
 } Zip;
 
-static uint32_t le16(const unsigned char* p) { return p[0] | (uint32_t)p[1] << 8; }
-static uint32_t le32(const unsigned char* p) { return le16(p) | le16(p + 2) << 16; }
 static uint32_t crc32_of(const unsigned char* data, size_t size) {
     static uint32_t table[256];
     if (!table[1])
@@ -66,10 +65,10 @@ static bool zip_open(Zip* z, const char* path, char* error, size_t error_size) {
     bool found = false;
     uint32_t offset = 0;
     for (size_t i = tail >= 22 ? tail - 22 : 0; tail >= 22; --i) {
-        if (le32(end + i) == EOCD_SIGNATURE) {
-            z->count = le16(end + i + 10);
-            z->directory_size = le32(end + i + 12);
-            offset = le32(end + i + 16);
+        if (snx_ld_le32(end + i) == EOCD_SIGNATURE) {
+            z->count = snx_ld_le16(end + i + 10);
+            z->directory_size = snx_ld_le32(end + i + 12);
+            offset = snx_ld_le32(end + i + 16);
             found = true;
             break;
         }
@@ -92,17 +91,17 @@ static bool zip_open(Zip* z, const char* path, char* error, size_t error_size) {
 /* The member at *cursor in the central directory, the cursor moved past it. False at its end or for a bad entry */
 static bool zip_next(Zip* z, uint32_t* cursor, Member* m) {
     const unsigned char* p = z->directory + *cursor;
-    if (*cursor + 46 > z->directory_size || le32(p) != CENTRAL_SIGNATURE) return false;
-    uint32_t name = le16(p + 28), extra = le16(p + 30), comment = le16(p + 32);
+    if (*cursor + 46 > z->directory_size || snx_ld_le32(p) != CENTRAL_SIGNATURE) return false;
+    uint32_t name = snx_ld_le16(p + 28), extra = snx_ld_le16(p + 30), comment = snx_ld_le16(p + 32);
     if (*cursor + 46 + name + extra + comment > z->directory_size || name >= sizeof m->name) return false;
-    m->method = le16(p + 10);
-    m->crc = le32(p + 16);
-    m->packed = le32(p + 20);
-    m->size = le32(p + 24);
-    m->local = le32(p + 42);
+    m->method = snx_ld_le16(p + 10);
+    m->crc = snx_ld_le32(p + 16);
+    m->packed = snx_ld_le32(p + 20);
+    m->size = snx_ld_le32(p + 24);
+    m->local = snx_ld_le32(p + 42);
     memcpy(m->name, p + 46, name);
     m->name[name] = 0;
-    if (le16(p + 8) & 1) m->method = 0xffff; /* encrypted */
+    if (snx_ld_le16(p + 8) & 1) m->method = 0xffff; /* encrypted */
     *cursor += 46 + name + extra + comment;
     return true;
 }
@@ -117,11 +116,11 @@ static unsigned char* zip_read(Zip* z, const Member* m, char* error, size_t erro
         snprintf(error, error_size, "%s is a zip64 member", m->name);
         return NULL;
     }
-    if (!read_at(z->file, m->local, local, sizeof local) || le32(local) != LOCAL_SIGNATURE) {
+    if (!read_at(z->file, m->local, local, sizeof local) || snx_ld_le32(local) != LOCAL_SIGNATURE) {
         snprintf(error, error_size, "%s: bad local header", m->name);
         return NULL;
     }
-    uint64_t data = (uint64_t)m->local + 30 + le16(local + 26) + le16(local + 28);
+    uint64_t data = (uint64_t)m->local + 30 + snx_ld_le16(local + 26) + snx_ld_le16(local + 28);
     unsigned char *packed = malloc(m->packed ? m->packed : 1), *out = malloc(m->size ? m->size : 1);
     bool ok = packed && out && read_at(z->file, data, packed, m->packed);
     if (ok && m->method == 0)
@@ -209,12 +208,12 @@ bool vita_vpk_extract(const char* vpk, const char* folder, char* error, size_t e
 }
 char* vita_sfo_string(const unsigned char* sfo, size_t size, const char* key) {
     /* "\0PSF", version, the key table's offset, the data table's, the entries (16 bytes each from 20) */
-    if (size < 20 || le32(sfo) != 0x46535000u) return NULL;
-    uint32_t keys = le32(sfo + 8), data = le32(sfo + 12), count = le32(sfo + 16);
+    if (size < 20 || snx_ld_le32(sfo) != 0x46535000u) return NULL;
+    uint32_t keys = snx_ld_le32(sfo + 8), data = snx_ld_le32(sfo + 12), count = snx_ld_le32(sfo + 16);
     if (keys > size || data > size || count > (size - 20) / 16) return NULL;
     for (uint32_t i = 0; i < count; ++i) {
         const unsigned char* e = sfo + 20 + i * 16;
-        uint32_t name = keys + le16(e), format = le16(e + 2), length = le32(e + 4), at = data + le32(e + 12);
+        uint32_t name = keys + snx_ld_le16(e), format = snx_ld_le16(e + 2), length = snx_ld_le32(e + 4), at = data + snx_ld_le32(e + 12);
         if (name >= size || memchr(sfo + name, 0, size - name) == NULL || strcmp((const char*)sfo + name, key))
             continue;
         if (format != 0x0204 || at > size || length > size - at || !length) return NULL;

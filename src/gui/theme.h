@@ -105,13 +105,17 @@ typedef struct {
     const char* const* words; /* GUI_KEY_WORD: its words, NULL-ended; the field an int, the word's index */
     uint32_t max;             /* GUI_KEY_NUMBER: 0 to 10000 read, then at most max */
     const char* about;
+    int numeric; /* GUI_KEY_TEXT: the text a number from lo to hi (whole: no fraction), not any text */
+    int whole;   /* that number an int: a fraction is not one */
+    double lo, hi;
+    const char* def; /* the setting's default as the .ini writes it: what an empty number's row shows */
 } GuiThemeKey;
 extern const GuiThemeKey gui_theme_keys[]; /* a NULL section ends it */
 /* what a section of the file holds, for the editor's and the file's heading */
 const char* gui_theme_section_about(const char* section);
 const GuiThemeKey* gui_theme_key(const char* section, const char* key);
-/* value into the key's field of object, a theme or another object its offsets are in: 1 when the GUI takes it, 0
-   leaves the field as it was */
+/* value into the key's field of object, a theme or another object its offsets are in: nonzero when the GUI takes it (2
+   a number it clamped to the key's range), 0 leaves the field as it was */
 int gui_theme_set(void* object, const GuiThemeKey* key, const char* value);
 /* the key's value as the file writes it */
 void gui_theme_get(const void* object, const GuiThemeKey* key, char* out, size_t size);

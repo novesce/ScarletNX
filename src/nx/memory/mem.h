@@ -119,6 +119,8 @@ int mem_alias_begin(u64 src, u64 size);
 int mem_alias_map(u64 dst, u64 src, u64 size, u32 state, u32 perm);
 int mem_alias_unmap(u64 dst, u64 size, u64 back);
 void mem_alias_end(u64 src, u64 size);
+/* whether a view shares its source's pages: the alias pool is on (a view is a copy without it) */
+int mem_pool_active(void);
 /* Pool pages of their own (shared memory): size bytes mapped outside the reservation at the pointer returned, with
    their pool offset in off; NULL without a pool or when it is full */
 u8* mem_pool_host(u64 size, u64* off);

@@ -604,7 +604,7 @@ type, range and help, tab-separated. Every setting, the recompiler's too, is des
 | `showcase_corner` | `br` | The corner `showcase` draws in: `tl` top left, `tr` top right, `bl` bottom left, `br` bottom right |
 | `stats` | `0` | `1` draws the frames a second, the last frame's time, the processor and memory the game takes (`?` where the system does not tell) and a graph of its last 120 frames' times (guides at 60 and 30 FPS, a frame slower than 30 FPS in red) in a corner over the game. F12 or the game's menu turns it on and off |
 | `stats_corner` | `tl` | The corner `stats` draws in, as `showcase_corner`'s; in showcase's own corner it goes beside showcase's box, toward the middle |
-| `resolution` | `1` | Internal 3D scale, `0.25` to `4`: `1` native, `2` double, `0.75` and `0.5` faster |
+| `resolution` | `1` | Internal 3D scale, `0.25` to `16`: `1` native, `2` double, `0.75` and `0.5` faster. The launcher's Settings takes only the digits, three in all with two decimals at most, and clamps a value past the range to the closest one in it; its screen says so. It warns below `0.5` and above `4`, where a game may use too much GPU memory or fall apart |
 | `shadows` | `1` | `0` skips shadow maps |
 | `vsync` | `1` | Images are shown only on the display's refresh, so nothing tears. `0` doesn't wait for it: the newest image is shown on the next refresh where the display can do that, else at once (which may tear). A display that can do neither waits for the refresh as `1` does |
 | `anisotropy` | `0` | Texture filtering as the game asks. `2` to `16` sharpens surfaces seen at an angle |

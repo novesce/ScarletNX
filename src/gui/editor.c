@@ -61,6 +61,15 @@ static void change(GuiEditor* editor, const GuiThemeKey* key, int step) {
     } else if (key->type == GUI_KEY_NUMBER) {
         long v = (long)*(uint32_t*)field + step * (key->max >= 1000 ? 10 : 1); /* ms by tens */
         *(uint32_t*)field = (uint32_t)(v<0 ? 0 : v>(long) key->max ? (long)key->max : v);
+    } else if (key->type == GUI_KEY_TEXT && key->numeric) {
+        if (key->whole)
+            snprintf(editor->note, sizeof editor->note, snx_tr("Select to type it: a whole number from %g to %g"),
+                     key->lo, key->hi);
+        else
+            snprintf(editor->note, sizeof editor->note,
+                     snx_tr("Select to type it: a number from %g to %g, three digits and two decimals at most"),
+                     key->lo, key->hi);
+        return;
     } else {
         snprintf(editor->note, sizeof editor->note, "%s",
                  key->type == GUI_KEY_COLOUR ? snx_tr("Select to pick it, or type it as #RRGGBB")
@@ -113,9 +122,21 @@ static GuiEditorDo pick_key(GuiEditor* editor, GuiKey key) {
         gui_editor_pick_end(editor, key == GUI_SELECT);
     return GUI_EDITOR_STAY;
 }
-/* what was typed into the focused row: kept, or the note says what the row takes */
+/* nothing, a dot, or a nought: a scale emptied or given 0 is the setting's default, 1 */
+static int zero_text(const char* s) {
+    char* end;
+    double d;
+    while (*s == ' ' || *s == '\t') s++;
+    if (!*s || (s[0] == '.' && !s[1])) return 1;
+    d = strtod(s, &end);
+    while (*end == ' ' || *end == '\t') end++;
+    return !*end && d == 0;
+}
+/* what was typed into the focused row: kept, clamped to what the row takes, the default for a scale emptied or given
+   0, or the note says what it takes */
 static void take(GuiEditor* editor) {
     const GuiThemeKey* key = gui_editor_key_of(editor, editor->row);
+    int took = 1, zero = key && key->numeric && !key->whole && zero_text(editor->text);
     if (!key) {
         if (!folder_name(editor->text)) {
             snprintf(editor->note, sizeof editor->note, "%s",
@@ -123,14 +144,31 @@ static void take(GuiEditor* editor) {
             return;
         }
         snprintf(editor->id, sizeof editor->id, "%s", editor->text);
-    } else if (!gui_theme_set(object(editor), key, editor->text)) {
-        if (key->type == GUI_KEY_TEXT)
-            snprintf(editor->note, sizeof editor->note, snx_tr("At most %u bytes"), (unsigned)key->size - 1);
-        else
-            snprintf(editor->note, sizeof editor->note, "%s",
-                     key->type == GUI_KEY_COLOUR ? snx_tr("A color: #RRGGBB, as #1A2B3C")
-                                                 : snx_tr("A whole number, 0 to 10000"));
-        return;
+    } else {
+        if (zero && key->def && *key->def) /* a scale is never 0 or empty: its default shows */
+            snprintf(editor->text, sizeof editor->text, "%s", key->def);
+        took = gui_theme_set(object(editor), key, editor->text);
+        if (!took) {
+            if (key->numeric && key->whole)
+                snprintf(editor->note, sizeof editor->note, snx_tr("A whole number from %g to %g, not \"%s\""), key->lo,
+                         key->hi, editor->text);
+            else if (key->numeric)
+                snprintf(editor->note, sizeof editor->note,
+                         snx_tr("A number from %g to %g, three digits and two decimals at most, not \"%s\""),
+                         key->lo, key->hi, editor->text);
+            else if (key->type == GUI_KEY_TEXT)
+                snprintf(editor->note, sizeof editor->note, snx_tr("At most %u bytes"), (unsigned)key->size - 1);
+            else
+                snprintf(editor->note, sizeof editor->note, "%s",
+                         key->type == GUI_KEY_COLOUR ? snx_tr("A color: #RRGGBB, as #1A2B3C")
+                                                     : snx_tr("A whole number, 0 to 10000"));
+            return;
+        }
+        if (took > 1) { /* a number past its range: the closest in it, which the row now holds */
+            char value[80];
+            gui_editor_value(editor, editor->row, value, sizeof value);
+            snprintf(editor->note, sizeof editor->note, snx_tr("Closest value in range: %s"), value);
+        }
     }
     editor->typing = false;
     editor->dirty = true;
@@ -190,9 +228,62 @@ GuiEditorDo gui_editor_key(GuiEditor* editor, GuiKey key) {
     }
     return GUI_EDITOR_STAY;
 }
+/* A number typed into a setting's row, text added one character at a time: the digits, one '.', two decimals and
+   three digits at most and the sign of its range first. Anything else is left out, so no letter (an exponent's e
+   included) reaches a row that takes a number. 1 when a character was left out */
+static void trim_zeros(char* text) {
+    char* at = text;
+    char* zero;
+    if (*at == '-') ++at;
+    zero = at;
+    while (*zero == '0') ++zero;
+    if (zero == at) return;
+    if (*zero == '.' || !*zero) /* one zero stays directly before the point, or as the whole number */
+        memmove(at + 1, zero, strlen(zero) + 1);
+    else
+        memmove(at, zero, strlen(zero) + 1);
+}
+static int type_number(GuiEditor* editor, const GuiThemeKey* key, const char* text) {
+    int dropped = 0;
+    for (; *text; ++text) {
+        size_t n = strlen(editor->text), digits = 0;
+        const char* dot = strchr(editor->text, '.');
+        const char* c;
+        char ch = *text;
+        if (n + 1 >= sizeof editor->text) break;
+        for (c = editor->text; *c; ++c) digits += *c >= '0' && *c <= '9';
+        if (ch == '-' && !n && key->lo < 0)
+            editor->text[n++] = ch;
+        else if (ch == '.' && !key->whole && !dot)
+            editor->text[n++] = ch;
+        else if (ch >= '0' && ch <= '9' && !(dot && (size_t)((editor->text + n) - (dot + 1)) >= 2) &&
+                 (key->whole || digits < 3))
+            editor->text[n++] = ch;
+        else {
+            dropped = 1;
+            continue;
+        }
+        editor->text[n] = 0;
+        trim_zeros(editor->text);
+    }
+    return dropped;
+}
 void gui_editor_type(GuiEditor* editor, const char* text) {
+    const GuiThemeKey* key = gui_editor_key_of(editor, editor->row);
     size_t n = strlen(editor->text), add = strlen(text);
     if (!editor->typing || strchr(text, '\n')) return;
+    if (key && key->type == GUI_KEY_TEXT && key->numeric) {
+        if (type_number(editor, key, text)) {
+            if (key->whole)
+                snprintf(editor->note, sizeof editor->note,
+                         snx_tr("Only the digits of a whole number from %g to %g"), key->lo, key->hi);
+            else
+                snprintf(editor->note, sizeof editor->note,
+                         snx_tr("Only the digits of a number from %g to %g, three digits and two decimals at most"),
+                         key->lo, key->hi);
+        }
+        return;
+    }
     if (n + add >= sizeof editor->text) add = sizeof editor->text - 1 - n;
     while (add && ((unsigned char)text[add] & 0xC0) == 0x80) --add; /* a UTF-8 character whole, or none of it */
     memcpy(editor->text + n, text, add);

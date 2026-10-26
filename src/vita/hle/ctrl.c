@@ -2,6 +2,7 @@
    Copyright 2026 the ScarletNX contributors */
 /* SceCtrl and SceTouch: the buttons, the sticks and the touch panels, read from the player's input when asked */
 #include "vita/hle/hle.h"
+#include "common/utilities/endian.h"
 #include "vita/platform/input.h"
 #include <string.h>
 
@@ -59,8 +60,7 @@ static uint32_t touch_peek(VitaProcess* p, VitaThread* t) {
         vita_write32(p, at + 12, down ? 1 : 0);
         if (down) {
             b[16] = 0, b[17] = 128; /* id, force */
-            b[18] = (unsigned char)x, b[19] = (unsigned char)(x >> 8);
-            b[20] = (unsigned char)y, b[21] = (unsigned char)(y >> 8);
+            snx_st_le16(b + 18, (uint16_t)x), snx_st_le16(b + 20, (uint16_t)y);
         }
     }
     return count;
@@ -77,7 +77,7 @@ static uint32_t touch_get_panel_info(VitaProcess* p, VitaThread* t) {
     uint16_t values[10] = {0, 0, 1919, height - 1, 0, 0, 1919, height - 1, 1, 128};
     unsigned char* b = vita_ptr(p, info);
     memset(b, 0, 32);
-    for (unsigned i = 0; i < 10; ++i) b[i * 2] = (unsigned char)values[i], b[i * 2 + 1] = (unsigned char)(values[i] >> 8);
+    for (unsigned i = 0; i < 10; ++i) snx_st_le16(b + i * 2, values[i]);
     return 0;
 }
 

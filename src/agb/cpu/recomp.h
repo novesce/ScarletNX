@@ -22,20 +22,17 @@ typedef struct {
 typedef struct {
     AgbBlock* blocks; /* from index 1, capacity of them, then their index: 2 * capacity slots (recomp.c) */
     size_t count, capacity;
-    void* handle;   /* the loaded native module */
-    void** patches; /* the modules of the blocks compiled at run time, <base>.<n>.so, without SNX_AGB_JIT */
-    size_t patch_count;
-    struct SnxArmExec* exec; /* with SNX_AGB_JIT, what compiles them in this process instead, no module or link */
+    void* handle;            /* the loaded native module */
+    struct SnxArmExec* exec; /* what compiles the blocks the module lacks, in this process at run time */
     size_t compiled;         /* the blocks the run compiled that the map did not name: its new hints */
-    char* base;     /* the cache path: <base>.so and <base>.map, which names the ROM's hash */
-    const char* cc; /* the host compiler that links the emitted objects */
-    int dirty;      /* blocks changed since the module was linked */
+    char* base;              /* the cache path: <base>.so and <base>.map, which names the ROM's hash */
+    int dirty;               /* blocks changed since the module was linked */
     /* the module file's size and time as this run loaded or linked it: one another process recompiled since numbers
        its functions its own way */
     unsigned long long module_size, module_time;
 } AgbRecomp;
 
-void agb_recomp_init(AgbRecomp* recomp, const char* base, const char* cc);
+void agb_recomp_init(AgbRecomp* recomp, const char* base);
 void agb_recomp_free(AgbRecomp* recomp);
 /* The AOT step: discovers the code the ROM entry reaches and builds the module. */
 int agb_recomp_build(AgbRecomp* recomp, AgbBoard* board, char* error, size_t error_size);
@@ -48,7 +45,7 @@ int agb_recomp_load_cache(AgbRecomp* recomp, AgbBoard* board, char* error, size_
 /* The block at pc in the given ISA, compiling one if the cache does not hold it yet. */
 const AgbBlock* agb_recomp_lookup(AgbRecomp* recomp, AgbBoard* board, uint32_t pc, int thumb, char* error,
                                   size_t error_size);
-/* Keeps the blocks compiled at run time for the next run: with SNX_AGB_JIT in the map alone, as hints (the module stays
-   as it is, and a recompile builds them into it), else folded into the cached module. */
+/* Keeps the blocks compiled at run time for the next run, in the map alone, as hints: the module stays as it is, and a
+   recompile builds them into it. */
 int agb_recomp_save(AgbRecomp* recomp, AgbBoard* board, char* error, size_t error_size);
 #endif

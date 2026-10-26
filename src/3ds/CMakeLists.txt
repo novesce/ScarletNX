@@ -48,68 +48,27 @@ foreach(target snx_ctr_memory snx_ctr_loader snx_ctr_cpu snx_ctr_process snx_ctr
     set_target_properties(${target} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
     target_compile_options(${target} PRIVATE -Wall -Wextra -Werror=missing-prototypes)
 endforeach()
-# The driver: the offline compiler and the runner, and its command line (runtime/main.c's snx_ctr_main), which is
-# scarletnx-3ds's own program, or in a build where scarletnx is also this driver (SNX_MULTICALL, src/multicall) part
-# of this library, the name scarletnx-3ds a link to scarletnx
-add_library(snx_ctr_program STATIC)
+# The driver: the offline compiler and the runner, and its command line (runtime/main.c's snx_ctr_main), which
+# scarletnx runs as scarletnx-3ds (src/multicall). SNX_SOURCE_DIR: its checkout, where an older version kept work/
+# (snx_checkout)
+add_library(snx_ctr_program STATIC runtime/main.c)
 target_link_libraries(snx_ctr_program PUBLIC snx_ctr_board snx_ctr_loader)
 set_target_properties(snx_ctr_program PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
 target_compile_options(snx_ctr_program PRIVATE -Wall -Wextra -Werror=missing-prototypes)
-# its checkout, where an older version kept work/ (snx_checkout)
-set(ctr_main_definitions SNX_SOURCE_DIR="${PROJECT_SOURCE_DIR}" SNX_BUILD_DIR="${PROJECT_BINARY_DIR}")
-if(WIN32)
-    target_compile_definitions(snx_ctr_program PRIVATE _CRT_SECURE_NO_WARNINGS)
-    list(APPEND ctr_main_definitions _CRT_SECURE_NO_WARNINGS)
-endif()
-if(SNX_MULTICALL)
-    target_sources(snx_ctr_program PRIVATE runtime/main.c)
-    target_compile_definitions(snx_ctr_program PRIVATE ${ctr_main_definitions} SNX_MULTICALL)
-    set(SNX_CTR_PROGRAM "${PROJECT_BINARY_DIR}/scarletnx-3ds" PARENT_SCOPE) # what the tests run
-else()
-    add_executable(scarletnx-3ds runtime/main.c)
-    target_link_libraries(scarletnx-3ds PRIVATE snx_ctr_program)
-    target_compile_definitions(scarletnx-3ds PRIVATE ${ctr_main_definitions})
-    set_target_properties(scarletnx-3ds PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON
-        RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}")
-    target_compile_options(scarletnx-3ds PRIVATE -Wall -Wextra -Werror=missing-prototypes)
-    set(SNX_CTR_PROGRAM "$<TARGET_FILE:scarletnx-3ds>" PARENT_SCOPE)
-    # after each build the program is copied beside every 3DS game (recompiled/<title ID>/<title ID>), as scarletnx
-    # is beside every Switch game (cmake/deploy.cmake), so a runtime fix reaches them without recompiling. A sanitized
-    # test build's stays here
-    if(SNX_DEPLOY AND NOT (SNX_TEST_SANITIZERS AND BUILD_TESTING))
-        add_custom_command(TARGET scarletnx-3ds POST_BUILD
-            COMMAND "${CMAKE_COMMAND}" "-DCTR_RUNTIME=$<TARGET_FILE:scarletnx-3ds>" "-DGAMES=${SNX_RECOMPILED_DIR}"
-                    "-DWINDOWS=${WIN32}" "-DMACOS=${APPLE}" -P "${PROJECT_SOURCE_DIR}/cmake/deploy.cmake"
-            VERBATIM)
-    endif()
-    # Windows: the runtime's application manifest, as scarletnx has it (src/nx/runtime/driver/CMakeLists.txt). Its
-    # longPathAware lets the native linker start in a staging folder past MAX_PATH (aot/compiler.c), its UTF-8 code
-    # page lets a CIA's path hold any character
-    if(WIN32)
-        if(CMAKE_C_SIMULATE_ID STREQUAL "MSVC")
-            target_link_options(scarletnx-3ds PRIVATE
-                                "LINKER:/MANIFESTINPUT:${PROJECT_SOURCE_DIR}/src/common/platform/runtime.manifest")
-        else()
-            enable_language(RC)
-            target_sources(scarletnx-3ds PRIVATE "${PROJECT_SOURCE_DIR}/src/common/platform/runtime.rc")
-            target_include_directories(scarletnx-3ds PRIVATE
-                                       "$<$<COMPILE_LANGUAGE:RC>:${PROJECT_SOURCE_DIR}/src/common/platform>")
-        endif()
-    endif()
-endif()
+target_compile_definitions(snx_ctr_program PRIVATE SNX_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+                           SNX_BUILD_DIR="${PROJECT_BINARY_DIR}" $<$<BOOL:${WIN32}>:_CRT_SECURE_NO_WARNINGS>)
+# what the tests run
+set(SNX_CTR_PROGRAM "${PROJECT_BINARY_DIR}/scarletnx-3ds${CMAKE_EXECUTABLE_SUFFIX}" PARENT_SCOPE)
 include(GNUInstallDirs)
 include("${PROJECT_SOURCE_DIR}/cmake/llvm.cmake")
 if(NOT TARGET snx_arm_llvm)
     add_subdirectory("${PROJECT_SOURCE_DIR}/src/common/cpu/arm" ctr-arm-backend)
 endif()
-set(ctr_runtime_source "${CMAKE_CURRENT_BINARY_DIR}/ctr-runtime-$<CONFIG>.c")
-add_custom_command(OUTPUT "${ctr_runtime_source}"
-    COMMAND "${CMAKE_COMMAND}" "-DINPUT=$<TARGET_FILE:snx_arm_rt>" "-DOUTPUT=${ctr_runtime_source}"
-        -P "${PROJECT_SOURCE_DIR}/cmake/ctr-runtime.cmake"
-    DEPENDS snx_arm_rt "${PROJECT_SOURCE_DIR}/cmake/ctr-runtime.cmake" VERBATIM)
-# The offline compiler is part of the driver, as the Switch driver's recompiler is part of scarletnx
-target_sources(snx_ctr_program PRIVATE aot/compiler.c aot/discover.c "${ctr_runtime_source}")
-target_link_libraries(snx_ctr_program PUBLIC snx_arm_llvm)
+# The offline compiler is part of the driver, as the Switch driver's recompiler is part of scarletnx. The LLVM backend
+# (snx_llvm, which the Switch driver's tree, the GNU ABI runtime's or the top level configures) links its objects and
+# their helpers (armlib.c) with its own linker, and compiles the blocks the static module lacks at run time (exec.c)
+target_sources(snx_ctr_program PRIVATE aot/compiler.c aot/discover.c)
+target_link_libraries(snx_ctr_program PUBLIC snx_arm_llvm snx_llvm)
 # The compiler loads the LLVM toolchain's own libraries (including its z3)
 # at startup: resolve them without a caller-provided environment. A static
 # LLVM (SNX_LLVM_SHARED off, cmake/llvm.cmake) has none to load.
@@ -142,19 +101,9 @@ if(SNX_LLVM_SHARED)
         target_link_options(snx_ctr_program INTERFACE "-Wl,-rpath,${ctr_llvm_rpath}")
     endif()
 endif()
-target_compile_definitions(snx_ctr_program PRIVATE "SNX_CTR_HOST_CC=\"${CMAKE_C_COMPILER}\"")
 add_library(snx_ctr_native STATIC aot/load.c)
 target_link_libraries(snx_ctr_native PUBLIC snx_ctr_process ${CMAKE_DL_LIBS})
 set_target_properties(snx_ctr_native PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
 target_compile_options(snx_ctr_native PRIVATE -Wall -Wextra -Werror=missing-prototypes)
 target_sources(snx_ctr_program PRIVATE aot/run.c aot/jit.c)
-# the run-time compiler for the blocks the static module lacks: the LLVM backend's executor (exec.c, in snx_llvm, which
-# the Switch driver's build defines)
-if(TARGET snx_llvm)
-    target_link_libraries(snx_ctr_program PUBLIC snx_llvm)
-    target_compile_definitions(snx_ctr_program PRIVATE SNX_CTR_JIT)
-endif()
 target_link_libraries(snx_ctr_program PUBLIC snx_ctr_native)
-if(NOT SNX_MULTICALL)
-    install(TARGETS scarletnx-3ds RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-endif()

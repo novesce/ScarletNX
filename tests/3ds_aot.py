@@ -242,17 +242,18 @@ def thread_program():
 
 
 def descriptor_offset(blob):
-    # Locate the exported descriptor in a little-endian ELF64 test artifact.
-    assert blob[:6] == b'\x7fELF\x02\x01'
-    eh = struct.unpack_from('<16sHHIQQQIHHHHHH', blob)
-    sections = [struct.unpack_from('<IIQQQQIIQQ', blob, eh[6] + i * eh[11]) for i in range(eh[12])]
+    # Locate the exported descriptor in an ELF64 test artifact, in the byte order the host's module has.
+    assert blob[:5] == b'\x7fELF\x02' and blob[5] in (1, 2)
+    order = '<' if blob[5] == 1 else '>'
+    eh = struct.unpack_from(order + '16sHHIQQQIHHHHHH', blob)
+    sections = [struct.unpack_from(order + 'IIQQQQIIQQ', blob, eh[6] + i * eh[11]) for i in range(eh[12])]
     for section in sections:
         if section[1] != 11:  # SHT_DYNSYM
             continue
         strings = sections[section[6]]
         names = blob[strings[4] : strings[4] + strings[5]]
         for at in range(section[4], section[4] + section[5], section[9]):
-            symbol = struct.unpack_from('<IBBHQQ', blob, at)
+            symbol = struct.unpack_from(order + 'IBBHQQ', blob, at)
             name = names[symbol[0] :].split(b'\0', 1)[0]
             if name == b'snx_ctr_module_v1':
                 storage = sections[symbol[3]]

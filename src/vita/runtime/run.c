@@ -115,7 +115,7 @@ static void report_stack(VitaProcess* p, const VitaThread* t) {
         if (!s || !(s->flags & 1)) continue;
         bool call;
         if (w & 1) { /* Thumb: BL or BLX's second halfword, or BLX register */
-            uint32_t h = (uint32_t)p->mem[ret - 2] | (uint32_t)p->mem[ret - 1] << 8;
+            uint32_t h = vita_read16(p, ret - 2);
             call = (h & 0xd000) == 0xd000 || (h & 0xd000) == 0xc000 || (h & 0xff87) == 0x4780;
         } else {
             uint32_t i = vita_read32(p, ret - 4);

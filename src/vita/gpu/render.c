@@ -16,6 +16,7 @@
 #include "vita/gpu/rgb24_spv.h"
 #include "vita/gpu/swizzle_spv.h"
 #include "vita/gpu/yuv_spv.h"
+#include "common/utilities/endian.h"
 #include "snx_settings.h"
 #include <inttypes.h>
 #include <stdarg.h>
@@ -735,9 +736,10 @@ static Shader* shader_for(struct VitaRender* r, VitaProcess* p, void** slot, uin
     char error[256];
     UsseShader out;
     if (g_settings.vita_shader_corpus[0] &&
-        !usse_corpus_write(g_settings.vita_shader_corpus, vita_ptr(p, program), gxp_u32(vita_ptr(p, program + 8)), hints))
+        !usse_corpus_write(g_settings.vita_shader_corpus, vita_ptr(p, program), snx_ld_le32(vita_ptr(p, program + 8)),
+                           hints))
         once(r, 15, "cannot write the shader corpus in %s", g_settings.vita_shader_corpus);
-    if (!usse_translate(vita_ptr(p, program), gxp_u32(vita_ptr(p, program + 8)), hints, r->vk->preserve_infnan, &out,
+    if (!usse_translate(vita_ptr(p, program), snx_ld_le32(vita_ptr(p, program + 8)), hints, r->vk->preserve_infnan, &out,
                         error, sizeof error)) {
         printf("gxm: the program at 0x%08" PRIx32 " is not drawn: %s\n", program, error);
         s->failed = true;
@@ -945,6 +947,15 @@ static bool texture_format(const VitaVk* v, uint32_t format, VkFormat* vk, unsig
     }
     return false;
 }
+/* push constants of size bytes (at most 128, which every device takes), all 32-bit words: the device reads them as it
+   reads memory, little-endian, so a big-endian host swaps them */
+static void push_constants(VkCommandBuffer cb, VkPipelineLayout layout, VkShaderStageFlags stages, const void* data,
+                           uint32_t size) {
+    uint32_t words[32];
+    memcpy(words, data, size);
+    snx_le32_array(words, size / 4);
+    vkCmdPushConstants(cb, layout, stages, 0, size, words);
+}
 /* One of the compute shaders on source (from base, which the storage buffer alignment allows) into destination's
    [at, at + size), with its push constants and count invocations, between barriers: the writes before it (the
    guest's, the GPU's) and the reads after. False without a descriptor set */
@@ -966,7 +977,7 @@ static bool compute(struct VitaRender* r, VkCommandBuffer cb, VkPipeline pipelin
     memory_barrier(cb);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, r->swizzle_layout, 0, 1, &set, 0, NULL);
-    vkCmdPushConstants(cb, r->swizzle_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, params_size, params);
+    push_constants(cb, r->swizzle_layout, VK_SHADER_STAGE_COMPUTE_BIT, params, params_size);
     vkCmdDispatch(cb, (count + 63) / 64, 1, 1);
     memory_barrier(cb);
     return true;
@@ -1409,7 +1420,7 @@ void vita_render_draw(VitaProcess* p, GxmContext* c, uint32_t primitive, uint32_
         scissor = (VkRect2D){{(int32_t)x0, (int32_t)y0}, {x1 > x0 ? x1 - x0 : 0, y1 > y0 ? y1 - y0 : 0}};
     }
     vkCmdSetScissor(cb, 0, 1, &scissor);
-    vkCmdPushConstants(cb, r->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof push, &push);
+    push_constants(cb, r->layout, VK_SHADER_STAGE_VERTEX_BIT, &push, sizeof push);
     for (unsigned i = 0; i < vp->stream_count; ++i) {
         VkDeviceSize at = 0;
         const Import* m = c->streams[i] ? buffer_of(r, p, c->streams[i], 1, &at) : NULL;

@@ -5,31 +5,14 @@
    (the ARM11 profile, checked memory, which compares each instruction's bytes with the ones compiled when it runs) by
    the ARM backend's executor, and kept by its pc. */
 #include "3ds/aot/ctr_jit.h"
-#include <stdio.h>
-#include <stdlib.h>
-#ifndef SNX_CTR_JIT /* a build without the LLVM backend's executor (snx_llvm, built with the Switch runtime) */
-SnxCtrJit* snx_ctr_jit_new(SnxCtrProcess* process, char* error, size_t error_size) {
-    (void)process;
-    snprintf(error, error_size, "this build has none");
-    return NULL;
-}
-uint64_t snx_ctr_jit_compiled(const SnxCtrJit* jit) {
-    (void)jit;
-    return 0;
-}
-void snx_ctr_jit_free(SnxCtrJit* jit) { (void)jit; }
-size_t snx_ctr_jit_save_hints(SnxCtrJit* jit, const char* directory) {
-    (void)jit;
-    (void)directory;
-    return 0;
-}
-#else
 #include "3ds/aot/ctr_module.h"
 #include "3ds/aot/ctr_discover.h"
 #include "3ds/runtime/internal.h"
 #include "common/cpu/arm/exec.h"
 #include "common/utilities/common.h"
 #include "snx_settings.h"
+#include <stdio.h>
+#include <stdlib.h>
 
 typedef struct {
     uint64_t key; /* (pc << 1 | thumb) + 1, 0 for an empty slot */
@@ -139,4 +122,3 @@ void snx_ctr_jit_free(SnxCtrJit* j) {
     free(j->slots);
     free(j);
 }
-#endif

@@ -50,16 +50,16 @@ if(SNX_TEST_SANITIZERS)
         # the Switch runtime: its components, the shader translator and the Vulkan backend
         scarletnx snx_core snx_kernel snx_hle snx_video snx_gpu snx_platform snx_shader snx_vk
         # the GNU ABI runtime
-        scarletnx-gnuabi scarletnx-gnuabi-run snx_gnuabi_program
+        scarletnx-gnuabi
         # the 3DS runtime
         scarletnx-3ds snx_ctr_program snx_ctr_board snx_ctr_memory snx_ctr_loader snx_ctr_cpu snx_ctr_process snx_ctr_native
         snx_ctr_audio snx_ctr_gpu snx_ctr_gpu_reference
         # the Vita runtime, its loader and USSE translator
         scarletnx-vita snx_vita_program snx_vita_loader snx_vita_usse snx-vita-usse
         # the GBA board and its runner
-        scarletnx-agb scarletnx-agb-run
-        # scarletnx's main where it is the other drivers too
-        snx_multicall
+        scarletnx-agb snx_agb_program
+        # the Switch driver's entry, which scarletnx runs as it runs the others
+        snx_switch_program
         # the menu, its splash, icon and pads
         scarletnx-gui snx_gui_support snx_gui_ui snx_i18n snx_gui_languages snx_gui_languages_test snx_splash snx-test-splash
         snx_window_icon snx-test-window-icon snx_pad_sdl snx_gui_pad
@@ -250,7 +250,12 @@ if(TARGET snx_ctr_board)
             if (NOT APPLE)
                 add_test(NAME 3ds_static_pipeline COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/3ds_aot.py"
                     "${SNX_CTR_PROGRAM}" $<TARGET_FILE:snx-test-3ds-native>)
-                set_tests_properties(3ds_static_pipeline PROPERTIES TIMEOUT 180)
+                # about 20 s here, 4 minutes under a cross build's emulator
+                if(CMAKE_CROSSCOMPILING_EMULATOR)
+                    set_tests_properties(3ds_static_pipeline PROPERTIES TIMEOUT 900)
+                else()
+                    set_tests_properties(3ds_static_pipeline PROPERTIES TIMEOUT 180)
+                endif()
             endif()
             add_test(NAME 3ds_decrypt COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/3ds_decrypt.py"
                 "${SNX_CTR_PROGRAM}")
@@ -285,15 +290,6 @@ if(SNX_TEST_SANITIZERS AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
         endif()
     endforeach()
 endif()
-# Under a cross build's emulator, the 3DS AOT links its module with the compiler built into the driver (its path on the
-# build machine, the target's own when installed there), whose linker doesn't take the target's objects
-if(CMAKE_CROSSCOMPILING_EMULATOR)
-    foreach(snx_test 3ds_static_pipeline 3ds_extract)
-        if(TEST ${snx_test})
-            set_tests_properties(${snx_test} PROPERTIES DISABLED TRUE)
-        endif()
-    endforeach()
-endif()
 
 add_executable(snx-test-arm-profile arm_profile.c "${PROJECT_SOURCE_DIR}/src/common/cpu/arm/a32.c"
     "${PROJECT_SOURCE_DIR}/src/common/cpu/arm/thumb_decode.c"
@@ -316,11 +312,6 @@ add_executable(snx-test-game-stamp game_stamp.c)
 snx_test_target(snx-test-game-stamp 99)
 target_link_libraries(snx-test-game-stamp PRIVATE scarletnx-common)
 add_test(NAME game_stamp COMMAND snx-test-game-stamp)
-# the C compiler a 3DS game's native link runs: the build's own, else a clang beside the program, else one on PATH
-add_executable(snx-test-find-compiler find_compiler.c)
-snx_test_target(snx-test-find-compiler 99)
-target_link_libraries(snx-test-find-compiler PRIVATE scarletnx-common)
-add_test(NAME find_compiler COMMAND snx-test-find-compiler)
 if(SNX_TEST_ARM_AOT)
     include(arm_checked.cmake)
 endif()
@@ -1746,6 +1737,9 @@ if(UNIX)
     target_link_libraries(snx-test-memory-alias PRIVATE SDL3::SDL3 ${CMAKE_DL_LIBS})
     add_test(NAME memory_alias COMMAND snx-test-memory-alias)
     set_tests_properties(memory_alias PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
+    # the same calls with the alias pool off (alias_pool=0): views are copies, as on Windows
+    add_test(NAME memory_alias_copies COMMAND snx-test-memory-alias --copies)
+    set_tests_properties(memory_alias_copies PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
     # GPU-owned memory over the real pool and traps, owners whose GPU copy is host memory (77 without traps)
     add_executable(snx-test-memory-own memory_own.c
         "${PROJECT_SOURCE_DIR}/src/nx/memory/mem.c" "${PROJECT_SOURCE_DIR}/src/nx/memory/own.c"
@@ -1791,7 +1785,7 @@ add_test(NAME unattended_script COMMAND snx-test-unattended-script)
 add_executable(snx-test-platform-log platform_log.c "${PROJECT_SOURCE_DIR}/src/common/filesystem/host.c")
 snx_test_target(snx-test-platform-log 11)
 add_test(NAME platform_log COMMAND snx-test-platform-log "${CMAKE_CURRENT_BINARY_DIR}")
-if(NOT WIN32)
+if(NOT WIN32 AND TARGET SDL3::SDL3) # SDL3 is there with a driver that draws (cmake/dependencies.cmake)
     # written-page tracking, decommit, pread, file maps, replace, folders, waits and threads (platform/plat_posix.c and
     # plat_sdl.c)
     add_executable(snx-test-platform-posix platform_posix.c "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/plat_sdl.c"

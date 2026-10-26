@@ -316,15 +316,18 @@ u32 svc_unmap_process_memory(u64 dst, u32 process, u64 src, u64 size) {
 }
 /* A line a flush names through a view or in the code it shows changed when its bytes differ from the view's
    snapshot. A mod may flush its whole view after a few writes (exlaunch's RwPages), as a cache line that didn't
-   change costs the console nothing: here such a line keeps its compiled code */
+   change costs the console nothing: here such a line keeps its compiled code. Without the pool the view is a copy, so
+   its bytes are what the mod wrote: copy the line into the code before that line is compiled again */
 int svc_code_line(u64 addr, u64* code) {
-    int i, r = -1;
+    int i, r = -1, copies = !mem_pool_active();
     addr &= ~(u64)63;
     *code = addr;
     pm_lock(&g_host.svcmem.views_lk);
     for (i = 0; i < KCODEVIEW_MAX; i++) {
         KCodeView* v = &g_hle.svcmem.views[i];
         u64 at;
+        u8 *src, *view;
+        int changed, src_changed;
         if (!v->size) continue;
         if (addr - v->dst < v->size)
             at = addr - v->dst;
@@ -333,9 +336,20 @@ int svc_code_line(u64 addr, u64* code) {
         else
             continue;
         *code = v->src + at;
-        if (!v->snap || at + 64 > v->size) break; /* nothing kept to compare with: it may have changed */
-        r = memcmp(v->snap + at, GP(*code), 64) != 0;
-        if (r) memcpy(v->snap + at, GP(*code), 64);
+        if (!v->snap || at + 64 > v->size) { /* nothing kept to compare with: it may have changed */
+            if (copies) {
+                u64 n = v->size - at < 64 ? v->size - at : 64;
+                if (n) memcpy(GP(v->src + at), GP(v->dst + at), (size_t)n);
+            }
+            break;
+        }
+        src = GP(v->src + at);
+        view = copies ? GP(v->dst + at) : src;
+        changed = memcmp(v->snap + at, view, 64) != 0;
+        src_changed = view != src && memcmp(v->snap + at, src, 64) != 0;
+        if (changed && view != src) memcpy(src, view, 64); /* what the view wrote is in the code now */
+        r = changed || src_changed;
+        if (r) memcpy(v->snap + at, src, 64); /* what is there to run */
         break;
     }
     pm_unlock(&g_host.svcmem.views_lk);

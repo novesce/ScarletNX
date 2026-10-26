@@ -36,6 +36,8 @@ typedef struct {
 } VitaModule;
 
 bool vita_module_compatible(const VitaModule* module, const VitaImage* image);
+/* Whether the descriptor's fields before its count are those this build compiles for image */
+bool vita_module_fields(const VitaModule* module, const VitaImage* image);
 /* The block at key (address | Thumb), NULL when the module lacks it */
 SnxArmBlock vita_module_block(const VitaModule* module, uint32_t key);
 
@@ -46,6 +48,10 @@ typedef struct {
 /* The module at path, opened and checked against image. Trusted native code: the driver compiled it itself */
 bool vita_native_open(const char* path, const VitaImage* image, VitaNative* native, char* error, size_t error_size);
 void vita_native_close(VitaNative* native);
+/* Whether the module at path was compiled for image by this build, read from its descriptor in the file without
+   loading it: the driver compiles first when it was not, so it loads a module once (a library unloaded and loaded
+   again by its path can be the old one, as under the Tracy client, whose dlclose does nothing) */
+bool vita_module_current(const char* path, const VitaImage* image);
 
 /* The hints (VITA_HINTS_SUFFIX): the blocks in folder's file, ascending and each once (count 0 and NULL for none, the
    caller's to free); and the file written with keys (sorted in place): how many it holds, each once, SIZE_MAX when it

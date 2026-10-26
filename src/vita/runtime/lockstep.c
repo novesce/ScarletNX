@@ -122,8 +122,8 @@ static unsigned group(VitaProcess* p, uint32_t pc, bool thumb, unsigned* instruc
     }
     unsigned units = 0, count = 0, covered = 0;
     do {
-        uint16_t h1 = (uint16_t)(p->mem[pc + units * 2] | p->mem[pc + units * 2 + 1] << 8);
-        uint16_t h2 = (uint16_t)(p->mem[pc + units * 2 + 2] | p->mem[pc + units * 2 + 3] << 8);
+        uint16_t h1 = vita_read16(p, pc + units * 2);
+        uint16_t h2 = vita_read16(p, pc + units * 2 + 2);
         SnxThumb t;
         unsigned len = snx_thumb_decode_profile(SNX_ARM_PROFILE_A9, h1, h2, &t);
         if (!len) len = (h1 >> 11) >= 0x1d ? 2 : 1;
@@ -147,7 +147,7 @@ static SnxArmBlock compile(VitaProcess* p, uint32_t pc, bool thumb, unsigned uni
     uint32_t words[8];
     for (unsigned i = 0; i < units; ++i) {
         if (thumb)
-            halves[i] = (uint16_t)(p->mem[pc + i * 2] | p->mem[pc + i * 2 + 1] << 8);
+            halves[i] = vita_read16(p, pc + i * 2);
         else
             words[i] = vita_read32(p, pc + i * 4);
     }
@@ -233,7 +233,7 @@ VitaLockstep vita_lockstep_step(VitaProcess* p, VitaThread* t) {
            units);
     for (unsigned i = 0; i < units; ++i)
         printf(" %0*x", thumb ? 4 : 8,
-               thumb ? (unsigned)(p->mem[pc + i * 2] | p->mem[pc + i * 2 + 1] << 8) : (unsigned)vita_read32(p, pc + i * 4));
+               thumb ? (unsigned)vita_read16(p, pc + i * 2) : (unsigned)vita_read32(p, pc + i * 4));
     printf(")%s%s\n", e != UC_ERR_OK ? ", Unicorn: " : "", e != UC_ERR_OK ? uc_strerror(e) : "");
     if (c->exit != SNX_ARM_OK) printf("  backend exit %u syndrome 0x%08" PRIx32 "\n", (unsigned)c->exit, c->syndrome);
     for (unsigned i = 0; i < 16; ++i)

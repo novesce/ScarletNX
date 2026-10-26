@@ -27,26 +27,12 @@ target_compile_definitions(scarletnx-gnuabi PRIVATE _CRT_SECURE_NO_WARNINGS)
 if(WIN32)
     target_link_libraries(scarletnx-gnuabi PRIVATE bcrypt)
 endif()
-# The command line (runtime/main.c's snx_gnuabi_main): scarletnx-gnuabi's own program, or in a build where scarletnx
-# is also this runtime (SNX_MULTICALL, src/multicall) a library of its own, the name scarletnx-gnuabi a link to
-# scarletnx
-if(SNX_MULTICALL)
-    add_library(snx_gnuabi_program STATIC runtime/main.c)
-    set(gnuabi_main snx_gnuabi_program)
-    set(SNX_GNUABI_PROGRAM "${PROJECT_BINARY_DIR}/scarletnx-gnuabi")
-    target_link_libraries(snx_gnuabi_program PUBLIC scarletnx-gnuabi)
-    target_compile_definitions(snx_gnuabi_program PRIVATE SNX_MULTICALL)
-else()
-    add_executable(scarletnx-gnuabi-run runtime/main.c)
-    set(gnuabi_main scarletnx-gnuabi-run)
-    set(SNX_GNUABI_PROGRAM "$<TARGET_FILE:scarletnx-gnuabi-run>")
-    target_link_libraries(scarletnx-gnuabi-run PRIVATE scarletnx-gnuabi)
-    set_target_properties(scarletnx-gnuabi-run PROPERTIES OUTPUT_NAME scarletnx-gnuabi
-        RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}")
-endif()
-# its checkout, where an older version kept the default sysroot, linux/ (snx_checkout)
-target_compile_definitions(${gnuabi_main} PRIVATE SNX_SOURCE_DIR="${PROJECT_SOURCE_DIR}" SNX_BUILD_DIR="${PROJECT_BINARY_DIR}")
-set_target_properties(${gnuabi_main} PROPERTIES C_STANDARD 23 C_STANDARD_REQUIRED ON)
+# The command line (runtime/main.c's snx_gnuabi_main), which scarletnx runs as scarletnx-gnuabi (src/multicall). Its
+# checkout, where an older version kept the default sysroot, linux/ (snx_checkout)
+target_sources(scarletnx-gnuabi PRIVATE runtime/main.c)
+target_compile_definitions(scarletnx-gnuabi PRIVATE SNX_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+                           SNX_BUILD_DIR="${PROJECT_BINARY_DIR}")
+set(SNX_GNUABI_PROGRAM "${PROJECT_BINARY_DIR}/scarletnx-gnuabi${CMAKE_EXECUTABLE_SUFFIX}") # what the tests run
 if(BUILD_TESTING)
     add_executable(snx-test-gnuabi-runtime "${PROJECT_SOURCE_DIR}/tests/gnuabi_runtime.c")
     target_link_libraries(snx-test-gnuabi-runtime PRIVATE scarletnx-gnuabi)
@@ -86,10 +72,6 @@ if(BUILD_TESTING)
     endif()
 endif()
 
-include(GNUInstallDirs)
-if(NOT SNX_MULTICALL)
-    install(TARGETS scarletnx-gnuabi-run RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-endif()
 if(COMMAND snx_sanitizer_path) # tests/CMakeLists.txt: this folder's tests
     snx_test_sanitize(snx-test-gnuabi-runtime snx-test-gnuabi-vfs snx-test-gnuabi-hostfs snx-test-gnuabi-network)
     snx_sanitizer_path()

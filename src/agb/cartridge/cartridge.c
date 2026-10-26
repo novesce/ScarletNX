@@ -2,6 +2,7 @@
    Copyright 2026 the mGBA contributors
    Copyright 2026 the ScarletNX contributors */
 #include "agb/cartridge/cartridge.h"
+#include "common/utilities/endian.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,8 +32,7 @@ int agb_cartridge_load(AgbCartridge* cartridge, const void* image, size_t size, 
         snprintf(error, error_size, "ROM image is %zu bytes: larger than the 32 MiB a GBA cartridge holds", size);
         return -1;
     }
-    cartridge->entry =
-        (uint32_t)bytes[0] | (uint32_t)bytes[1] << 8 | (uint32_t)bytes[2] << 16 | (uint32_t)bytes[3] << 24;
+    cartridge->entry = snx_ld_le32(bytes);
     if ((cartridge->entry & 0xFF000000u) != 0xEA000000u)
         return fail(error, error_size, "ROM header does not start with an ARM branch");
     /* the branch target as a ROM offset: 8 past the branch word, plus the sign extended imm24 shifted left 2 */

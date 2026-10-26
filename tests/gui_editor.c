@@ -286,9 +286,10 @@ int main(void) {
             char text[8];
         } Values;
         Values values = {0, ""};
-        const GuiThemeKey form[] = {
-            {"Display", "fullscreen", GUI_KEY_WORD, offsetof(Values, word), sizeof(int), words, 0, "1 = fullscreen"},
-            {"Display", "language", GUI_KEY_TEXT, offsetof(Values, text), 8, NULL, 0, "0 Japanese, 1 English"}};
+        const GuiThemeKey form[] = {{"Display", "fullscreen", GUI_KEY_WORD, offsetof(Values, word), sizeof(int), words,
+                                     0, "1 = fullscreen", 0, 0, 0, 0, NULL},
+                                    {"Display", "language", GUI_KEY_TEXT, offsetof(Values, text), 8, NULL, 0,
+                                     "0 Japanese, 1 English", 0, 0, 0, 0, NULL}};
         gui_editor_form(&e, form, 2, &values, NULL);
         assert(gui_editor_rows(&e) == 2 && gui_editor_key_of(&e, 0) == &form[0] && !gui_editor_key_of(&e, 2));
         gui_editor_label(&e, 0, label, sizeof label);
@@ -321,8 +322,9 @@ int main(void) {
         struct {
             char shown[16];
         } object = {"Default"};
-        const GuiThemeKey rows[] = {{"", "Theme", GUI_KEY_ACTION, 0, sizeof object.shown, NULL, 0, "the theme"},
-                                    {"", "Theme Editor", GUI_KEY_ACTION, 0, 0, NULL, 0, "the editor"}};
+        const GuiThemeKey rows[] = {
+            {"", "Theme", GUI_KEY_ACTION, 0, sizeof object.shown, NULL, 0, "the theme", 0, 0, 0, 0, NULL},
+            {"", "Theme Editor", GUI_KEY_ACTION, 0, 0, NULL, 0, "the editor", 0, 0, 0, 0, NULL}};
         GuiEditor e;
         char label[64], value[32];
         gui_editor_form(&e, rows, 2, &object, NULL);

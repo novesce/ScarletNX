@@ -12,7 +12,8 @@
 # A copy named after a game works like the bare runtime: games/MyGame.AppImage (or games/MyGame) loads
 # games/MyGame_code.so, since the runtime takes its name and folder from $APPIMAGE.
 #
-# An install of the Linux runtime alone (no scarletnx, only scarletnx-gnuabi) makes an AppImage of it: it runs Linux
+# An install of the Linux runtime alone (scarletnx without the Switch driver, scarletnx-switch, and scarletnx-gnuabi a
+# link to it) makes an AppImage of it: it runs Linux
 # AArch64 programs (`ScarletNX-linux-ppc64.AppImage ./program`), and its checks run one.
 #
 # The cross builds bundle in the target's container (SKIP_APPIMAGE=1) and make the AppImage on the build machine
@@ -30,7 +31,7 @@ export OUTNAME=ScarletNX-linux-$ARCH.AppImage
 # The AppImage's program: the driver, else the Linux runtime when it is all the install has
 bin=/usr/bin
 main=scarletnx
-if [ ! -e "$bin/scarletnx" ] && [ -e "$bin/scarletnx-gnuabi" ]; then
+if [ ! -e "$bin/scarletnx-switch" ] && [ -e "$bin/scarletnx-gnuabi" ]; then
     main=scarletnx-gnuabi
 fi
 # quick-sharun copies ICON to .DirIcon as well
@@ -62,7 +63,7 @@ if [ "$main" = scarletnx ]; then
     quick-sharun "$bin/scarletnx" "$bin/scarletnx-switch" "$bin/scarletnx-3ds" "$bin/scarletnx-vita" \
         "$bin/scarletnx-agb" "$bin/scarletnx-gnuabi"
 else
-    quick-sharun "$bin/scarletnx-gnuabi"
+    quick-sharun "$bin/scarletnx" "$bin/scarletnx-gnuabi"
 fi
 
 # The licenses travel with the AppImage: the runtime's and those of the libraries built into it (`cmake --install` put
@@ -73,8 +74,7 @@ if [ ! -d "$appdir/lib" ]; then
     echo "quick-sharun left no $appdir/lib: where it puts the bundled libraries has changed" >&2
     exit 1
 fi
-# each driver the launcher runs, a name of scarletnx's where it is that driver too (SNX_MULTICALL) or a program of its
-# own (scarletnx-agb): sharun has to start it under its own name
+# each driver the launcher runs, a name of scarletnx's (SNX_MULTICALL): sharun has to start it under its own name
 if [ "$main" = scarletnx ]; then
     for program in scarletnx-3ds scarletnx-vita scarletnx-agb scarletnx-gnuabi; do
         out=$("$appdir/bin/$program" --help 2>&1 || true)

@@ -3,6 +3,7 @@
    Copyright 2026 the ScarletNX contributors */
 #include "agb/apu/apu.h"
 #include "agb/board/board.h"
+#include "common/utilities/endian.h"
 #include <string.h>
 
 /* The PSG runs at 4 MiHz and the mixer samples it every 512 cycles, 32768 times a second. The frame
@@ -61,7 +62,7 @@ uint16_t agb_apu_read(AgbBoard* board, uint32_t offset) {
     }
     if (offset >= 0x090 && offset <= 0x09E) {
         uint32_t bank = offset >= 0x098, index = offset & 7;
-        return (uint16_t)(apu->wave_ram[bank][index] | apu->wave_ram[bank][index + 1] << 8);
+        return snx_ld_le16(&apu->wave_ram[bank][index]);
     }
     return 0;
 }
@@ -87,7 +88,7 @@ uint16_t agb_apu_written(AgbBoard* board, uint32_t offset) {
     }
     if (offset >= 0x090 && offset <= 0x09E) {
         uint32_t bank = apu->cnt_l[2] & 0x20 ? 1 : 0, index = offset & 7; /* where agb_apu_write puts it */
-        return (uint16_t)(apu->wave_ram[bank][index] | apu->wave_ram[bank][index + 1] << 8);
+        return snx_ld_le16(&apu->wave_ram[bank][index]);
     }
     return 0;
 }
@@ -157,8 +158,7 @@ void agb_apu_write(AgbBoard* board, uint32_t offset, uint16_t value) {
     if (offset >= 0x090 && offset <= 0x09E) {
         uint32_t bank = apu->cnt_l[2] & 0x20 ? 1 : 0, index = offset & 7;
         if (apu->cnt_l[2] & 0x80) return; /* wave RAM is not writable while the channel plays */
-        apu->wave_ram[bank][index] = (uint8_t)value;
-        apu->wave_ram[bank][index + 1] = (uint8_t)(value >> 8);
+        snx_st_le16(&apu->wave_ram[bank][index], value);
         return;
     }
     if (offset == 0x0A0 || offset == 0x0A2) {

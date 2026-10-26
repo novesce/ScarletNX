@@ -2907,7 +2907,7 @@ int main(int argc, char** argv) {
     }
     if (argc == 2 && !strcmp(argv[1], "--settings")) { /* as the runtime lists its settings */
         fputs("Display\tfullscreen\t0\tint\t0\t1\t1 = start in fullscreen\t\t0=0|1=1\n"
-              "Graphics\tresolution\t1\tfloat\t0.25\t4\tInternal 3D resolution\t\t\n"
+              "Graphics\tresolution\t1\tfloat\t0.25\t16\tInternal 3D resolution\t\t\n"
               "On-screen controls\tcontrols\t0\tint\t0\t1\tThe on-screen controls\tShow controls\t0=Off|1=On\n"
               "On-screen controls/Buttons\tcontrols_a_shown\t\tint\t0\t1\tA control drawn\tA\t0=Hidden|1=Shown\n"
               "On-screen controls/Buttons\tcontrols_b_shown\t\tint\t0\t1\tA control drawn\tB\t0=Hidden|1=Shown\n"
@@ -3602,17 +3602,47 @@ int main(int argc, char** argv) {
     key(&app, SDLK_ESCAPE);
     key(&app, SDLK_DOWN);
     key(&app, SDLK_RETURN);
-    /* a number typed, and nothing typed for the .ini's again */
+    /* a number typed; one equal to a whole number as that number; nothing typed the scale's default, shown */
     render(&app);
-    shows(&app, "- resolution 1 [default]", yellow); /* not picked: the default */
+    shows(&app, "- resolution    1 [default]", yellow); /* right in its field, not picked: the default */
     key(&app, SDLK_RETURN);
     typed(&app, "0.5");
+    render(&app);
+    shows(&app, "- resolution  0.5_", yellow); /* right in its field, the cursor in the fifth slot */
     key(&app, SDLK_RETURN);
     assert(setting_is(&app, "resolution", "0.5"));
     key(&app, SDLK_RETURN);
     for (int i = 0; i < 3; ++i) key(&app, SDLK_BACKSPACE);
+    typed(&app, "2.0");
     key(&app, SDLK_RETURN);
-    assert(!gui_settings_value(&app.settings, "resolution"));
+    assert(setting_is(&app, "resolution", "2"));
+    key(&app, SDLK_RETURN);
+    key(&app, SDLK_BACKSPACE);
+    key(&app, SDLK_RETURN);
+    assert(setting_is(&app, "resolution", "1"));
+    render(&app);
+    shows(&app, "- resolution    1", yellow); /* the default itself, not [default] */
+    /* past 4x and under 0.5x: the row's own warning line, while the value clamps to the nearest in range */
+    key(&app, SDLK_RETURN);
+    key(&app, SDLK_BACKSPACE);
+    typed(&app, "20");
+    key(&app, SDLK_RETURN);
+    assert(setting_is(&app, "resolution", "16") && strstr(app.editor.note, "Over 4x"));
+    render(&app); /* the row in its warning flash */
+    key(&app, SDLK_RETURN);
+    key(&app, SDLK_BACKSPACE);
+    key(&app, SDLK_BACKSPACE);
+    typed(&app, "0.05");
+    key(&app, SDLK_RETURN);
+    assert(setting_is(&app, "resolution", "0.25") && strstr(app.editor.note, "Under 0.5x"));
+    render(&app);
+    /* a scale that is no whole number and does not halve to 1 gets Eden's line */
+    key(&app, SDLK_RETURN);
+    for (int i = 0; i < 4; ++i) key(&app, SDLK_BACKSPACE);
+    typed(&app, "1.61");
+    key(&app, SDLK_RETURN);
+    assert(setting_is(&app, "resolution", "1.61") && strstr(app.editor.note, "Non-standard resolution"));
+    render(&app);
     key(&app, SDLK_ESCAPE);
     /* the game's menu's settings, named and worded as it shows them; a page's row opens the page, All first */
     {

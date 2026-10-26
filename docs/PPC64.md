@@ -53,9 +53,8 @@ ctest --preset linux-ppc64le-cross -j"$(nproc)"
 ```
 
 The target's `llvm-config` is a PowerPC program, so `scripts/cross-llvm-config.sh` runs it under qemu. The presets
-point pkg-config at the sysroot and set `QEMU_LD_PREFIX` for the tests. Three tests are skipped under the emulator:
-`3ds_static_pipeline` and `3ds_extract` link with the compiler path built into the driver, which is the build
-machine's, and `gui_process_tree` reads a resident size that qemu reports as zero.
+point pkg-config at the sysroot and set `QEMU_LD_PREFIX` for the tests. One test is skipped under the emulator:
+`gui_process_tree` reads a resident size that qemu reports as zero.
 
 ## Running a game under qemu
 
@@ -142,9 +141,12 @@ root is Debian ports' unstable:
 ```bash
 scripts/ppc64-sysroot.sh ppc64 .cache/sysroot-ppc64
 export SNX_SYSROOT=$PWD/.cache/sysroot-ppc64
-cmake --preset linux-ppc64-cross -DSNX_BUILD_NX=OFF -DSNX_BUILD_3DS=OFF -DSNX_BUILD_GUI=OFF
-cmake --build --preset linux-ppc64-cross --target scarletnx-gnuabi-run
+cmake --preset linux-ppc64-cross -DSNX_BUILD_NX=OFF -DSNX_BUILD_3DS=OFF -DSNX_BUILD_VITA=OFF -DSNX_BUILD_AGB=OFF \
+    -DSNX_BUILD_GUI=OFF
+cmake --build --preset linux-ppc64-cross --target scarletnx
 ```
+
+`scarletnx` is then the Linux runtime alone, and `scarletnx-gnuabi` a link to it.
 
 CI's `linux-ppc64` job builds it this way against that system root, made weekly, and runs the Linux runtime's tests
 (`gnuabi_*`, `endian`, `cas128`) under qemu-ppc64. Debian ports' unstable can break for a day, so the job may fail
@@ -193,6 +195,15 @@ cmake --preset linux-ppc64-elfv2-cross
 cmake --build --preset linux-ppc64-elfv2-cross
 ctest --preset linux-ppc64-elfv2-cross -j"$(nproc)"
 ```
+
+The Vita and Game Boy Advance runtimes are ported the same way. Their guests are little-endian Arm, and what reads or
+writes guest memory as a number goes through endian.h: `vita_read16`, `vita_read32` and their writes
+(`vita/runtime/process.h`) for a guest address, and `snx_ld_le32` and its kin for the loader's files, GXP programs,
+the HLE's structures and the GBA's bus, video memory and wave RAM. Network order and the trophy pack stay big-endian
+(`snx_ld_be32`). The Vita renderer's push constants are swapped to little-endian for the device, and the GBA's frame
+is a texture of packed 0xAABBGGRR words (`SDL_PIXELFORMAT_ABGR8888`) in either order. Their tests pass under
+qemu-ppc64, jsmolka's GBA test ROMs among them: their modules are linked by the backend's linker, as the Switch's are.
+No Vita or GBA game has run on a big-endian machine yet.
 
 The 3DS runtime is built too, as the AppImage carries every runtime, but it isn't ported: its board, services and
 GPU read the guest's memory as host numbers, so it doesn't run 3DS games on a big-endian host.

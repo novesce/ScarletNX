@@ -9,6 +9,7 @@
    are synchronous here) are numbers. Error codes and the unlock rules as Vita3K (GPL-2.0-or-later,
    modules/SceNpTrophy/SceNpTrophy.cpp) has them */
 #include "vita/hle/hle.h"
+#include "common/utilities/endian.h"
 #include "common/utilities/common.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,10 +63,6 @@ static Context* context_of(VitaProcess* p, uint32_t handle) {
 }
 
 /* ---- the trophy pack ---- */
-static uint32_t be32(const unsigned char* b) {
-    return (uint32_t)b[0] << 24 | (uint32_t)b[1] << 16 | (uint32_t)b[2] << 8 | b[3];
-}
-static uint64_t be64(const unsigned char* b) { return (uint64_t)be32(b) << 32 | be32(b + 4); }
 /* the value of attribute name in the element [at, end): its text up to the closing quote, into out */
 static bool attribute(const char* at, const char* end, const char* name, char* out, size_t size) {
     size_t n = strlen(name);
@@ -83,13 +80,13 @@ static bool attribute(const char* at, const char* end, const char* name, char* o
 /* TROPHY.TRP (big-endian: magic, version, size, entries, entry size, then from 0x40 each entry's name (32 bytes),
    offset and size) read for its TROPCONF.SFM's trophies */
 static uint32_t read_pack(const unsigned char* trp, size_t size, Context* c) {
-    if (size < 0x40 || be32(trp) != TRP_MAGIC) return SCE_NP_TROPHY_ERROR_INVALID_TRP_FILE_FORMAT;
-    uint32_t entries = be32(trp + 16), entry_size = be32(trp + 20);
+    if (size < 0x40 || snx_ld_be32(trp) != TRP_MAGIC) return SCE_NP_TROPHY_ERROR_INVALID_TRP_FILE_FORMAT;
+    uint32_t entries = snx_ld_be32(trp + 16), entry_size = snx_ld_be32(trp + 20);
     if (entry_size < 48 || entries > 4096 || 0x40 + (uint64_t)entries * entry_size > size)
         return SCE_NP_TROPHY_ERROR_INVALID_TRP_FILE_FORMAT;
     for (uint32_t i = 0; i < entries; ++i) {
         const unsigned char* e = trp + 0x40 + (size_t)i * entry_size;
-        uint64_t at = be64(e + 32), length = be64(e + 40);
+        uint64_t at = snx_ld_be64(e + 32), length = snx_ld_be64(e + 40);
         if (memcmp(e, "TROPCONF.SFM", 13) || at > size || length > size - at) continue;
         const char *x = (const char*)trp + at, *end = x + length;
         c->platinum = SCE_NP_TROPHY_INVALID_TROPHY_ID;

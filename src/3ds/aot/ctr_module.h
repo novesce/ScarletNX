@@ -29,6 +29,8 @@ typedef struct {
 /* ABI checks are compatibility checks, NOT a native-code sandbox. Only load
    freshly generated modules from trusted private host staging directories. */
 bool snx_ctr_module_compatible(const SnxCtrModule* module, const SnxCtrImage* image);
+/* Whether the descriptor's fields before its block tables are those this build compiles for image */
+bool snx_ctr_module_fields(const SnxCtrModule* module, const SnxCtrImage* image);
 typedef enum {
     SNX_CTR_RUN_EXIT,
     SNX_CTR_RUN_FAULT,
@@ -55,6 +57,10 @@ typedef struct {
 bool snx_ctr_native_open(const char* path, const SnxCtrImage* image, SnxCtrNative* native, char* error,
                          size_t error_size);
 void snx_ctr_native_close(SnxCtrNative* native);
+/* Whether the module at path was compiled for image by this build, read from its descriptor in the file without
+   loading it: the run compiles first when it was not, so it loads a module once (a library unloaded and loaded again
+   by its path can be the old one, as under the Tracy client, whose dlclose does nothing) */
+bool snx_ctr_module_current(const char* path, const SnxCtrImage* image);
 /* A game's folder is laid out as a Switch game's is: recompiled/<title ID>/ holds <title ID>_code.so (_code.dll on
    Windows), the module, <title ID>.hints, the blocks runs compiled at run time, <title ID>.ini, what a copy of the
    runtime named <title ID> beside them plays, and the copy itself. The file of the folder's own name with suffix, the
@@ -65,7 +71,7 @@ void snx_ctr_native_close(SnxCtrNative* native);
 #define SNX_CTR_MODULE_SUFFIX "_code.so"
 #endif
 char* snx_ctr_game_file(const char* directory, const char* suffix);
-/* The title's module (snx_ctr_game_file's SNX_CTR_MODULE_SUFFIX) is compiled when it is missing, when it no longer loads or matches the
+/* The title's module (snx_ctr_game_file's SNX_CTR_MODULE_SUFFIX) is compiled when it is missing, when it doesn't match the
    image (an older build, a changed .code), or when SNX_CTR_RECOMPILE asks, then run unless SNX_CTR_COMPILE_ONLY: until
    the game exits or its window closes, for limit blocks when limit is not 0, or for seconds when it is above 0. The title is the extraction in
    directory, or with game the game read where it lies, directory then its state folder. The module is

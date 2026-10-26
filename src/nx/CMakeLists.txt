@@ -134,67 +134,25 @@ set_source_files_properties("${volk_SOURCE_DIR}/volk.c" gpu/vk/vma.cpp PROPERTIE
                             "${snx_third_party_flags}")
 
 if(ANDROID)
-    # the app (dist/android): its game activity loads libscarletnx.so and calls its main; the menu runs the driver as
-    # libscarletnx-run.so, an executable named for the app's libraries folder, which takes only lib*.so
-    add_library(scarletnx SHARED runtime/entry.c)
-    # FFmpeg's assembly reaches its tables PC-relative, as its own shared libraries allow with this
-    target_link_options(scarletnx PRIVATE -Wl,-Bsymbolic)
+    # the menu runs the program (src/multicall's libscarletnx.so) as libscarletnx-run.so, an executable named for the
+    # app's libraries folder, which takes only lib*.so
     add_executable(scarletnx-run runtime/platform/android_run.c)
     set_target_properties(scarletnx-run PROPERTIES OUTPUT_NAME libscarletnx-run.so RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}")
     target_link_libraries(scarletnx-run PRIVATE ${CMAKE_DL_LIBS})
-    install(TARGETS scarletnx scarletnx-run LIBRARY DESTINATION lib/${ANDROID_ABI} RUNTIME DESTINATION lib/${ANDROID_ABI})
-else()
-    add_executable(scarletnx runtime/entry.c)
-    # started with nothing to run, it opens the menu (src/gui), which runs games with it
-    if(TARGET scarletnx-gui)
-        target_link_libraries(scarletnx PRIVATE scarletnx-gui)
-        target_compile_definitions(scarletnx PRIVATE SNX_WITH_GUI)
-    endif()
-    # also the other drivers, by its name (src/multicall), whose main it has then
-    if(SNX_MULTICALL)
-        target_link_libraries(scarletnx PRIVATE snx_multicall)
-        target_compile_definitions(scarletnx PRIVATE SNX_MULTICALL)
-    endif()
-endif()
-if(IOS)
-    # the app (dist/apple): the menu and then the game it plays, in the one process an iOS app has
-    set_target_properties(scarletnx PROPERTIES MACOSX_BUNDLE ON
-                          MACOSX_BUNDLE_INFO_PLIST "${PROJECT_SOURCE_DIR}/dist/apple/Info-iOS.plist"
-                          MACOSX_BUNDLE_GUI_IDENTIFIER org.scarletnx
-                          MACOSX_BUNDLE_BUNDLE_NAME ScarletNX
-                          MACOSX_BUNDLE_SHORT_VERSION_STRING 0.1
-                          MACOSX_BUNDLE_BUNDLE_VERSION 1)
+    install(TARGETS scarletnx-run RUNTIME DESTINATION lib/${ANDROID_ABI})
 endif()
 list(TRANSFORM components PREPEND snx_)
 add_library(scarletnx-nx STATIC)
 set_target_properties(scarletnx-nx PROPERTIES LINKER_LANGUAGE CXX)
 target_link_libraries(scarletnx-nx PUBLIC snx_nx_flags ${components} snx_driver)
-target_link_libraries(scarletnx PRIVATE scarletnx-nx)
-# VMA is C++: link with the C++ driver. It goes in the build folder itself, where
-# the native driver and CI look for it
-set_target_properties(scarletnx PROPERTIES LINKER_LANGUAGE CXX RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}"
-    LIBRARY_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}")
-if(WIN32)
-    # Prefer static toolchain/SDL libraries. LLVM may still use a DLL import library,
-    # resolved by cmake/llvm.cmake and bundled by CI. user32 provides message boxes and
-    # advapi32 the registry (the log's system line); winmm is loaded at run time, and the
-    # static SDL3 brings the libraries it needs
-    target_link_libraries(scarletnx PRIVATE user32 advapi32)
-    # The application manifest (src/common/platform/runtime.manifest): UTF-8 as the process's code page, long paths
-    enable_language(RC)
-    target_sources(scarletnx PRIVATE "${PROJECT_SOURCE_DIR}/src/common/platform/runtime.rc")
-    target_link_options(scarletnx PRIVATE -static)
-    target_link_options(scarletnx PRIVATE -mwindows)
-else()
-    # No -rdynamic: the game module gets the runtime through RtAPI and imports nothing from it, and exporting every
-    # global would let a library loaded later (a GPU driver) bind its own symbols to ours by name
-    target_link_libraries(scarletnx PRIVATE Threads::Threads ${CMAKE_DL_LIBS} m)
-    # but GDB's two JIT names (gdb_jit.c), which it finds by name: kept where a strip (quick-sharun's, the AppImage's)
-    # leaves no .symtab. A shared libLLVM's references to them bind to these already
-    if(NOT APPLE)
-        target_link_options(scarletnx PRIVATE "LINKER:--export-dynamic-symbol=__jit_debug_descriptor"
-                            "LINKER:--export-dynamic-symbol=__jit_debug_register_code")
-    endif()
+# The Switch driver's entry (runtime/entry.c's snx_switch_main), which scarletnx runs (src/multicall). Started with
+# nothing to run it opens the menu (src/gui), which runs games with it; Android's app has the menu as a library of its
+# own
+add_library(snx_switch_program STATIC runtime/entry.c)
+target_link_libraries(snx_switch_program PUBLIC scarletnx-nx SDL3::SDL3)
+if(TARGET scarletnx-gui AND NOT ANDROID)
+    target_link_libraries(snx_switch_program PUBLIC scarletnx-gui)
+    target_compile_definitions(snx_switch_program PRIVATE SNX_WITH_GUI)
 endif()
 
 # SDL3 is either the system package or the pinned static source build (cmake/dependencies.cmake)
@@ -207,7 +165,6 @@ target_link_libraries(snx_vk PRIVATE snx_build_info FFmpeg::avutil) # vk/nvdec.c
 # the game's menu in YoRHa's colours, from src/gui/themes/yorha/theme.ini (cmake/gui_themes.cmake), and the shader
 # loading screen's when the launcher's theme can't be read
 target_include_directories(snx_platform PRIVATE "${PROJECT_BINARY_DIR}/generated")
-target_link_libraries(scarletnx PRIVATE SDL3::SDL3)
 
 if(BUILD_TESTING)
     add_executable(snx-test-shader-direct "${PROJECT_SOURCE_DIR}/tests/shader_direct.c")
@@ -304,55 +261,4 @@ if(BUILD_TESTING AND SNX_TEST_VULKAN)
 endif()
 if(BUILD_TESTING)
     snx_sanitizer_path() # tests/CMakeLists.txt: this folder's tests
-endif()
-
-# a sanitized build (SNX_TEST_SANITIZERS) is a test build, its runtime instrumented: it doesn't go next to the games
-if(SNX_DEPLOY AND SNX_TEST_SANITIZERS AND BUILD_TESTING)
-    message(STATUS "SNX_TEST_SANITIZERS: the runtime is not deployed to the games")
-elseif(SNX_DEPLOY)
-    # where scarletnx is also the 3DS driver (src/multicall), the 3DS games' copies are of it too; else scarletnx-3ds
-    # deploys them (src/3ds/CMakeLists.txt)
-    set(snx_ctr_deployed "")
-    set(snx_vita_deployed "")
-    if(SNX_MULTICALL AND SNX_BUILD_3DS)
-        set(snx_ctr_deployed "$<TARGET_FILE:scarletnx>")
-    endif()
-    if(SNX_MULTICALL AND TARGET snx_vita_program)
-        set(snx_vita_deployed "$<TARGET_FILE:scarletnx>")
-    endif()
-    add_custom_command(TARGET scarletnx POST_BUILD
-        COMMAND "${CMAKE_COMMAND}" "-DRUNTIME=$<TARGET_FILE:scarletnx>" "-DCTR_RUNTIME=${snx_ctr_deployed}"
-                "-DVITA_RUNTIME=${snx_vita_deployed}"
-                "-DGAMES=${SNX_RECOMPILED_DIR}" "-DWINDOWS=${WIN32}" "-DMACOS=${APPLE}"
-                -P "${PROJECT_SOURCE_DIR}/cmake/deploy.cmake"
-        VERBATIM)
-endif()
-
-# scarletnx-switch: the Switch driver by name, beside scarletnx-3ds and scarletnx-gnuabi. An app has one program,
-# started by its icon
-if(WIN32)
-    add_custom_command(TARGET scarletnx POST_BUILD
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:scarletnx>"
-                "${PROJECT_BINARY_DIR}/scarletnx-switch.exe" VERBATIM)
-    install(PROGRAMS "${PROJECT_BINARY_DIR}/scarletnx-switch.exe" DESTINATION bin)
-elseif(NOT ANDROID AND NOT IOS)
-    set(snx_names scarletnx-switch)
-    # the other drivers, which it is too (SNX_MULTICALL, src/multicall), by the names they have as programs of their own
-    if(SNX_MULTICALL AND TARGET snx_ctr_program)
-        list(APPEND snx_names scarletnx-3ds)
-    endif()
-    if(SNX_MULTICALL AND TARGET snx_gnuabi_program)
-        list(APPEND snx_names scarletnx-gnuabi)
-    endif()
-    if(SNX_MULTICALL AND TARGET snx_vita_program)
-        list(APPEND snx_names scarletnx-vita)
-    endif()
-    foreach(name IN LISTS snx_names)
-        # in place of the program of that name an older build made in this folder
-        add_custom_command(TARGET scarletnx POST_BUILD
-            COMMAND "${CMAKE_COMMAND}" -E rm -f "${PROJECT_BINARY_DIR}/${name}"
-            COMMAND "${CMAKE_COMMAND}" -E create_symlink "$<TARGET_FILE_NAME:scarletnx>" "${PROJECT_BINARY_DIR}/${name}"
-            VERBATIM)
-        install(PROGRAMS "${PROJECT_BINARY_DIR}/${name}" DESTINATION ${CMAKE_INSTALL_BINDIR})
-    endforeach()
 endif()

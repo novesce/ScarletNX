@@ -20,10 +20,10 @@ static const char list[] =
     "Display\tdocked\t1\tint\t0\t1\t1 = TV mode\t\t0=0|1=1\n"
     "Display\tfullscreen\t0\tint\t0\t1\t1 = start in fullscreen\t\t0=0|1=1\r\n"
     "Display\tlanguage\t1\tint\t-2.14748e+09\t2.14748e+09\tGame language: 0 Japanese\t\t\n"
-    "Graphics\tresolution\t1\tfloat\t0.25\t4\tInternal 3D resolution\t\t\n"
+    "Graphics\tresolution\t1\tfloat\t0.25\t16\tInternal 3D resolution\t\t\n"
     "Graphics\tanisotropy\t0\tint\t0\t16\tTexture filtering at an angle\t\t"
     "0=0|1=1|2=2|3=3|4=4|5=5|6=6|7=7|8=8|9=9|10=10|11=11|12=12|13=13|14=14|15=15|16=16\n"
-    "Graphics\told\t0\tint\t0\t1\tAn older runtime's line\n"
+    "Graphics\told\t0\ttext\t0\t1\tAn older runtime's line\n"
     "Graphics\tbroken\t0\tint\t0\t1\tA value without its word\t\t0|1=On\n"
     "settings: not a setting\n"
     "On-screen controls\tcontrols\t0\tint\t0\t1\tThe on-screen controls\tShow controls\t0=Off|1=On\n"
@@ -57,6 +57,11 @@ static const char* shown(const GuiSettings* s, const char* name) {
     static char value[64];
     gui_theme_get(s->values, key(s, name), value, sizeof value);
     return value;
+}
+/* the resolution row set to in, and what it keeps: the rounding, clamping and leading zeros a typed value takes */
+static void res(GuiSettings* s, const char* in, const char* want) {
+    assert(gui_settings_set(s, "resolution", in));
+    assert(!strcmp(gui_settings_value(s, "resolution"), want));
 }
 /* as the Settings screen shows it */
 static const char* on_screen(const GuiSettings* s, const char* name) {
@@ -129,6 +134,45 @@ int main(int argc, char** argv) {
     assert(!strcmp(key(&s, "touch")->words[0], ".ini") && !strcmp(key(&s, "touch")->words[3], "Fingers and mouse"));
     assert(words(key(&s, "anisotropy")) == 18 && !strcmp(key(&s, "anisotropy")->words[17], "16"));
     assert(key(&s, "language")->type == GUI_KEY_TEXT && key(&s, "resolution")->type == GUI_KEY_TEXT);
+    /* a number's row takes any value of its range and the fraction a scale needs, the closest value in range past
+       either end, and refuses what is not a number, as 3x or high were, where it keeps what it had */
+    assert(key(&s, "language")->numeric && key(&s, "language")->whole && key(&s, "resolution")->numeric &&
+           !key(&s, "resolution")->whole);
+    assert(key(&s, "resolution")->lo == 0.25 && key(&s, "resolution")->hi == 16);
+    assert(!strcmp(key(&s, "resolution")->def, "1"));
+    /* within the range as typed, at most two decimals; past an end, the closest value in it */
+    res(&s, "0.1", "0.25");
+    res(&s, "0.24", "0.25");
+    res(&s, "0.25", "0.25");
+    res(&s, "0.3", "0.3");
+    res(&s, "0.5", "0.5");
+    res(&s, "1.61", "1.61");
+    res(&s, "8.2", "8.2");
+    res(&s, "16", "16");
+    res(&s, "2.223", "2.22");
+    res(&s, "3.333", "3.33");
+    res(&s, "1.60", "1.6");
+    res(&s, "2.0", "2");
+    res(&s, "00.25", "0.25");
+    res(&s, "01.60", "1.6");
+    res(&s, ".25", "0.25");
+    res(&s, "007", "7");
+    res(&s, "0.05", "0.25");
+    res(&s, "0.09", "0.25");
+    res(&s, "16.01", "16");
+    res(&s, "20", "16");
+    res(&s, "999", "16");
+    assert(gui_settings_set(&s, "language", "007") && !strcmp(gui_settings_value(&s, "language"), "7") &&
+           gui_settings_set(&s, "language", ""));
+    assert(!gui_settings_set(&s, "resolution", "3x") && !gui_settings_set(&s, "resolution", "1e1") &&
+           !gui_settings_set(&s, "resolution", "high"));
+    assert(!strcmp(gui_settings_value(&s, "resolution"), "16"));
+    assert(!gui_settings_set(&s, "language", "3.5") && gui_settings_set(&s, "language", "3.0") &&
+           !strcmp(gui_settings_value(&s, "language"), "3") && gui_settings_set(&s, "language", ""));
+    /* the scale goes to a run as it was picked, any scale within the row's range */
+    assert(gui_settings_set(&s, "resolution", "1.22") && gui_settings_options(&s, 0, options) == 1 &&
+           !strcmp(options[0], "--resolution=1.22"));
+    assert(gui_settings_set(&s, "resolution", "") && !gui_settings_value(&s, "resolution"));
     assert(key(&s, "old")->type == GUI_KEY_TEXT && key(&s, "broken")->type == GUI_KEY_TEXT);
     assert(!strcmp(shown(&s, "touch"), ".ini") && !strcmp(shown(&s, "log"), ".ini"));
     /* the page: its row in its section opens the rows after its All, which steps them */
@@ -194,6 +238,60 @@ int main(int argc, char** argv) {
     assert(!gui_settings_value(&s, "fullscreen"));
     gui_editor_key(&form, GUI_LEFT);
     assert(!strcmp(gui_settings_value(&s, "fullscreen"), "1"));
+    /* the resolution typed, not stepped: 1.61 taken as any scale, a third decimal and a letter left out, and 3x's
+       digits are all that reach the row; a value past the range clamps to the closest in it */
+    form.row = at(&s, "resolution");
+    gui_editor_key(&form, GUI_RIGHT);
+    assert(strstr(form.note, "0.25") && strstr(form.note, "16") && strstr(form.note, "two decimals"));
+    gui_editor_key(&form, GUI_SELECT);
+    gui_editor_type(&form, "2");
+    gui_editor_type(&form, ".");
+    gui_editor_type(&form, "223");
+    gui_editor_type(&form, "x");
+    assert(!strcmp(form.text, "2.22") && strstr(form.note, "two decimals"));
+    gui_editor_key(&form, GUI_SELECT);
+    assert(!strcmp(gui_settings_value(&s, "resolution"), "2.22"));
+    gui_editor_key(&form, GUI_SELECT); /* typing it again, now only the digits are left */
+    gui_editor_type(&form, "e");
+    assert(!strcmp(form.text, "2.22"));
+    gui_editor_key(&form, GUI_CANCEL);
+    gui_editor_key(&form, GUI_SELECT);
+    while (form.text[0]) gui_editor_erase(&form);
+    gui_editor_type(&form, "20");
+    gui_editor_key(&form, GUI_SELECT);
+    assert(!strcmp(gui_settings_value(&s, "resolution"), "16") && strstr(form.note, "Closest value in range: 16"));
+    gui_editor_key(&form, GUI_SELECT); /* emptied, Select shows the row's default, which is the value in use */
+    while (form.text[0]) gui_editor_erase(&form);
+    gui_editor_key(&form, GUI_SELECT);
+    assert(!strcmp(gui_settings_value(&s, "resolution"), "1") && !form.note[0]); /* the foot's usual help then */
+    { /* 0, however it is typed, is the setting's default 1 as well, and says nothing */
+        static const char* const nought[] = {".", "0.", ".0", "0"};
+        size_t i;
+        for (i = 0; i < sizeof nought / sizeof *nought; ++i) {
+            gui_editor_key(&form, GUI_SELECT);
+            while (form.text[0]) gui_editor_erase(&form);
+            gui_editor_type(&form, nought[i]);
+            gui_editor_key(&form, GUI_SELECT);
+            assert(!strcmp(gui_settings_value(&s, "resolution"), "1") && !form.note[0]);
+        }
+    }
+    gui_editor_key(&form, GUI_SELECT); /* three digits at most, the point not counted */
+    while (form.text[0]) gui_editor_erase(&form);
+    gui_editor_type(&form, "123456789");
+    assert(!strcmp(form.text, "123")); /* three digits in all, 0.25 and 1.61 too */
+    gui_editor_key(&form, GUI_CANCEL);
+    assert(gui_settings_set(&s, "resolution", ""));
+    gui_editor_key(&form, GUI_SELECT); /* 0.25 and 1.61 fit; 2.0 is the whole number 2 on Enter */
+    gui_editor_type(&form, "0.25");
+    assert(!strcmp(form.text, "0.25"));
+    while (form.text[0]) gui_editor_erase(&form);
+    gui_editor_type(&form, "00.01"); /* the leading zero does not use up the three digits */
+    assert(!strcmp(form.text, "0.01"));
+    while (form.text[0]) gui_editor_erase(&form);
+    gui_editor_type(&form, "2.0");
+    gui_editor_key(&form, GUI_SELECT);
+    assert(!strcmp(gui_settings_value(&s, "resolution"), "2") && !form.note[0]);
+    assert(gui_settings_set(&s, "resolution", ""));
     gui_editor_stop(&form);
 
     /* a run's options: --key=value for each pick in the list's order; the launcher's own with launch */
@@ -350,6 +448,48 @@ int main(int argc, char** argv) {
         assert(!snx_remove_tree(dir));
         free(path);
         free(dir);
+    }
+    /* a resolution forced into the settings file as nothing, or no number, is no pick: the game's own .ini keeps its
+       default 1, which the row shows as it is; a value in range is the pick a run gets */
+    {
+        char *dir = snx_temp_dir(NULL), *path = snx_path_join(dir, "settings.ini");
+        static const char* const bad[] = {"", "0", "e", "3x", "high", "nan", "0.01x"};
+        size_t i;
+        for (i = 0; i < sizeof bad / sizeof *bad; ++i) {
+            char* text = snx_format("[Graphics]\nresolution=%s\n", bad[i]);
+            assert(text && !snx_write_file(path, text, strlen(text)));
+            free(text);
+            gui_settings_free(&s);
+            assert(!gui_settings_read(&s, list) && gui_settings_set(&s, "fullscreen", "0"));
+            gui_settings_mark(&s);
+            gui_settings_load(&s, path);
+            assert(!gui_settings_value(&s, "resolution"));
+            assert(!strcmp(on_screen(&s, "resolution"), "1 [default]"));
+            {
+                size_t n = gui_settings_options(&s, 0, options), j;
+                for (j = 0; j < n; ++j) assert(strncmp(options[j], "--resolution=", 13));
+            }
+        }
+        {
+            char* text = snx_format("[Graphics]\nresolution=8.2\n");
+            assert(text && !snx_write_file(path, text, strlen(text)));
+            free(text);
+            gui_settings_free(&s);
+            assert(!gui_settings_read(&s, list) && gui_settings_set(&s, "fullscreen", "0"));
+            gui_settings_mark(&s);
+            gui_settings_load(&s, path);
+            assert(!strcmp(gui_settings_value(&s, "resolution"), "8.2"));
+            {
+                size_t n = gui_settings_options(&s, 0, options), j;
+                int found = 0;
+                for (j = 0; j < n; ++j) found += !strcmp(options[j], "--resolution=8.2");
+                assert(found == 1);
+            }
+        }
+        assert(!snx_remove_tree(dir));
+        free(path);
+        free(dir);
+        assert(!gui_settings_read(&s, list));
     }
     gui_settings_free(&s);
 

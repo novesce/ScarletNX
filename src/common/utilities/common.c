@@ -458,24 +458,6 @@ char* snx_absolute(const char* path) {
     return result;
 #endif
 }
-char* snx_find_compiler(const char* built, const char* beside, char* error, size_t error_size) {
-#ifdef _WIN32
-    static const char clang[] = "clang.exe";
-#else
-    static const char clang[] = "clang";
-#endif
-    char *found = built && *built ? snx_find_tool(built) : NULL, *local;
-    if (found) return found;
-    local = beside ? snx_path_join(beside, clang) : NULL;
-    found = local ? snx_find_tool(local) : NULL;
-    free(local);
-    if (!found) found = snx_find_tool("clang");
-    if (!found)
-        snprintf(error, error_size, "%s is not on this machine, %s%s holds no %s, and no folder of PATH has one",
-                 built && *built ? built : "the build's compiler", beside ? "" : "the program's folder",
-                 beside ? beside : "", clang);
-    return found;
-}
 char* snx_executable(const char* argv0) {
 #ifdef _WIN32
     wchar_t buf[32768];
@@ -683,6 +665,32 @@ unsigned char* snx_read_file(const char* path, size_t* size) {
     p[n] = 0;
     *size = n;
     return p;
+}
+int snx_file_has_record(const char* path, const void* magic, size_t magic_size, size_t size,
+                        int (*accept)(const unsigned char* record, const void* context), const void* context) {
+    /* read a MiB at a time, the last size - 1 bytes kept for a record that runs into the next */
+    size_t cap = ((size_t)1 << 20) + size, have = 0, got;
+    FILE* f = magic_size && magic_size <= size ? snx_fopen(path, "rb") : NULL;
+    unsigned char* p;
+    int found = 0;
+    if (!f) return 0;
+    p = (unsigned char*)snx_alloc(cap);
+    do {
+        got = fread(p + have, 1, cap - have, f);
+        have += got;
+        if (have >= size) {
+            unsigned char *at = p, *end = p + have - size + 1;
+            while (!found && (at = (unsigned char*)memchr(at, *(const unsigned char*)magic, (size_t)(end - at)))) {
+                found = !memcmp(at, magic, magic_size) && accept(at, context);
+                ++at;
+            }
+            memmove(p, p + have - (size - 1), size - 1);
+            have = size - 1;
+        }
+    } while (!found && got);
+    fclose(f);
+    free(p);
+    return found;
 }
 int snx_write_file(const char* path, const void* data, size_t size) {
     FILE* f = snx_fopen(path, "wb");

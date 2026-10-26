@@ -8,9 +8,9 @@
 # folder.
 # A game's folder gets the runtime of the console its <Name>.ini names (system=, which the 3DS, Vita and GBA drivers
 # write): AGB_RUNTIME, scarletnx-agb, for gba. Without one, a 3DS game's folder is named after its title ID (0004 and
-# 12 more hex digits) and gets CTR_RUNTIME, scarletnx-3ds, which is RUNTIME too where scarletnx is also the 3DS driver
-# (SNX_MULTICALL). A Vita game's folder is named after its title ID (four capital letters and five digits) and gets
-# VITA_RUNTIME, scarletnx-vita or RUNTIME the same way. One of them empty: its games keep theirs.
+# 12 more hex digits) and gets CTR_RUNTIME, scarletnx-3ds. A Vita game's folder is named after its title ID (four
+# capital letters and five digits) and gets VITA_RUNTIME, scarletnx-vita. Each is scarletnx, which is every driver
+# the build has (src/multicall). One of them empty: its games keep theirs.
 if(WINDOWS)
     set(module_ext dll)
     set(exe_ext .exe)

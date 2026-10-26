@@ -4,15 +4,13 @@
    execution engine. */
 #include "3ds/aot/ctr_compile.h"
 #include "3ds/aot/ctr_module.h"
-#include "3ds/aot/ctr_runtime.h"
 #include "3ds/aot/ctr_discover.h"
 #include "common/cpu/arm/llvm.h"
+#include "common/cpu/recompiler/llvm/ir.h"
+#include "common/cpu/recompiler/llvm/link.h"
 #include "common/utilities/common.h"
-#include <llvm-c/Analysis.h>
-#include <llvm-c/Error.h>
-#include <llvm-c/Target.h>
-#include <llvm-c/TargetMachine.h>
-#include <llvm-c/Transforms/PassBuilder.h>
+#include "common/utilities/endian.h"
+#include <llvm-c/Core.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,17 +29,7 @@ _Static_assert(SNX_ARM_MEMORY_FLAT == SNX_CTR_MODULE_FLAT_MODE, "memory ABI");
 typedef struct {
     unsigned mode, index, length;
 } Entry;
-typedef struct {
-    char* triple;
-    LLVMTargetMachineRef machine;
-    LLVMTargetDataRef layout;
-} Host;
-static uint32_t little(const unsigned char* p, unsigned size) {
-    uint32_t result = 0;
-    for (unsigned i = 0; i < size; ++i) result |= (uint32_t)p[i] << (i * 8);
-    return result;
-}
-/* a staged file's name inside the staging directory */
+/* a path's file name */
 static const char* leaf(const char* path) {
     const char* last = path;
     for (const char* p = path; *p; ++p)
@@ -107,56 +95,29 @@ static bool descriptor(LLVMModuleRef mod, LLVMTargetDataRef layout, const SnxCtr
     LLVMValueRef global = LLVMAddGlobal(mod, structure, "snx_ctr_module_v1");
     LLVMSetInitializer(global, LLVMConstNamedStruct(structure, values, 18));
     LLVMSetGlobalConstant(global, 1);
-#ifdef _WIN32
-    /* COFF has no hidden visibility. A DLL without any explicit export gets every global exported by lld, one per
-       block function, past the 65535 exports PE allows. Once one symbol is exported explicitly lld exports nothing
-       else, so the descriptor, the only symbol the loader looks up, is marked. The module is built for the host the
-       compiler runs on, so the compiler's own _WIN32 says the module is a DLL (an MSYS2 or Cygwin build of the
-       compiler targets Windows too and defines it). */
-    LLVMSetDLLStorageClass(global, LLVMDLLExportStorageClass);
-#endif
     return true;
 }
-static LLVMModuleRef new_module(Host* h, LLVMContextRef c) {
-    LLVMModuleRef m = LLVMModuleCreateWithNameInContext("ctr-static-aot-v1", c);
-    LLVMSetTarget(m, h->triple);
-    LLVMSetModuleDataLayout(m, h->layout);
+/* a module made for this machine as the backend makes the Switch's (ir.c): the target, CPU and ABI the helpers
+   (armlib.c) are compiled for, which the module is linked with */
+static LLVMModuleRef new_module(SnxIr* ir) {
+    LLVMModuleRef m = LLVMModuleCreateWithNameInContext("ctr-static-aot-v1", ir->ctx);
+    LLVMSetTarget(m, LLVMGetTarget(ir->mod));
+    LLVMSetDataLayout(m, LLVMGetDataLayoutStr(ir->mod));
     return m;
 }
-static bool write_object(Host* h, LLVMModuleRef mod, char* output, const char* pipeline, char* error, size_t size) {
-    char* detail = NULL;
-    if (LLVMVerifyModule(mod, LLVMReturnStatusAction, &detail)) goto fail;
-    LLVMDisposeMessage(detail);
-    detail = NULL;
-    if (pipeline) {
-        LLVMPassBuilderOptionsRef passes = LLVMCreatePassBuilderOptions();
-        LLVMErrorRef failure = LLVMRunPasses(mod, pipeline, h->machine, passes);
-        LLVMDisposePassBuilderOptions(passes);
-        if (failure) {
-            char* message = LLVMGetErrorMessage(failure);
-            snprintf(error, size, "%s", message);
-            LLVMDisposeErrorMessage(message);
-            return false;
-        }
-        if (LLVMVerifyModule(mod, LLVMReturnStatusAction, &detail)) goto fail;
-        LLVMDisposeMessage(detail);
-        detail = NULL;
-    }
-    if (LLVMTargetMachineEmitToFile(h->machine, mod, output, LLVMObjectFile, &detail)) goto fail;
-    LLVMDisposeMessage(detail);
-    return true;
-fail:
-    snprintf(error, size, "%s", detail ? detail : "cannot emit native ARM11 object");
-    LLVMDisposeMessage(detail);
-    return false;
+/* the module's object, *output's, from the backend's passes at the -O letter opt */
+static bool write_object(SnxIr* ir, LLVMModuleRef mod, SnxLinkInput* output, char opt, char* error, size_t size) {
+    unsigned char* object = NULL;
+    bool ok = !snx_ir_module_object(ir, mod, opt, &object, &output->size, error, size);
+    output->data = object;
+    return ok;
 }
 /* The entries' blocks into one object. A block the backend ends sooner than discovery planned (at an MSR to the CPSR,
    which it ends blocks on) goes on as a block of its own at the instruction after, appended to *rest (*rest_count of
    them, the caller's to free) for the index */
-static bool chunk(Host* h, const SnxCtrImage* image, const Entry* entries, unsigned count, char* output,
+static bool chunk(SnxIr* ir, const SnxCtrImage* image, const Entry* entries, unsigned count, SnxLinkInput* output,
                   bool exhaustive, Entry** rest, unsigned* rest_count, char* error, size_t size) {
-    LLVMContextRef c = LLVMContextCreate();
-    LLVMModuleRef mod = new_module(h, c);
+    LLVMModuleRef mod = new_module(ir);
     bool ok = false;
     unsigned capacity = 0;
     SnxArmCodegenOptions options = {SNX_ARM_CODEGEN_OPTIONS_ABI, SNX_ARM_PROFILE_ARM11,
@@ -171,7 +132,8 @@ static bool chunk(Host* h, const SnxCtrImage* image, const Entry* entries, unsig
             uint32_t words[SNX_CTR_AOT_BLOCK_WORDS];
             uint16_t halves[SNX_CTR_AOT_BLOCK_WORDS];
             for (unsigned j = 0; j < e.length; ++j) {
-                words[j] = little(image->code + e.index * width + j * width, width);
+                const unsigned char* unit = image->code + e.index * width + j * width;
+                words[j] = width == 2 ? snx_ld_le16(unit) : snx_ld_le32(unit);
                 halves[j] = (uint16_t)words[j];
             }
             char id[40];
@@ -200,16 +162,15 @@ static bool chunk(Host* h, const SnxCtrImage* image, const Entry* entries, unsig
             e.length -= (unsigned)consumed;
         }
     }
-    ok = write_object(h, mod, output, exhaustive ? "default<O2>" : "default<O1>", error, size);
+    ok = write_object(ir, mod, output, exhaustive ? '2' : '1', error, size);
 done:
     LLVMDisposeModule(mod);
-    LLVMContextDispose(c);
     return ok;
 }
-static bool index_object(Host* h, const SnxCtrImage* image, const Entry* entries, unsigned count, char* output,
-                         char* error, size_t size) {
-    LLVMContextRef c = LLVMContextCreate();
-    LLVMModuleRef mod = new_module(h, c);
+static bool index_object(SnxIr* ir, const SnxCtrImage* image, const Entry* entries, unsigned count,
+                         SnxLinkInput* output, char* error, size_t size) {
+    LLVMContextRef c = ir->ctx;
+    LLVMModuleRef mod = new_module(ir);
     LLVMTypeRef ptr = LLVMPointerTypeInContext(c, 0), ft = LLVMFunctionType(LLVMVoidTypeInContext(c), &ptr, 1, 0);
     LLVMValueRef tables[2];
     unsigned cursor = 0;
@@ -232,14 +193,13 @@ static bool index_object(Host* h, const SnxCtrImage* image, const Entry* entries
         tables[mode] = table(mod, mode ? "ctr_thumb" : "ctr_arm", functions, n);
         free(functions);
     }
-    if (!descriptor(mod, h->layout, image, tables[0], tables[1])) {
+    if (!descriptor(mod, LLVMGetModuleDataLayout(mod), image, tables[0], tables[1])) {
         snprintf(error, size, "incompatible native descriptor layout");
         goto done;
     }
-    ok = write_object(h, mod, output, NULL, error, size);
+    ok = write_object(ir, mod, output, '0', error, size);
 done:
     LLVMDisposeModule(mod);
-    LLVMContextDispose(c);
     return ok;
 }
 /* The title's hints (snx_ctr_jit_save_hints): the blocks earlier runs compiled at run time, one pc a line in hex, | 1
@@ -263,36 +223,12 @@ static uint32_t* read_hints(const char* directory, size_t* count) {
     free(path);
     return hints;
 }
-static bool host_new(Host* h, char* error, size_t size) {
-    LLVMTargetRef backend;
-    char* detail = NULL;
-    h->triple = LLVMGetDefaultTargetTriple();
-    if (LLVMGetTargetFromTriple(h->triple, &backend, &detail)) {
-        snprintf(error, size, "%s", detail);
-        LLVMDisposeMessage(detail);
-        return false;
-    }
-    h->machine = LLVMCreateTargetMachine(backend, h->triple, "generic", "", LLVMCodeGenLevelDefault, LLVMRelocPIC,
-                                         LLVMCodeModelDefault);
-    if (!h->machine) {
-        snprintf(error, size, "cannot create an LLVM target machine for %s", h->triple);
-        return false;
-    }
-    h->layout = LLVMCreateTargetDataLayout(h->machine);
-    return true;
-}
-static void host_free(Host* h) {
-    if (h->layout) LLVMDisposeTargetData(h->layout);
-    if (h->machine) LLVMDisposeTargetMachine(h->machine);
-    LLVMDisposeMessage(h->triple);
-    memset(h, 0, sizeof *h);
-}
-/* The chunks shared out to a worker per host core, each with a target machine and LLVM contexts of its own: a
-   commercial title's few hundred thousand blocks take an hour on one */
+/* The chunks shared out to a worker per host core, each with an SnxIr of its own: a commercial title's few hundred
+   thousand blocks take an hour on one */
 typedef struct {
     const SnxCtrImage* image;
     const Entry* entries;
-    char** objects; /* chunk i's object is objects[i] */
+    SnxLinkInput* objects; /* chunk i's object is objects[i] */
     unsigned count, chunks, next, finished;
     bool exhaustive, failed;
     Entry* rest; /* the blocks the backend split off, every chunk's */
@@ -320,9 +256,9 @@ static void work_unlock(Work* w) {
 #endif
 }
 static void worker(Work* w) {
-    Host h = {0};
     char error[512] = "";
-    bool ok = host_new(&h, error, sizeof error);
+    SnxIr* ir = snx_ir_new("ctr-static-aot", '1', error, sizeof error);
+    bool ok = ir != NULL;
     for (;;) {
         work_lock(w);
         if (!ok && !w->failed) {
@@ -336,7 +272,7 @@ static void worker(Work* w) {
         if (n > CHUNK_ENTRIES) n = CHUNK_ENTRIES;
         Entry* rest = NULL;
         unsigned rest_count = 0;
-        ok = chunk(&h, w->image, w->entries + begin, n, w->objects[i], w->exhaustive, &rest, &rest_count, error,
+        ok = chunk(ir, w->image, w->entries + begin, n, &w->objects[i], w->exhaustive, &rest, &rest_count, error,
                    sizeof error);
         work_lock(w);
         Entry* merged = rest_count ? realloc(w->rest, (w->rest_count + rest_count) * sizeof *merged) : w->rest;
@@ -348,14 +284,14 @@ static void worker(Work* w) {
             w->rest = merged;
             if (rest_count) memcpy(w->rest + w->rest_count, rest, rest_count * sizeof *rest);
             w->rest_count += rest_count;
-            w->output_bytes += snx_file_size(w->objects[i]);
+            w->output_bytes += w->objects[i].size;
             if (!(++w->finished % 16) || w->finished == w->chunks)
                 printf("ARM11 AOT: %u/%u chunks of static blocks emitted\n", w->finished, w->chunks);
         }
         work_unlock(w);
         free(rest);
     }
-    host_free(&h);
+    snx_ir_free(ir);
 }
 #ifdef _WIN32
 static DWORD WINAPI worker_main(LPVOID w) {
@@ -409,16 +345,21 @@ static int by_place(const void* a, const void* b) {
     if (x->mode != y->mode) return x->mode < y->mode ? -1 : 1;
     return (x->index > y->index) - (x->index < y->index);
 }
+/* The module: the blocks' chunks, the index and the helpers they call (armlib.c), linked by the backend's own linker
+   into the shared library the runtime loads, which exports the descriptor alone */
 int snx_ctr_aot_compile(const char* extracted, const SnxCtrSource* game, char* error, size_t error_size) {
     int result = 1;
     SnxCtrImage image = {0}, check = {0};
     SnxCtrPlan plan = {0};
-    Host host = {0};
-    char *directory = NULL, *target = NULL, *stage = NULL, *module = NULL, *runtime = NULL, **objects = NULL;
-    char *previous = NULL, *cc = NULL;
+    SnxIr* ir = NULL;
+    SnxLinkInput* objects = NULL;
+    SnxLinkOutput linked = {NULL, 0};
+    unsigned char* armlib = NULL;
+    size_t armlib_size = 0;
+    char *directory = NULL, *target = NULL, *staged = NULL, *previous = NULL;
+    const char* exports[1] = {"snx_ctr_module_v1"};
     Entry* entries = NULL;
     unsigned count = 0, files = 0;
-    const char** command = NULL;
     Work work = {0};
     if (error_size) error[0] = 0;
     if (!(game ? snx_ctr_image_from_source(game, &image, error, error_size)
@@ -436,19 +377,10 @@ int snx_ctr_aot_compile(const char* extracted, const SnxCtrSource* game, char* e
         goto done;
     }
     target = snx_ctr_game_file(directory, SNX_CTR_MODULE_SUFFIX);
-    /* the compiler the link runs, found before the minutes of compiling: a release runs where the build's is not */
-    {
-        char *self = snx_executable("scarletnx"), *folder = self ? snx_dirname(self) : NULL, why[384];
-        cc = snx_find_compiler(SNX_CTR_HOST_CC, folder, why, sizeof why);
-        free(folder);
-        free(self);
-        if (!cc) {
-            snprintf(error, error_size,
-                     "no C compiler to link the native module: %s. Put Clang's bin folder on PATH (LLVM-MinGW's on "
-                     "Windows), or clang beside this program",
-                     why);
-            goto done;
-        }
+    staged = target ? snx_format("%s.tmp", target) : NULL;
+    if (!staged) {
+        snprintf(error, error_size, "out of memory");
+        goto done;
     }
     bool exhaustive = image.segment[0].bytes <= SNX_CTR_AOT_EXHAUSTIVE_LIMIT;
     unsigned capacity = image.segment[0].bytes / 4 + image.segment[0].bytes / 2;
@@ -475,31 +407,16 @@ int snx_ctr_aot_compile(const char* extracted, const SnxCtrSource* game, char* e
     }
     printf("Discovered ARM11 static coverage: %u blocks%s\n", count,
            exhaustive ? " (exhaustive tiny image)" : " (conservative CFG)");
-    if (LLVMInitializeNativeTarget() || LLVMInitializeNativeAsmPrinter()) {
-        snprintf(error, error_size, "cannot initialize native LLVM target");
-        goto done;
-    }
-    if (!host_new(&host, error, error_size)) goto done;
-    stage = snx_temp_dir(directory);
-    if (!stage) {
-        char why[256];
-        snprintf(error, error_size, "cannot create a staging folder in %s: %s", directory,
-                 snx_os_error(why, sizeof why));
-        goto done;
-    }
-    files = (count + CHUNK_ENTRIES - 1) / CHUNK_ENTRIES + 1;
+    if (snx_ir_init(error, error_size) || !(ir = snx_ir_new("ctr-static-aot", '1', error, error_size))) goto done;
+    files = (count + CHUNK_ENTRIES - 1) / CHUNK_ENTRIES + 2; /* the helpers, the index, the chunks */
     objects = calloc(files, sizeof *objects);
     if (!objects) {
         snprintf(error, error_size, "out of memory for native chunks");
         goto done;
     }
-    objects[0] = snx_path_join(stage, "code.o");
-    for (unsigned i = 1; i < files; ++i) {
-        char name[32];
-        snprintf(name, sizeof name, "block-%05u.o", i);
-        objects[i] = snx_path_join(stage, name);
-    }
-    work = (Work){.image = &image, .entries = entries, .objects = objects + 1, .count = count, .chunks = files - 1,
+    objects[0].name = "armlib", objects[1].name = "index";
+    for (unsigned i = 2; i < files; ++i) objects[i].name = "blocks";
+    work = (Work){.image = &image, .entries = entries, .objects = objects + 2, .count = count, .chunks = files - 2,
                   .exhaustive = exhaustive};
     if (!compile_chunks(&work)) {
         snprintf(error, error_size, "%s", work.error);
@@ -517,66 +434,26 @@ int snx_ctr_aot_compile(const char* extracted, const SnxCtrSource* game, char* e
         count += work.rest_count;
         qsort(entries, count, sizeof *entries, by_place);
     }
-    if (!index_object(&host, &image, entries, count, objects[0], error, error_size)) goto done;
-    uint64_t output_bytes = work.output_bytes + snx_file_size(objects[0]);
-    if (output_bytes > OBJECT_LIMIT || snx_ctr_aot_runtime_size > OBJECT_LIMIT - output_bytes) {
+    if (!index_object(ir, &image, entries, count, &objects[1], error, error_size)) goto done;
+    if (snx_ir_armlib_object('1', &armlib, &armlib_size, error, error_size)) goto done;
+    objects[0].data = armlib, objects[0].size = armlib_size;
+    uint64_t output_bytes = work.output_bytes + objects[1].size;
+    if (output_bytes > OBJECT_LIMIT || armlib_size > OBJECT_LIMIT - output_bytes) {
         snprintf(error, error_size, "native object output limit exceeded including semantic helpers");
         result = 3;
         goto done;
     }
-    runtime = snx_path_join(stage, "arm-runtime.a");
-    if (snx_write_file(runtime, snx_ctr_aot_runtime, snx_ctr_aot_runtime_size)) {
-        char why[256];
-        snprintf(error, error_size, "cannot write %s: %s", runtime, snx_os_error(why, sizeof why));
-        goto done;
-    }
-    module = snx_path_join(stage, "code.so");
-    command = calloc(files + 7, sizeof *command);
-    if (!command) {
-        snprintf(error, error_size, "out of memory for native linker arguments");
-        goto done;
-    }
-    unsigned arg = 0;
-    command[arg++] = cc;
-    command[arg++] = "-shared";
-#ifdef __APPLE__
-    /* ld64's: a dylib refuses undefined symbols, as -z defs does (its default, said); its stacks aren't executable and
-       its constant data is kept read-only without being asked, which noexecstack, relro and now ask GNU ld for */
-    command[arg++] = "-Wl,-undefined,error";
-#elif !defined(_WIN32)
-    command[arg++] = "-Wl,-z,defs,-z,noexecstack,-z,relro,-z,now";
-#else
-    /* A PE DLL needs none of those: an unresolved symbol is always a link error, and it has no lazily bound PLT for
-       relro and now to protect (lld's MinGW driver refuses -z). It is asked for DEP and ASLR compatibility outright
-       rather than through the linker's defaults. lld writes no import library unless asked (--out-implib), so the
-       published folder holds the DLL alone. */
-    command[arg++] = "-Wl,--nxcompat,--dynamicbase";
-#endif
-    /* The linker runs in the staging directory and is given the files' names alone. With full paths a large image's
-       hundreds of chunks pass the 32767 characters a Windows command line holds (CreateProcessW fails with
-       ERROR_FILENAME_EXCED_RANGE). A commercial title's 700 chunks of 512 blocks take about 13000 by name, quotes
-       included. */
-    for (unsigned i = 0; i < files; ++i) command[arg++] = leaf(objects[i]);
-    command[arg++] = leaf(runtime);
-    command[arg++] = "-o";
-    command[arg++] = leaf(module);
-    if (snx_run_stage(command, stage, "native linking")) {
-        snprintf(error, error_size, "the native linker failed, so no module was published");
-        goto done;
-    }
-    if (!snx_is_file(module) || snx_is_link(module) || !snx_file_size(module)) {
-        snprintf(error, error_size, "native linker did not produce a regular nonempty module");
-        goto done;
-    }
-    if (snx_file_size(module) > MODULE_LIMIT) {
+    if (snx_link(objects, files, exports, 1, leaf(target), &linked, error, error_size)) goto done;
+    if (linked.size > MODULE_LIMIT) {
         snprintf(error, error_size, "native module output limit exceeded");
         result = 3;
         goto done;
     }
-    /* the module is all the folder publishes: the objects and the helpers it was linked from go (a commercial title's
-       are as large as the module) */
-    for (unsigned i = 0; i < files; ++i) (void)remove(objects[i]);
-    (void)remove(runtime);
+    /* the objects go before the image is read again: a commercial title's are as large as the module */
+    for (unsigned i = 1; i < files; ++i) {
+        free((void*)objects[i].data);
+        objects[i].data = NULL;
+    }
     if (!(game ? snx_ctr_image_from_source(game, &check, error, error_size)
               : snx_ctr_image_load(directory, &check, error, error_size)))
         goto done; /* its own error says why */
@@ -587,35 +464,30 @@ int snx_ctr_aot_compile(const char* extracted, const SnxCtrSource* game, char* e
     /* A module from an earlier compile is replaced only once the new one is complete, by a rename over it, so a
        failed publish leaves what was there. On Windows a DLL a running copy of the game has loaded cannot be
        replaced. */
-    if (snx_replace(module, target)) {
+    if (snx_write_file(staged, linked.data, linked.size) || snx_replace(staged, target)) {
         char why[256];
-        snprintf(error, error_size, "cannot move %s to %s: %s", module, target, snx_os_error(why, sizeof why));
+        snprintf(error, error_size, "cannot write %s: %s", target, snx_os_error(why, sizeof why));
+        (void)remove(staged);
         goto done;
     }
     /* an older version's module, in native/ */
     previous = snx_path_join(directory, "native");
     if (previous && snx_is_dir(previous)) (void)snx_remove_tree(previous);
-    (void)snx_remove_tree(stage);
-    free(stage);
-    stage = NULL;
     printf("Compiled ARM11 static module: %u blocks in %u objects\n", count, files);
     result = 0;
 done:
-    if (stage) snx_remove_tree(stage);
     if (objects)
-        for (unsigned i = 0; i < files; ++i) free(objects[i]);
-    free(command);
+        for (unsigned i = 1; i < files; ++i) free((void*)objects[i].data);
     free(objects);
+    free(armlib);
+    free(linked.data);
     free(entries);
     free(work.rest);
-    free(runtime);
-    free(module);
-    free(stage);
+    free(staged);
     free(target);
     free(previous);
-    free(cc);
     free(directory);
-    host_free(&host);
+    snx_ir_free(ir);
     snx_ctr_plan_free(&plan);
     snx_ctr_image_free(&check);
     snx_ctr_image_free(&image);

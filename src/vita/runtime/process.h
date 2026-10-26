@@ -243,7 +243,9 @@ void vita_process_free(VitaProcess* p);
 
 /* guest memory: host pointers (the caller keeps within what the guest has mapped), and accessible ranges */
 static inline void* vita_ptr(VitaProcess* p, uint32_t address) { return p->mem + address; }
+uint16_t vita_read16(VitaProcess* p, uint32_t address);
 uint32_t vita_read32(VitaProcess* p, uint32_t address);
+void vita_write16(VitaProcess* p, uint32_t address, uint16_t value);
 void vita_write32(VitaProcess* p, uint32_t address, uint32_t value);
 void vita_write64(VitaProcess* p, uint32_t address, uint64_t value);
 /* a NUL-terminated guest string copied into out (truncated), false when address is 0 */

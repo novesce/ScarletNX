@@ -12,10 +12,22 @@
 #endif
 
 bool vita_module_compatible(const VitaModule* m, const VitaImage* image) {
+    return vita_module_fields(m, image) && m->keys && m->blocks;
+}
+bool vita_module_fields(const VitaModule* m, const VitaImage* image) {
     return m && image && m->magic == VITA_MODULE_MAGIC && m->abi == VITA_MODULE_ABI &&
            m->descriptor_size == sizeof *m && m->cpu_size == sizeof(SnxArmCPU) && m->arm_abi == SNX_ARM_ABI &&
-           m->pointer_size == sizeof(void*) && m->keys && m->blocks &&
-           !memcmp(m->identity, image->identity, sizeof m->identity);
+           m->pointer_size == sizeof(void*) && !memcmp(m->identity, image->identity, sizeof m->identity);
+}
+static int descriptor_fields(const unsigned char* record, const void* image) {
+    VitaModule fields;
+    memcpy(&fields, record, offsetof(VitaModule, keys));
+    return vita_module_fields(&fields, image);
+}
+bool vita_module_current(const char* path, const VitaImage* image) {
+    const uint64_t magic = VITA_MODULE_MAGIC;
+    return path && image &&
+           snx_file_has_record(path, &magic, sizeof magic, offsetof(VitaModule, keys), descriptor_fields, image);
 }
 SnxArmBlock vita_module_block(const VitaModule* m, uint32_t key) {
     size_t lo = 0, hi = m ? m->count : 0;

@@ -3,10 +3,12 @@
 #include "common/utilities/setup.h"
 #include "nx/runtime/driver/driver.h"
 #include "nx/runtime/driver/mcp.h"
+#include "nx/runtime/entry.h"
 #include <stdio.h>
 #include <string.h>
-/* Standalone build for the host tools. The full runtime uses the same driver. */
-int main(int argc, char** argv) {
+/* The Switch driver of a build of the host tools (SNX_TOOLS_ONLY), in the program as entry.c's is in the runtime's
+   (src/multicall). The full runtime uses the same driver */
+int snx_switch_main(int argc, char** argv) {
     char why[160];
     int result;
     argc = snx_setup_options(argc, argv, why, sizeof why);

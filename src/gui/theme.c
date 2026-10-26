@@ -37,11 +37,11 @@ static const char* const flows[] = {"wrap", "slide", NULL};
 static const char* const pictures[] = {"none", "square", "round", NULL}; /* GuiPicture's order */
 static const char* const dialogs[] = {"default", "yorha", NULL}; /* GuiDialog's order */
 #define FIELD(f)                    offsetof(GuiTheme, f), sizeof(((GuiTheme*)0)->f)
-#define TEXT(s, k, f, about)        {s, k, GUI_KEY_TEXT, FIELD(f), NULL, 0, about}
-#define COLOUR(s, k, f, about)      {s, k, GUI_KEY_COLOUR, FIELD(f), NULL, 0, about}
-#define FLAG(s, k, f, about)        {s, k, GUI_KEY_FLAG, FIELD(f), NULL, 0, about}
-#define NUMBER(s, k, f, max, about) {s, k, GUI_KEY_NUMBER, FIELD(f), NULL, max, about}
-#define WORD(s, k, f, words, about) {s, k, GUI_KEY_WORD, FIELD(f), words, 0, about}
+#define TEXT(s, k, f, about)        {s, k, GUI_KEY_TEXT, FIELD(f), NULL, 0, about, 0, 0, 0, 0, NULL}
+#define COLOUR(s, k, f, about)      {s, k, GUI_KEY_COLOUR, FIELD(f), NULL, 0, about, 0, 0, 0, 0, NULL}
+#define FLAG(s, k, f, about)        {s, k, GUI_KEY_FLAG, FIELD(f), NULL, 0, about, 0, 0, 0, 0, NULL}
+#define NUMBER(s, k, f, max, about) {s, k, GUI_KEY_NUMBER, FIELD(f), NULL, max, about, 0, 0, 0, 0, NULL}
+#define WORD(s, k, f, words, about) {s, k, GUI_KEY_WORD, FIELD(f), words, 0, about, 0, 0, 0, 0, NULL}
 const GuiThemeKey gui_theme_keys[] = {
     TEXT("theme", "name", name, SNX_TR_NOOP("the name the menu's Theme item shows")),
     TEXT("theme", "author", author, SNX_TR_NOOP("who made it")),
@@ -117,7 +117,7 @@ const GuiThemeKey gui_theme_keys[] = {
     NUMBER("splash", "ms", splash_ms, 10000, SNX_TR_NOOP("how long; 0: none")),
     NUMBER("splash", "chance", splash_chance, 100,
            SNX_TR_NOOP("how many boots in 100 show this theme's splash; the others show the default's")),
-    {NULL, NULL, GUI_KEY_TEXT, 0, 0, NULL, 0, NULL}};
+    {NULL, NULL, GUI_KEY_TEXT, 0, 0, NULL, 0, NULL, 0, 0, 0, 0, NULL}};
 static const char* const sections[][2] = {
     {"theme", "Who made it. The theme's id is its folder's name."},
     {"colors", "The menus' colours, #RRGGBB."},
@@ -162,6 +162,62 @@ static int integer(uint32_t* out, const char* value) {
     *out = (uint32_t)n;
     return 1;
 }
+/* The number a setting's typed row takes: the whole of value digits, one '.', two decimals at most (the rest of them
+   dropped, 2.223 as 2.22), the sign of its range first, and within lo to hi; trimmed into out. A value past either end
+   is the closest in range (1.1 of 2 to 5 is 2, 7 is 5), and a whole row's 3.0 is 3 where 3.5 takes no whole. Its
+   leading zeros are left out. 0 when value is no number, 1 as it is, 2 the closest in range. Letters are never part of
+   it, an exponent's e included */
+static int number(const char* value, int whole, double lo, double hi, char* out, size_t size) {
+    size_t n = 0, digits = 0, fraction = 0;
+    const char* dot = NULL;
+    char* end;
+    double d;
+    int clamped = 0;
+    while (*value == ' ' || *value == '\t') value++;
+    if (!*value) { /* no pick: the row is the .ini's again */
+        out[0] = 0;
+        return 1;
+    }
+    if (*value == '-' && lo < 0) {
+        if (n + 1 >= size) return 0;
+        out[n++] = *value++;
+    }
+    for (; *value && *value != ' ' && *value != '\t'; value++) {
+        if (*value == '.') {
+            if (dot) return 0;
+            dot = value;
+        } else if (*value >= '0' && *value <= '9') {
+            if (dot) {
+                if (fraction == 2) continue; /* 2.223: the third decimal and those after it are dropped */
+                ++fraction;
+            } else
+                ++digits;
+        } else
+            return 0;
+        if (n + 1 >= size) return 0;
+        out[n++] = *value;
+    }
+    out[n] = 0;
+    while (*value == ' ' || *value == '\t') value++;
+    if (*value || (!digits && !fraction)) return 0; /* " ." and "-" alone take no number */
+    d = strtod(out, &end);
+    if (end == out || *end || d != d) return 0;
+    if (!whole && lo > 0 && d == 0) return 0; /* 0 is no scale where the range starts above it */
+    if (d < lo) {
+        d = lo;
+        clamped = 1;
+    } else if (d > hi) {
+        d = hi;
+        clamped = 1;
+    }
+    if (whole) { /* "3.0" as 3; a real fraction is no whole number, as the runtime's check of an int says */
+        long long v = (long long)d;
+        if ((double)v != d) return 0;
+        snprintf(out, size, "%lld", v);
+    } else /* a scale as it reads: 2.0 as 2, 01.60 as 1.6, .25 as 0.25 */
+        snprintf(out, size, "%g", d);
+    return clamped ? 2 : 1;
+}
 const char* gui_theme_section_about(const char* section) {
     size_t i;
     for (i = 0; i < sizeof sections / sizeof *sections; ++i)
@@ -179,7 +235,15 @@ int gui_theme_set(void* object, const GuiThemeKey* key, const char* value) {
     uint32_t n;
     int i;
     switch (key->type) {
-        case GUI_KEY_TEXT: return !strchr(value, '\n') && copy(field, key->size, value); /* a line of the file */
+        case GUI_KEY_TEXT: /* a line of the file, or the number a setting is */
+            if (strchr(value, '\n')) return 0;
+            if (!key->numeric) return copy(field, key->size, value);
+            {
+                char text[64];
+                int took = number(value, key->whole, key->lo, key->hi, text, sizeof text);
+                if (!took || !copy(field, key->size, text)) return 0;
+                return took;
+            }
         case GUI_KEY_COLOUR: return colour((GuiRgb*)field, value);
         case GUI_KEY_FLAG:
             if (strcmp(value, "true") && strcmp(value, "false")) return 0;

@@ -12,6 +12,7 @@
    ADTS, of the size SceMp4 gave the unit at that address (vita_mp4_unit_size: a raw frame says nothing of its length),
    or the most a decoder reads */
 #include "vita/hle/hle.h"
+#include "common/utilities/endian.h"
 #include <libavcodec/avcodec.h>
 #include <math.h>
 #include <stdlib.h>
@@ -130,7 +131,7 @@ static uint32_t create(VitaProcess* p, uint32_t ctrl, uint32_t type) {
         const unsigned char* config = vita_ptr(p, info + 4);
         extra[0] = 2; /* FFmpeg's extradata: a version, then the configuration */
         memcpy(extra + 4, config, 4);
-        uint32_t bits = (uint32_t)config[0] << 24 | (uint32_t)config[1] << 16 | (uint32_t)config[2] << 8 | config[3];
+        uint32_t bits = snx_ld_be32(config);
         /* the configuration word: 0xfe, the sample rate's index (4 bits), the channels' layout (3), a zero bit, the
            frame's bytes less one (11), the superframe's frames as a power of two (2) */
         d->frame_bytes = ((bits >> 5) & 0x7ff) + 1;
@@ -187,7 +188,7 @@ static void interleave(const AVFrame* f, uint32_t first, uint32_t count, unsigne
                 default: v = ((const int16_t*)f->data[0])[i * channels + c]; break;
             }
             v = v < -32768 ? -32768 : v > 32767 ? 32767 : v;
-            *out++ = (unsigned char)v, *out++ = (unsigned char)(v >> 8);
+            snx_st_le16(out, (uint16_t)v), out += 2;
         }
 }
 /* a packet of size bytes at es through FFmpeg's decoder into d->frame: false when it can't be decoded */

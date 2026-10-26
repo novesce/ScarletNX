@@ -253,9 +253,9 @@ Implemented:
   CMP / LDRLS PC-indexed tables with at most 256 entries; no unbounded sweep.
   Blocks contain at most 32 guest instructions;
   bounded LLVM chunks are disposed between emissions, then statically linked.
-  The link runs a C compiler: the one the build used where it is on the machine,
-  else a clang beside the program, else one on PATH (on Windows LLVM-MinGW's). With
-  none, the compile stops before compiling anything, naming each place it looked.
+  The link is the LLVM backend's own (`src/common/cpu/recompiler/llvm/link.c`),
+  with the helpers the blocks call (`armlib.c`), as the Switch's 32-bit modules
+  are: an ELF shared object, a PE DLL or a Mach-O dylib, without a C compiler.
   There is no runtime discovery/compilation. Uncovered targets stop explicitly.
 - Homebrew `.data` byte counts including BSS are accepted only if subtracting
   BSS fits initialized pages; BSS never becomes required input `.code` bytes.
@@ -501,9 +501,9 @@ playing, as the Switch driver's do. Otherwise the driver loads
 `<title ID>_code.so` and compiles it first only when needed: when it is
 missing, or no longer loads or matches the build's module ABI or the extracted
 image's identity (a changed `.code`). `-r` always compiles again. A new module
-replaces the old one only once it is complete, and the objects it was linked from
-are removed. A failed compile removes private native staging; the extracted tree
-remains. Once the module is ready the driver copies itself into the folder as the
+replaces the old one only once it is complete, by a rename over it; the objects
+it was linked from stay in memory. A failed compile leaves the old module and the
+extracted tree. Once the module is ready the driver copies itself into the folder as the
 game's runtime, unless the copy there is the same program. The GUI uses this same
 driver path, not a separate engine.
 
@@ -605,9 +605,8 @@ This requires a native LLVM SDK (select with `SNX_LLVM_CONFIG` if needed).
 `SNX_TEST_ARM_DIFF=ON` additionally requires Python `unicorn==2.1.4`, and enables
 ARM11 MPCore plus shared A57 integer/VFP/NEON/Thumb regressions. See
 `src/common/cpu/arm/README.md` for the codegen contract and exact limitations.
-The compiler calls the host C compiler selected by CMake to link its PIC objects,
-and that compiler must remain installed at the configured path. The compiled
-modules need no LLVM library. On Windows `scarletnx-3ds` carries the runtime's
+The compiler links its objects with the LLVM backend's linker, so a game compiles
+on a machine without a C compiler. The compiled modules need no LLVM library. On Windows `scarletnx-3ds` carries the runtime's
 application manifest (long paths, UTF-8 code page), and the module is a DLL linked
 with DEP and ASLR compatibility, exporting only its descriptor.
 Add `SNX_TEST_ARM_AOT=ON` for the CPU tests as well as the pipeline's.
@@ -822,8 +821,6 @@ phase that reworks its area:
   kept but never read, `SNX_CTR_DSP_RAM` is both a macro and an enumerator, and
   ReadPipe (`0x0e`) and Flush/Invalidate with a real process handle are untested.
 - F8 (loader and module cache):
-  - The host C compiler's path is fixed at configure time, which breaks installed
-    and cross builds.
   - No default test covers the Windows link and export, and the static pipeline
     test parses only ELF modules, not the Windows DLL.
   - The staging folder's ACL, meant for keys, may become `native/`'s in an

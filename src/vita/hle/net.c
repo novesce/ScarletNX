@@ -12,6 +12,7 @@
    that never answers, and one whose sceNetInit failed quit as it booted. The trophies (SceNpTrophy,
    vita/hle/dialog.c) and the licenses (SceNpDrm) are the console's own, not the network's */
 #include "vita/hle/hle.h"
+#include "common/utilities/endian.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -132,12 +133,9 @@ static uint32_t zero(VitaProcess* p, VitaThread* t) {
     (void)p, (void)t;
     return 0;
 }
-static uint16_t swap16(uint32_t v) { return (uint16_t)(((v >> 8) | (v << 8)) & 0xffffu); }
-static uint32_t swap32(uint32_t v) {
-    return (v >> 24) | ((v >> 8) & 0xff00u) | ((v << 8) & 0xff0000u) | (v << 24);
-}
-static uint32_t net_htonl(VitaProcess* p, VitaThread* t) { return swap32(vita_arg(p, t, 0)); }
-static uint32_t net_htons(VitaProcess* p, VitaThread* t) { return swap16(vita_arg(p, t, 0)); }
+/* the guest is little-endian, so its network order is always a swap */
+static uint32_t net_htonl(VitaProcess* p, VitaThread* t) { return __builtin_bswap32(vita_arg(p, t, 0)); }
+static uint32_t net_htons(VitaProcess* p, VitaThread* t) { return __builtin_bswap16((uint16_t)vita_arg(p, t, 0)); }
 /* sceNetErrnoLoc: the thread's */
 static uint32_t net_errno_loc(VitaProcess* p, VitaThread* t) {
     (void)p;
@@ -165,8 +163,7 @@ static Socket* socket_of(VitaProcess* p, uint32_t id) {
    whether address_write can write at and length_at (each optional) */
 static Address address_read(VitaProcess* p, uint32_t at) {
     const unsigned char* a = vita_ptr(p, at);
-    return (Address){(uint32_t)a[4] << 24 | (uint32_t)a[5] << 16 | (uint32_t)a[6] << 8 | a[7],
-                     (uint16_t)(a[2] << 8 | a[3]), (uint16_t)(a[8] << 8 | a[9])};
+    return (Address){snx_ld_be32(a + 4), snx_ld_be16(a + 2), snx_ld_be16(a + 8)};
 }
 static bool address_writable(VitaProcess* p, uint32_t at, uint32_t length_at) {
     return (!at || vita_mapped(p, at, 16)) && (!length_at || vita_mapped(p, length_at, 4));
@@ -176,10 +173,7 @@ static void address_write(VitaProcess* p, uint32_t at, uint32_t length_at, Addre
     unsigned char* to = vita_ptr(p, at);
     memset(to, 0, 16);
     to[0] = 16, to[1] = 2; /* AF_INET */
-    to[2] = (unsigned char)(a.port >> 8), to[3] = (unsigned char)a.port;
-    to[4] = (unsigned char)(a.address >> 24), to[5] = (unsigned char)(a.address >> 16);
-    to[6] = (unsigned char)(a.address >> 8), to[7] = (unsigned char)a.address;
-    to[8] = (unsigned char)(a.vport >> 8), to[9] = (unsigned char)a.vport;
+    snx_st_be16(to + 2, a.port), snx_st_be32(to + 4, a.address), snx_st_be16(to + 8, a.vport);
     if (length_at) vita_write32(p, length_at, 16);
 }
 static bool p2p(const Socket* s) { return s->type == SCE_NET_SOCK_DGRAM_P2P; }

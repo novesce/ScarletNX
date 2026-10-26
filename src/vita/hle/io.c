@@ -11,6 +11,7 @@
 #define _DEFAULT_SOURCE /* fseeko */
 #endif
 #include "vita/hle/hle.h"
+#include "common/utilities/endian.h"
 #include "common/utilities/common.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -273,7 +274,7 @@ static void date_time(VitaProcess* p, uint32_t at, time_t when) {
     uint16_t fields[6] = {(uint16_t)(tm.tm_year + 1900), (uint16_t)(tm.tm_mon + 1), (uint16_t)tm.tm_mday,
                           (uint16_t)tm.tm_hour,          (uint16_t)tm.tm_min,       (uint16_t)tm.tm_sec};
     unsigned char* b = vita_ptr(p, at);
-    for (unsigned i = 0; i < 6; ++i) b[i * 2] = (unsigned char)fields[i], b[i * 2 + 1] = (unsigned char)(fields[i] >> 8);
+    for (unsigned i = 0; i < 6; ++i) snx_st_le16(b + i * 2, fields[i]);
     vita_write32(p, at + 12, 0);
 }
 /* SceIoStat (88 bytes): st_mode, st_attr, st_size (64-bit, at 8), the creation, access and modification times */

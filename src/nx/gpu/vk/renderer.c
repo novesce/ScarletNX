@@ -90,7 +90,7 @@ static void vkr_mapping_end(void) {
 /* 0 when Vulkan can't run here */
 static int vkr_start(void) {
     if (!vk_init()) return 0;
-    g_vk_scale = g_settings.resolution_scale;       /* the .ini keeps resolution within 0.25 to 4 (options.c) */
+    g_vk_scale = g_settings.resolution_scale;       /* the .ini keeps resolution within 0.25 to 16 (options.c) */
     g_vk_anisotropy = g_settings.anisotropic_filtering; /* the sampler table keeps what it makes: anisotropy applies at start */
     if (g_vk_anisotropy > 1 && !g_vk.feat.samplerAnisotropy)
         LOG("vulkan: this GPU has no anisotropic filtering, so anisotropy=%d does nothing\n", g_vk_anisotropy);

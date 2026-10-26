@@ -48,9 +48,9 @@ music through this path, without input yet. See [3DS port](3DS.md) for coverage 
 and remaining cache/ISA work.
 
 The common target has no runtime-specific imports. NX and GNU ABI each link
-common and have no dependency on each other. The GNU executable target is
-`scarletnx-gnuabi-run`, whose output is `scarletnx-gnuabi`; its library output is
-`scarletnx-gnuabi-runtime`. `SNX_BUILD_NX=OFF` builds GNU ABI without fetching or
+common and have no dependency on each other. The GNU ABI driver is the library
+`scarletnx-gnuabi` (its file `scarletnx-gnuabi-runtime`), command line included, which
+`scarletnx` runs as `scarletnx-gnuabi`. `SNX_BUILD_NX=OFF` builds GNU ABI without fetching or
 linking NX graphics/media packages. CTest checks include ownership and the actual
 transitive CMake dependency graph and target source ownership.
 
@@ -61,12 +61,17 @@ reads Linux syscall number `x8` and arguments `x0` through `x5`, and writes resu
 `x0`. CPU helpers and instruction emission are shared; Horizon handlers are never
 used as Linux syscalls.
 
-`scarletnx-switch` is the `scarletnx` NX implementation under the Switch's name,
-a Unix symlink or a Windows executable copy. On Linux and macOS `scarletnx-3ds` and
-`scarletnx-gnuabi` are symlinks to `scarletnx` too (`SNX_MULTICALL`): `src/multicall/main.c`
-runs the driver the name says, from the library of its own folder (`snx_ctr_program`,
-`snx_gnuabi_program`), so LLVM and SDL are in one program once. Elsewhere each is its own
-executable.
+`scarletnx` is every driver the build has: `src/multicall/main.c` is the only `main`, and runs
+the driver its name says from the library of the driver's own folder (`snx_switch_program`,
+`snx_ctr_program`, `snx_vita_program`, `scarletnx-gnuabi`, `snx_agb_program`), so LLVM and SDL
+are in one program once. On Linux and macOS `scarletnx-switch`, `scarletnx-3ds`,
+`scarletnx-vita`, `scarletnx-gnuabi` and `scarletnx-agb` are symlinks to it. Windows has no
+links: the driver's name goes first (`scarletnx.exe scarletnx-3ds ...`), and the launcher runs
+the drivers that way (`snx_menu_has_driver`). A game's copy runs its driver too: a GBA game's by
+its `.ini` (`system=gba`), a 3DS or Vita game's by its title ID, any other the Switch's (or, in a
+build without it, the one driver there is). The 3DS and Vita
+drivers read what a module was compiled for from its file before loading it, and compile first
+when it is stale, so a module is loaded once.
 The original game-name entry points and CLI remain available. GNU ABI has an
 independent CPU-only entry point; see [GNUABI.md](GNUABI.md) for implemented
 syscalls, ELF execution, filesystem scope, and differential testing.

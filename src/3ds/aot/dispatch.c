@@ -10,6 +10,9 @@
 
 unsigned snx_ctr_module_memory(void) { return ctr_host_flat() ? SNX_CTR_MODULE_FLAT_MODE : SNX_CTR_MODULE_CHECKED_MODE; }
 bool snx_ctr_module_compatible(const SnxCtrModule* m, const SnxCtrImage* image) {
+    return snx_ctr_module_fields(m, image) && m->arm_blocks && m->thumb_blocks;
+}
+bool snx_ctr_module_fields(const SnxCtrModule* m, const SnxCtrImage* image) {
     return m && image && m->magic == SNX_CTR_MODULE_MAGIC && m->abi == SNX_CTR_MODULE_ABI &&
            m->descriptor_size == sizeof *m && m->cpu_size == sizeof(SnxArmCPU) &&
            m->checked_size == sizeof(SnxArmCheckedCPU) && m->arm_abi == SNX_ARM_ABI &&
@@ -18,7 +21,7 @@ bool snx_ctr_module_compatible(const SnxCtrModule* m, const SnxCtrImage* image) 
            m->pointer_size == sizeof(void*) && m->text_address == image->segment[0].address &&
            m->text_bytes == image->segment[0].bytes && m->text_bytes && !(m->text_bytes & 3) &&
            m->text_bytes <= SNX_CTR_AOT_TEXT_LIMIT && m->arm_count == m->text_bytes / 4 &&
-           m->thumb_count == m->text_bytes / 2 && m->arm_blocks && m->thumb_blocks &&
+           m->thumb_count == m->text_bytes / 2 &&
            !memcmp(m->image_identity, image->identity, 32);
 }
 /* Schedule a thread to run: false when none runs now, with the dispatch's result in stop. An idle wake (a vblank or

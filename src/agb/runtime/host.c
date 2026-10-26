@@ -129,7 +129,7 @@ AgbHost* agb_host_open(const char* title, bool fullscreen, char* error, size_t e
     if (!SDL_CreateWindowAndRenderer(title, AGB_SCREEN_WIDTH * START_SCALE, AGB_SCREEN_HEIGHT * START_SCALE,
                                      SDL_WINDOW_RESIZABLE | (fullscreen ? SDL_WINDOW_FULLSCREEN : 0), &host->window,
                                      &host->renderer) ||
-        !(host->texture = SDL_CreateTexture(host->renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING,
+        !(host->texture = SDL_CreateTexture(host->renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING,
                                             AGB_SCREEN_WIDTH, AGB_SCREEN_HEIGHT)) ||
         !SDL_SetTextureScaleMode(host->texture, SDL_SCALEMODE_NEAREST) ||
         !SDL_SetRenderLogicalPresentation(host->renderer, AGB_SCREEN_WIDTH, AGB_SCREEN_HEIGHT,

@@ -50,21 +50,9 @@ endif()
 target_link_libraries(snx_driver PUBLIC snx_driver_llvm)
 # the recompiler as a library (snx_recompiler.h), over the backends configured above
 add_subdirectory("${PROJECT_SOURCE_DIR}/src/common/cpu/recompiler" recompiler-library)
+# a build of the host tools: the Switch driver scarletnx runs (src/multicall) is the driver alone, which plays nothing
 if(SNX_TOOLS_ONLY)
-    add_executable(scarletnx main.c)
-    # linked as C++: LLVM and the demangler (common/utilities/demangle.h) need the C++ runtime
-    set_target_properties(scarletnx PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF
-        LINKER_LANGUAGE CXX RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}")
-    target_link_libraries(scarletnx PRIVATE snx_driver)
-    if(WIN32)
-        if(CMAKE_C_SIMULATE_ID STREQUAL "MSVC")
-            target_link_options(scarletnx PRIVATE "LINKER:/MANIFESTINPUT:${PROJECT_SOURCE_DIR}/src/common/platform/runtime.manifest")
-        else()
-            enable_language(RC)
-            target_sources(scarletnx PRIVATE "${PROJECT_SOURCE_DIR}/src/common/platform/runtime.rc")
-            # where the resource compiler finds the manifest and the icon; C includes from src/ alone
-            target_include_directories(scarletnx PRIVATE
-                                       "$<$<COMPILE_LANGUAGE:RC>:${PROJECT_SOURCE_DIR}/src/common/platform>")
-        endif()
-    endif()
+    add_library(snx_switch_program STATIC main.c)
+    set_target_properties(snx_switch_program PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+    target_link_libraries(snx_switch_program PUBLIC snx_driver)
 endif()

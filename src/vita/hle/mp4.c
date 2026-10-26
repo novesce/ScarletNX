@@ -10,6 +10,7 @@
    The NIDs are Vita3K's (nids.inc, GPL-2.0-or-later); its SceMp4 is stubs, so what each call does is the library's
    use of it: GetStreamInfo's (0xd5b26179) name is ours */
 #include "vita/hle/hle.h"
+#include "common/utilities/endian.h"
 #include "common/utilities/common.h"
 #include <inttypes.h>
 #include <libavcodec/bsf.h>
@@ -211,10 +212,9 @@ static uint32_t on_box(VitaProcess* p, VitaThread* t, void* context) {
     Mp4* m = context;
     int32_t got = (int32_t)t->cpu.r[0];
     const unsigned char* h = vita_ptr(p, m->scratch);
-    uint64_t size = (uint64_t)h[0] << 24 | (uint64_t)h[1] << 16 | (uint64_t)h[2] << 8 | h[3], end;
+    uint64_t size = snx_ld_be32(h), end;
     if (size == 1 && got >= 16)
-        size = (uint64_t)h[8] << 56 | (uint64_t)h[9] << 48 | (uint64_t)h[10] << 40 | (uint64_t)h[11] << 32 |
-               (uint64_t)h[12] << 24 | (uint64_t)h[13] << 16 | (uint64_t)h[14] << 8 | h[15];
+        size = snx_ld_be64(h + 8);
     else if (size == 0)
         size = m->reported - m->box; /* to the end */
     bool box = got >= 8 && size >= 8 && known_box(h + 4) && (m->box || !memcmp(h + 4, "ftyp", 4));

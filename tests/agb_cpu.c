@@ -139,7 +139,7 @@ int main(void) {
     free(rom);
     CHECK(!agb_map_init(&map, &board, error, sizeof error));
     agb_cpu_init(&cpu, &board, map.base);
-    agb_recomp_init(&recomp, "agb_cpu_test.code", SNX_AGB_TEST_CC);
+    agb_recomp_init(&recomp, "agb_cpu_test.code");
     if (agb_recomp_build(&recomp, &board, error, sizeof error)) {
         fprintf(stderr, "agb_cpu: recompiling the ROM: %s\n", error);
         goto done;
@@ -202,20 +202,19 @@ int main(void) {
         }
     }
     /* the instructions after the interpreted ones start blocks the discovery step did not see: they were compiled as
-       the run reached them, and saving the run keeps them, in the map as hints with SNX_AGB_JIT (the module as it
-       was, at once), else folded into the module */
+       the run reached them, and saving the run keeps them, in the map as hints (the module as it was, at once) */
     CHECK(recomp.compiled > 0 && recomp.dirty);
     if (agb_recomp_save(&recomp, &board, error, sizeof error)) {
         fprintf(stderr, "agb_cpu: saving the module: %s\n", error);
         goto done;
     }
-    CHECK(!recomp.patch_count && !recomp.dirty); /* no module file left */
+    CHECK(!recomp.dirty);
     {
         /* the cache holds every block of the run, each with its size: a block of the module its function, a hint
-           none until a run reaches it (with SNX_AGB_JIT), which compiles it again and counts it as no new one */
+           none until a run reaches it, which compiles it again and counts it as no new one */
         AgbRecomp cached;
         size_t count = recomp.count, hints = 0;
-        agb_recomp_init(&cached, "agb_cpu_test.code", SNX_AGB_TEST_CC);
+        agb_recomp_init(&cached, "agb_cpu_test.code");
         if (agb_recomp_load_cache(&cached, &board, error, sizeof error)) {
             fprintf(stderr, "agb_cpu: loading the cache: %s\n", error);
             agb_recomp_free(&cached);
@@ -227,16 +226,12 @@ int main(void) {
             if (!block->instructions || (block->fn == NULL) != (block->hint != 0)) result = 1;
             hints += block->hint;
         }
-#ifdef SNX_AGB_JIT
         if (!hints) result = 1;
         for (size_t i = 1; i <= cached.count; ++i)
             if (cached.blocks[i].hint && (!agb_recomp_lookup(&cached, &board, cached.blocks[i].pc,
                                                              cached.blocks[i].thumb, error, sizeof error) ||
                                           cached.compiled))
                 result = 1;
-#else
-        if (hints) result = 1;
-#endif
         agb_recomp_free(&cached);
         CHECK(!result);
         result = 1;
@@ -265,7 +260,7 @@ int main(void) {
         block = agb_recomp_lookup(&recomp, &board, 0x03000000, 1, error, sizeof error);
         CHECK(block && run_block(&cpu, block) == 2 && cpu.arm.r[15] == 0x08000200);
         CHECK(!agb_recomp_save(&recomp, &board, error, sizeof error));
-        agb_recomp_init(&next, "agb_cpu_test.code", SNX_AGB_TEST_CC);
+        agb_recomp_init(&next, "agb_cpu_test.code");
         CHECK(!agb_recomp_load_cache(&next, &board, error, sizeof error));
         /* the same code in RAM: the cached block runs, no new one compiled */
         block = agb_recomp_lookup(&next, &board, 0x03000000, 1, error, sizeof error);
@@ -277,7 +272,6 @@ int main(void) {
         CHECK(!result);
         result = 1;
     }
-#ifdef SNX_AGB_JIT
     {
         /* a recompile (-r) builds every block of the map into the module, the hints too: here from a copy of the map
            under another name, as Windows keeps a module this process has loaded from being written */
@@ -290,7 +284,7 @@ int main(void) {
         if (from) fclose(from);
         if (to) fclose(to);
         CHECK(!result);
-        agb_recomp_init(&made, "agb_cpu_made.code", SNX_AGB_TEST_CC);
+        agb_recomp_init(&made, "agb_cpu_made.code");
         result = agb_recomp_load_map(&made, &board, error, sizeof error) ||
                  agb_recomp_build(&made, &board, error, sizeof error) || made.count < 2;
         if (result) fprintf(stderr, "agb_cpu: the recompile from the map: %s\n", error);
@@ -308,7 +302,7 @@ int main(void) {
         recomp.dirty = 1;
         CHECK(!agb_recomp_save(&recomp, &board, error, sizeof error));
         recomp.module_size -= 1;
-        agb_recomp_init(&after, "agb_cpu_test.code", SNX_AGB_TEST_CC);
+        agb_recomp_init(&after, "agb_cpu_test.code");
         result = agb_recomp_load_map(&after, &board, error, sizeof error) || !after.count;
         for (size_t i = 1; !result && i <= after.count; ++i)
             if (after.blocks[i].symbol || !after.blocks[i].hint) result = 1;
@@ -316,7 +310,6 @@ int main(void) {
         CHECK(!result);
         result = 1;
     }
-#endif
     {
         /* an LDM the console's bus wraps past 4 GiB lands in the window's guard (memmap.c) instead of aborting */
         const AgbBlock* block;
@@ -344,7 +337,6 @@ int main(void) {
         }
         CHECK(callee && after);
     }
-#ifdef SNX_AGB_JIT
     {
         /* finding a block costs the same however many the map names: one named after 32768 others, as a run that once
            went through 32 MiB of zeros left, against the same one named first, each found 200000 times. A scan of the
@@ -364,7 +356,7 @@ int main(void) {
             if (from) fclose(from);
             if (to && fclose(to)) result = 1;
             CHECK(!result);
-            agb_recomp_init(&many, "agb_cpu_index.code", SNX_AGB_TEST_CC);
+            agb_recomp_init(&many, "agb_cpu_index.code");
             CHECK(!agb_recomp_load_map(&many, &board, error, sizeof error) && many.count == 32769);
             block = agb_recomp_lookup(&many, &board, 0x080000C0, 0, error, sizeof error); /* compiled here, once */
             result = !block;
@@ -385,7 +377,6 @@ int main(void) {
             goto done;
         }
     }
-#endif
     {
         /* the cache is the ROM's it was built from: another one's, named the same, recompiles and says why */
         AgbRecomp other;
@@ -394,7 +385,7 @@ int main(void) {
         changed[0x1F0] = 1;
         CHECK(!agb_board_insert(&board, changed, size, error, sizeof error));
         free(changed);
-        agb_recomp_init(&other, "agb_cpu_test.code", SNX_AGB_TEST_CC);
+        agb_recomp_init(&other, "agb_cpu_test.code");
         result = agb_recomp_load_cache(&other, &board, error, sizeof error);
         agb_recomp_free(&other);
         CHECK(result && strstr(error, "agb_cpu_test.code.map is another ROM's ("));

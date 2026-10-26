@@ -9,16 +9,13 @@
 #include "agb/cpu/memmap.h"
 #include "agb/cpu/recomp.h"
 #include "agb/runtime/host.h"
+#include "agb/runtime/main.h"
 #include "common/utilities/common.h"
 #include "common/utilities/game_ini.h"
 #include "common/utilities/script.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#ifndef SNX_AGB_CC
-#define SNX_AGB_CC "cc"
-#endif
 
 /* a save the game writes goes on disk this many frames (a second) after its first write, and at the end */
 #define SAVE_QUIET_FRAMES 60
@@ -111,6 +108,15 @@ static char* own_game(const char* argv0) {
     return folder;
 }
 
+bool snx_agb_game_name(const char* argv0) {
+    char *folder = own_game(argv0), *exe = folder ? snx_executable(argv0) : NULL, *name = exe ? program_name(exe) : NULL;
+    bool gba = name && snx_game_system(folder, name) == SNX_SYSTEM_GBA;
+    free(name);
+    free(exe);
+    free(folder);
+    return gba;
+}
+
 /* The game's folder: in outdir, else the data folder's recompiled/ as the Switch and 3DS drivers make theirs. Made,
    resolved; NULL with a line saying why */
 static char* game_folder(const char* data, const char* outdir, const char* argv0, const char* name) {
@@ -153,7 +159,7 @@ static int save_write(AgbBoard* board, const char* path) {
     return -1;
 }
 
-int main(int argc, char** argv) {
+int snx_agb_main(int argc, char** argv) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     const char *path = NULL, *shot = NULL, *data = NULL, *outdir = NULL, *game = NULL, *script = NULL;
@@ -286,7 +292,7 @@ int main(int argc, char** argv) {
             }
         }
         agb_cpu_init(&cpu, &board, map.base);
-        agb_recomp_init(&recomp, base, SNX_AGB_CC);
+        agb_recomp_init(&recomp, base);
         /* a recompile builds the module from every block the runs reached, the map's; else the cache is loaded */
         if (recompile ? (agb_recomp_load_map(&recomp, &board, error, sizeof error), 1)
                       : agb_recomp_load_cache(&recomp, &board, error, sizeof error)) {
@@ -365,14 +371,9 @@ int main(int argc, char** argv) {
         agb_host_close(host);
         if (board.save.dirty && agb_save_size(&board) && save_write(&board, save)) status = 1;
         error[0] = 0;
-#ifdef SNX_AGB_JIT
         if (recomp.compiled)
             printf("%zu blocks compiled at run time were added to the hints, which a recompile (-r) starts from\n",
                    recomp.compiled);
-#else
-        if (recomp.dirty)
-            printf("Keeping the %zu blocks this run compiled in %s.so for the next one\n", recomp.compiled, base);
-#endif
         if (agb_recomp_save(&recomp, &board, error, sizeof error))
             fprintf(stderr, "scarletnx-agb: cannot save the recompiled ROM: %s\n", error);
         if (played && !status) puts("Exit."); /* a run that ended well says so last, as every driver's */

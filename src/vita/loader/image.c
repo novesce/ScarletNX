@@ -6,6 +6,7 @@
 #include "vita/loader/image.h"
 #include "vita/loader/inflate.h"
 #include "common/utilities/common.h"
+#include "common/utilities/endian.h"
 #include <openssl/evp.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,11 +36,6 @@ typedef struct {
     size_t error_size;
 } Loader;
 
-static uint32_t le16(const unsigned char* p) { return p[0] | (uint32_t)p[1] << 8; }
-static uint32_t le32(const unsigned char* p) { return le16(p) | le16(p + 2) << 16; }
-static uint64_t le64(const unsigned char* p) { return le32(p) | (uint64_t)le32(p + 4) << 32; }
-static void put16(unsigned char* p, uint32_t v) { p[0] = (unsigned char)v, p[1] = (unsigned char)(v >> 8); }
-static void put32(unsigned char* p, uint32_t v) { put16(p, v), put16(p + 2, v >> 16); }
 
 const VitaSegment* vita_image_segment(const VitaImage* image, uint32_t address, uint32_t size) {
     for (unsigned i = 0; i < image->segment_count; ++i) {
@@ -54,7 +50,7 @@ static unsigned char* at(VitaImage* image, uint32_t address, uint32_t size) {
 }
 static bool word(VitaImage* image, uint32_t address, uint32_t* value) {
     const unsigned char* p = at(image, address, 4);
-    if (p) *value = le32(p);
+    if (p) *value = snx_ld_le32(p);
     return p != NULL;
 }
 static bool fail(Loader* l, const char* format, uint32_t a, uint32_t b) {
@@ -88,14 +84,14 @@ static void seed_pointers(Loader* l) {
     const VitaImage* image = l->image;
     for (unsigned i = 0; i < image->segment_count; ++i) {
         const VitaSegment* s = &image->segment[i];
-        for (uint32_t at = 0; at + 4 <= s->size; at += 4) seed(l, le32(s->bytes + at));
+        for (uint32_t at = 0; at + 4 <= s->size; at += 4) seed(l, snx_ld_le32(s->bytes + at));
         if (!(s->flags & 1)) continue;
         for (uint32_t at = 0; at + 4 <= s->size; at += 2) {
-            uint32_t hw1 = le16(s->bytes + at), hw2 = le16(s->bytes + at + 2);
+            uint32_t hw1 = snx_ld_le16(s->bytes + at), hw2 = snx_ld_le16(s->bytes + at + 2);
             if ((hw1 & 0xfbf0) != 0xf240 || (hw2 & 0x8000)) continue; /* MOVW (T3) */
             uint32_t rd = (hw2 >> 8) & 15, low = thumb_imm16(hw1, hw2);
             for (uint32_t next = at + 4; next + 4 <= s->size && next <= at + 16; next += 2) {
-                uint32_t h1 = le16(s->bytes + next), h2 = le16(s->bytes + next + 2);
+                uint32_t h1 = snx_ld_le16(s->bytes + next), h2 = snx_ld_le16(s->bytes + next + 2);
                 if ((h1 & 0xfbf0) == 0xf2c0 && !(h2 & 0x8000) && ((h2 >> 8) & 15) == rd) { /* MOVT (T1) */
                     seed(l, thumb_imm16(h1, h2) << 16 | low);
                     break;
@@ -121,15 +117,15 @@ static bool relocate(Loader* l, unsigned code, unsigned symseg, unsigned datseg,
             return true;
         case 2:  /* R_ARM_ABS32 */
         case 38: /* R_ARM_TARGET1, ABS32 on the Vita */
-            put32(p, value);
+            snx_st_le32(p, value);
             seed(l, value);
             return true;
         case 3:  /* R_ARM_REL32 */
         case 41: /* R_ARM_TARGET2, REL32 on the Vita */
-            if (!same) put32(p, value - P);
+            if (!same) snx_st_le32(p, value - P);
             return true;
         case 42: /* R_ARM_PREL31 */
-            if (!same) put32(p, (le32(p) & 0x80000000u) | ((value - P) & 0x7fffffffu));
+            if (!same) snx_st_le32(p, (snx_ld_le32(p) & 0x80000000u) | ((value - P) & 0x7fffffffu));
             return true;
         case 10: /* R_ARM_THM_CALL */
         case 30: /* R_ARM_THM_JUMP24 */
@@ -139,16 +135,16 @@ static bool relocate(Loader* l, unsigned code, unsigned symseg, unsigned datseg,
             return true;
         case 43: /* R_ARM_MOVW_ABS_NC */
         case 44: { /* R_ARM_MOVT_ABS */
-            uint32_t v = code == 44 ? value >> 16 : value & 0xffff, w = le32(p);
-            put32(p, (w & 0xfff0f000u) | ((v & 0xf000) << 4) | (v & 0x0fff));
+            uint32_t v = code == 44 ? value >> 16 : value & 0xffff, w = snx_ld_le32(p);
+            snx_st_le32(p, (w & 0xfff0f000u) | ((v & 0xf000) << 4) | (v & 0x0fff));
             return true;
         }
         case 47: /* R_ARM_THM_MOVW_ABS_NC */
         case 48: { /* R_ARM_THM_MOVT_ABS: imm16 = imm4:i:imm3:imm8 over the two halfwords */
-            uint32_t v = code == 48 ? value >> 16 : value & 0xffff, upper = le16(p), lower = le16(p + 2);
+            uint32_t v = code == 48 ? value >> 16 : value & 0xffff, upper = snx_ld_le16(p), lower = snx_ld_le16(p + 2);
             upper = (upper & 0xfbf0) | ((v >> 12) & 15) | (((v >> 11) & 1) << 10);
             lower = (lower & 0x8f00) | (((v >> 8) & 7) << 12) | (v & 0xff);
-            put16(p, upper), put16(p + 2, lower);
+            snx_st_le16(p, upper), snx_st_le16(p + 2, lower);
             if (code == 47) seed(l, value);
             return true;
         }
@@ -158,16 +154,16 @@ static bool relocate(Loader* l, unsigned code, unsigned symseg, unsigned datseg,
 static bool relocate_all(Loader* l, const unsigned char* r, size_t size) {
     for (size_t pos = 0; pos < size;) {
         if (size - pos < 8) return fail(l, "truncated relocation at %u of %u bytes", (uint32_t)pos, (uint32_t)size);
-        uint32_t type = le32(r + pos), offset, addend, code2 = 0, dist2 = 0;
+        uint32_t type = snx_ld_le32(r + pos), offset, addend, code2 = 0, dist2 = 0;
         if (type & 15) { /* the short form: the offset split over the two words, a 12-bit addend */
-            uint32_t second = le32(r + pos + 4);
+            uint32_t second = snx_ld_le32(r + pos + 4);
             offset = (type >> 20) | (second & 0xfffff) << 12;
             addend = second >> 20;
             pos += 8;
         } else {
             if (size - pos < 12) return fail(l, "truncated relocation at %u of %u bytes", (uint32_t)pos, (uint32_t)size);
-            addend = le32(r + pos + 4);
-            offset = le32(r + pos + 8);
+            addend = snx_ld_le32(r + pos + 4);
+            offset = snx_ld_le32(r + pos + 8);
             code2 = (type >> 20) & 0xff;
             dist2 = (type >> 28) & 15;
             pos += 12;
@@ -207,20 +203,20 @@ static bool imports(Loader* l, uint32_t top, uint32_t end) {
         uint32_t index = 0;
         for (uint32_t p = top; p < end;) {
             const unsigned char* e = at(image, p, 0x24);
-            if (!e || (le16(e) != 0x24 && le16(e) != 0x34) || !at(image, p, le16(e)))
+            if (!e || (snx_ld_le16(e) != 0x24 && snx_ld_le16(e) != 0x34) || !at(image, p, snx_ld_le16(e)))
                 return fail(l, "bad import table entry at 0x%08x", p, 0);
-            uint32_t functions = le16(e + 6), variables, library_nid, name, nids, entries, variable_nids,
+            uint32_t functions = snx_ld_le16(e + 6), variables, library_nid, name, nids, entries, variable_nids,
                      variable_entries;
-            if (le16(e) == 0x34) { /* the older layout, with TLS variables */
-                if (le16(e + 10)) return fail(l, "the module imports %u TLS variables (at 0x%08x), which isn't "
-                                                 "supported yet", le16(e + 10), p);
-                variables = le16(e + 8);
-                library_nid = le32(e + 16), name = le32(e + 20), nids = le32(e + 28), entries = le32(e + 32);
-                variable_nids = le32(e + 36), variable_entries = le32(e + 40);
+            if (snx_ld_le16(e) == 0x34) { /* the older layout, with TLS variables */
+                if (snx_ld_le16(e + 10)) return fail(l, "the module imports %u TLS variables (at 0x%08x), which isn't "
+                                                 "supported yet", snx_ld_le16(e + 10), p);
+                variables = snx_ld_le16(e + 8);
+                library_nid = snx_ld_le32(e + 16), name = snx_ld_le32(e + 20), nids = snx_ld_le32(e + 28), entries = snx_ld_le32(e + 32);
+                variable_nids = snx_ld_le32(e + 36), variable_entries = snx_ld_le32(e + 40);
             } else {
-                variables = le32(e + 8);
-                library_nid = le32(e + 12), name = le32(e + 16), nids = le32(e + 20), entries = le32(e + 24);
-                variable_nids = le32(e + 28), variable_entries = le32(e + 32);
+                variables = snx_ld_le32(e + 8);
+                library_nid = snx_ld_le32(e + 12), name = snx_ld_le32(e + 16), nids = snx_ld_le32(e + 20), entries = snx_ld_le32(e + 24);
+                variable_nids = snx_ld_le32(e + 28), variable_entries = snx_ld_le32(e + 32);
             }
             VitaImport named = {.library_nid = library_nid};
             for (unsigned c = 0; c + 1 < sizeof named.library; ++c) {
@@ -256,15 +252,15 @@ static bool imports(Loader* l, uint32_t top, uint32_t end) {
                 seed_code(l, stub);
                 if (stub & 1) {
                     if (index > 255) return fail(l, "Thumb import stub 0x%08x for import %u", stub, index);
-                    put16(code, 0xdf00 | index); /* svc #index */
-                    put16(code + 2, 0x4770);     /* bx lr */
+                    snx_st_le16(code, 0xdf00 | index); /* svc #index */
+                    snx_st_le16(code + 2, 0x4770);     /* bx lr */
                 } else {
                     if (!at(image, stub, 8)) return fail(l, "import stub 0x%08x outside the module", stub, 0);
-                    put32(code, 0xef000000u | index); /* svc #index */
-                    put32(code + 4, 0xe12fff1eu);     /* bx lr */
+                    snx_st_le32(code, 0xef000000u | index); /* svc #index */
+                    snx_st_le32(code + 4, 0xe12fff1eu);     /* bx lr */
                 }
             }
-            p += le16(e);
+            p += snx_ld_le16(e);
         }
         if (!pass) {
             count = index;
@@ -281,8 +277,8 @@ static bool exports(Loader* l, uint32_t top, uint32_t end) {
     VitaImage* image = l->image;
     for (uint32_t p = top; p < end;) {
         const unsigned char* e = at(image, p, 0x20);
-        if (!e || le16(e) < 0x20) return fail(l, "bad export table entry at 0x%08x", p, 0);
-        uint32_t count = le16(e + 6) + le32(e + 8) + le32(e + 12), nids = le32(e + 24), entries = le32(e + 28);
+        if (!e || snx_ld_le16(e) < 0x20) return fail(l, "bad export table entry at 0x%08x", p, 0);
+        uint32_t count = snx_ld_le16(e + 6) + snx_ld_le32(e + 8) + snx_ld_le32(e + 12), nids = snx_ld_le32(e + 24), entries = snx_ld_le32(e + 28);
         for (uint32_t i = 0; i < count; ++i) {
             uint32_t nid, value;
             if (!word(image, nids + i * 4, &nid) || !word(image, entries + i * 4, &value))
@@ -291,7 +287,7 @@ static bool exports(Loader* l, uint32_t top, uint32_t end) {
             if (nid == NID_MODULE_STOP) image->module_stop = value;
             if (nid == NID_PROCESS_PARAM) image->process_param = value;
         }
-        p += le16(e);
+        p += snx_ld_le16(e);
     }
     return true;
 }
@@ -303,8 +299,8 @@ static bool identity(VitaImage* image) {
               EVP_DigestUpdate(hash, domain, sizeof domain) == 1;
     for (unsigned i = 0; ok && i < image->segment_count; ++i) {
         unsigned char header[12];
-        put32(header, image->segment[i].address), put32(header + 4, image->segment[i].size);
-        put32(header + 8, image->segment[i].flags);
+        snx_st_le32(header, image->segment[i].address), snx_st_le32(header + 4, image->segment[i].size);
+        snx_st_le32(header + 8, image->segment[i].flags);
         ok = EVP_DigestUpdate(hash, header, sizeof header) == 1 &&
              EVP_DigestUpdate(hash, image->segment[i].bytes, image->segment[i].size) == 1;
     }
@@ -315,28 +311,28 @@ static bool identity(VitaImage* image) {
 /* The program headers and their bytes, from a SELF's segment table (each maybe deflated) or the ELF's own */
 static bool programs(Loader* l, const unsigned char* file, size_t size, Program* out, unsigned* count,
                      const unsigned char** elf) {
-    bool self = size >= 0x78 && le32(file) == 0x00454353u; /* "SCE\0" */
-    uint64_t elf_offset = self ? le64(file + 0x40) : 0, phdr_offset, info = self ? le64(file + 0x58) : 0;
+    bool self = size >= 0x78 && snx_ld_le32(file) == 0x00454353u; /* "SCE\0" */
+    uint64_t elf_offset = self ? snx_ld_le64(file + 0x40) : 0, phdr_offset, info = self ? snx_ld_le64(file + 0x58) : 0;
     if (elf_offset > size || size - elf_offset < 52 || memcmp(file + elf_offset, "\x7f" "ELF\x01\x01", 6))
         return fail(l, "eboot.bin is neither a SELF nor an ELF", 0, 0);
     *elf = file + elf_offset;
-    if (le16(*elf + 18) != 40) return fail(l, "eboot.bin is not an ARM module (machine %u)", le16(*elf + 18), 0);
-    *count = le16(*elf + 44);
-    phdr_offset = self ? le64(file + 0x48) : le32(*elf + 28);
+    if (snx_ld_le16(*elf + 18) != 40) return fail(l, "eboot.bin is not an ARM module (machine %u)", snx_ld_le16(*elf + 18), 0);
+    *count = snx_ld_le16(*elf + 44);
+    phdr_offset = self ? snx_ld_le64(file + 0x48) : snx_ld_le32(*elf + 28);
     if (*count > 16 || phdr_offset > size || (size - phdr_offset) / 32 < *count ||
         (self && (info > size || (size - info) / 32 < *count)))
         return fail(l, "bad program headers (%u)", *count, 0);
     for (unsigned i = 0; i < *count; ++i) {
         const unsigned char* ph = file + phdr_offset + i * 32;
         Program* p = &out[i];
-        p->type = le32(ph), p->vaddr = le32(ph + 8), p->filesz = le32(ph + 16), p->memsz = le32(ph + 20);
-        p->flags = le32(ph + 24), p->align = le32(ph + 28);
-        uint64_t offset = le32(ph + 4), length = p->filesz;
+        p->type = snx_ld_le32(ph), p->vaddr = snx_ld_le32(ph + 8), p->filesz = snx_ld_le32(ph + 16), p->memsz = snx_ld_le32(ph + 20);
+        p->flags = snx_ld_le32(ph + 24), p->align = snx_ld_le32(ph + 28);
+        uint64_t offset = snx_ld_le32(ph + 4), length = p->filesz;
         unsigned compression = 1;
         if (self) {
             const unsigned char* s = file + info + i * 32;
-            offset = le64(s), length = le64(s + 8), compression = (unsigned)le64(s + 16);
-            if (le64(s + 24) != 2 && length)
+            offset = snx_ld_le64(s), length = snx_ld_le64(s + 8), compression = (unsigned)snx_ld_le64(s + 16);
+            if (snx_ld_le64(s + 24) != 2 && length)
                 return fail(l, "eboot.bin is encrypted (segment %u): a retail game's needs decrypting first", i, 0);
         }
         if (offset > size || length > size - offset) return fail(l, "segment %u is outside the file", i, 0);
@@ -367,7 +363,7 @@ bool vita_image_load(const char* path, VitaImage* image, char* error, size_t err
         snprintf(error, error_size, "cannot read %s: %s", path, snx_os_error(why, sizeof why));
     }
     ok = ok && programs(&l, file, size, ph, &count, &elf);
-    uint32_t type = ok ? le16(elf + 16) : 0, entry = ok ? le32(elf + 24) : 0;
+    uint32_t type = ok ? snx_ld_le16(elf + 16) : 0, entry = ok ? snx_ld_le32(elf + 24) : 0;
     if (ok && type != ET_SCE_RELEXEC && type != ET_SCE_EXEC)
         ok = fail(&l, "eboot.bin is not a Vita module (ELF type 0x%x)", type, 0);
     /* the loaded segments keep their places relative to each other, the first at VITA_LOAD_BASE, or where a
@@ -412,13 +408,13 @@ bool vita_image_load(const char* path, VitaImage* image, char* error, size_t err
     if (ok) {
         uint32_t base = l.base[info_segment];
         memcpy(image->name, info + 4, 27);
-        ok = exports(&l, base + le32(info + 36), base + le32(info + 40)) &&
-             imports(&l, base + le32(info + 44), base + le32(info + 48));
-        if (ok && !image->module_start && le32(info + 68)) image->module_start = base + le32(info + 68);
+        ok = exports(&l, base + snx_ld_le32(info + 36), base + snx_ld_le32(info + 40)) &&
+             imports(&l, base + snx_ld_le32(info + 44), base + snx_ld_le32(info + 48));
+        if (ok && !image->module_start && snx_ld_le32(info + 68)) image->module_start = base + snx_ld_le32(info + 68);
         if (ok && !image->module_start) ok = fail(&l, "the module has no module_start", 0, 0);
         /* the thread-local data: its image, the bytes it starts with and its size */
-        image->tls_image = le32(info + 64) ? base + le32(info + 56) : 0;
-        image->tls_filesz = le32(info + 60), image->tls_memsz = le32(info + 64);
+        image->tls_image = snx_ld_le32(info + 64) ? base + snx_ld_le32(info + 56) : 0;
+        image->tls_filesz = snx_ld_le32(info + 60), image->tls_memsz = snx_ld_le32(info + 64);
         if (ok && image->tls_memsz && (image->tls_filesz > image->tls_memsz || image->tls_memsz > 0x100000u ||
                                        !at(image, image->tls_image, image->tls_filesz)))
             ok = fail(&l, "bad thread-local data (%u bytes at 0x%08x)", image->tls_memsz, image->tls_image);

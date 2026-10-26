@@ -1203,7 +1203,7 @@ static bool vldst(T* t, const uint32_t* f) {
         uint32_t offset = t->literal_base + src1.num + src2.num;
         const unsigned char* data = gxp_at(t->gxp, GXP_LITERAL_DATA);
         if ((size_t)(data - t->gxp) + offset + 4 > t->size) return fail(t, "a literal past the program");
-        store_word(t, bank, dest_n, cu(t, gxp_u32(data + offset)));
+        store_word(t, bank, dest_n, cu(t, snx_ld_le32(data + offset)));
         return !t->failed;
     }
     if (!t->buffer) return fail(t, "a VLDST with no uniform buffer");
@@ -1480,7 +1480,7 @@ static bool translate_one(T* t, uint64_t w, unsigned pc) {
     return !t->failed;
 }
 static uint64_t instruction(const unsigned char* code, uint32_t pc) {
-    return (uint64_t)gxp_u32(code + pc * 8) | (uint64_t)gxp_u32(code + pc * 8 + 4) << 32;
+    return snx_ld_le64(code + pc * 8);
 }
 /* a BR (usse_program_analyzer.cpp: is_branch): its target, relative to it */
 static bool branch(uint64_t w, int32_t* offset) {
@@ -1603,10 +1603,10 @@ static Type parameter_store_type(unsigned type) {
 }
 /* the container (8 bytes: index, unknown, base SA offset, size in 32-bit words) of an index, NULL for none */
 static const unsigned char* container(const unsigned char* gxp, unsigned index) {
-    uint32_t count = gxp_u32(gxp + GXP_CONTAINER_COUNT);
+    uint32_t count = snx_ld_le32(gxp + GXP_CONTAINER_COUNT);
     const unsigned char* c = gxp_at(gxp, GXP_CONTAINERS);
     for (uint32_t i = 0; i < count; ++i)
-        if (gxp_u16(c + i * 8) == index) return c + i * 8;
+        if (snx_ld_le16(c + i * 8) == index) return c + i * 8;
     return NULL;
 }
 /* a value of n components, each stored into PA or SA from register offset as type, from an input variable's vec4 */
@@ -1641,7 +1641,7 @@ static int attribute_kind(unsigned format) {
 }
 static void vertex_inputs(T* t) {
     const unsigned char* gxp = t->gxp;
-    uint32_t count = gxp_u32(gxp + GXP_PARAMETER_COUNT), slot = 0;
+    uint32_t count = snx_ld_le32(gxp + GXP_PARAMETER_COUNT), slot = 0;
     for (unsigned i = 0; i < USSE_ATTRIBUTES; ++i) t->out->attribute_location[i] = -1;
     for (uint32_t i = 0; i < count && !t->failed; ++i) {
         const unsigned char* q = gxp_parameter(gxp, i);
@@ -1735,10 +1735,10 @@ static void fragment_inputs(T* t) {
     const unsigned char* gxp = t->gxp;
     const unsigned char* varyings = gxp_at(gxp, GXP_VARYINGS);
     const unsigned char* d = gxp_at(varyings, 16); /* the attribute descriptors (16 bytes each) */
-    unsigned count = gxp_u16(varyings + 12), pa = 0;
+    unsigned count = snx_ld_le16(varyings + 12), pa = 0;
     uint32_t coords[11] = {0}, others[14] = {0};
     for (unsigned i = 0; i < count && !t->failed; ++i, d += 16) {
-        uint32_t info = gxp_u32(d), resource = gxp_u32(d + 4), size = gxp_u32(d + 8), components = gxp_u32(d + 12);
+        uint32_t info = snx_ld_le32(d), resource = snx_ld_le32(d + 4), size = snx_ld_le32(d + 8), components = snx_ld_le32(d + 12);
         if ((info & 0x4000f000u) != 0xf000u) { /* a varying, into PA */
             uint32_t id = info & 0x4000f000u, location = 0;
             if (id & 0x40000000u) {
@@ -1814,7 +1814,7 @@ static void fragment_inputs(T* t) {
 /* the uniform buffers into SA (copy_uniform_block_to_register), and the literals */
 static void uniforms(T* t) {
     const unsigned char* gxp = t->gxp;
-    uint32_t count = gxp_u32(gxp + GXP_PARAMETER_COUNT);
+    uint32_t count = snx_ld_le32(gxp + GXP_PARAMETER_COUNT);
     struct {
         bool used;
         uint32_t size, reg_start, reg_size;
@@ -1838,8 +1838,8 @@ static void uniforms(T* t) {
         const unsigned char* c = container(gxp, index);
         if (!buffers[index].used) {
             buffers[index].used = true;
-            buffers[index].reg_size = c ? gxp_u16(c + 6) : 0;
-            buffers[index].reg_start = c ? gxp_u16(c + 4) : 0;
+            buffers[index].reg_size = c ? snx_ld_le16(c + 6) : 0;
+            buffers[index].reg_start = c ? snx_ld_le16(c + 4) : 0;
         }
         if (end > buffers[index].size) buffers[index].size = end;
     }
@@ -1847,7 +1847,7 @@ static void uniforms(T* t) {
        buffer holds here, as Vita3K does */
     for (unsigned i = 0; i < 15; ++i)
         if (buffers[i].size == 1024) buffers[i].size = 2048;
-    uint32_t defaults = gxp_u32(gxp + GXP_DEFAULT_UNIFORM_COUNT);
+    uint32_t defaults = snx_ld_le32(gxp + GXP_DEFAULT_UNIFORM_COUNT);
     if (!buffers[GXP_DEFAULT_CONTAINER].used && defaults) {
         buffers[GXP_DEFAULT_CONTAINER].used = true;
         buffers[GXP_DEFAULT_CONTAINER].reg_size = defaults;
@@ -1886,16 +1886,16 @@ static void uniforms(T* t) {
        buffer's bytes' place in the storage buffer and the start. The literal buffer's reads are the program's own
        bytes, read as it is translated (VLDST) */
     const unsigned char* sa_base = container(gxp, 19);
-    uint32_t base = sa_base ? gxp_u16(sa_base + 4) : 0, table = gxp_u32(gxp + GXP_UNIFORM_BUFFER_COUNT);
+    uint32_t base = sa_base ? snx_ld_le16(sa_base + 4) : 0, table = snx_ld_le32(gxp + GXP_UNIFORM_BUFFER_COUNT);
     const unsigned char* entry = gxp_at(gxp, GXP_UNIFORM_BUFFERS);
     for (uint32_t i = 0; i < table && !t->failed; ++i, entry += 8) {
-        uint32_t reside = gxp_u16(entry), reg = base + gxp_u16(entry + 2), start = gxp_u32(entry + 4);
+        uint32_t reside = snx_ld_le16(entry), reg = base + snx_ld_le16(entry + 2), start = snx_ld_le32(entry + 4);
         if (reside == 16) {
             t->literal_register = (int)reg, t->literal_base = start;
             /* its words, as the program holds them */
             const unsigned char* data = gxp_at(gxp, GXP_LITERAL_DATA);
             size_t at = (size_t)(data - gxp), words = at < t->size ? (t->size - at) / 4 : 0;
-            uint32_t count = (gxp_u32(gxp + 88) + 3) / 4; /* literal_buffer_count, in bytes */
+            uint32_t count = (snx_ld_le32(gxp + 88) + 3) / 4; /* literal_buffer_count, in bytes */
             if (words > count) words = count;
             if (words && !t->literals) {
                 t->literal_words = (uint32_t)words;
@@ -1903,7 +1903,7 @@ static void uniforms(T* t) {
                 uint32_t pointer = spv_emit_type_pointer(&t->e, SPV_STORAGE_PRIVATE, t->t_u32);
                 for (uint32_t k = 0; k < words; ++k)
                     SPV_VOID(&t->e, SPV_OP_STORE, SPV(&t->e, SPV_OP_ACCESS_CHAIN, pointer, t->literals, cu(t, k)),
-                             cu(t, gxp_u32(data + k * 4)));
+                             cu(t, snx_ld_le32(data + k * 4)));
             }
             continue;
         }
@@ -1915,22 +1915,22 @@ static void uniforms(T* t) {
             if (out->buffers[b].container == reside) store_word(t, B_SA, reg, cu(t, out->buffers[b].offset * 4 + start));
     }
     /* the dependent samplers (4 bytes each: the texture's index times 4, the register from container 19's base) */
-    uint32_t dependents = gxp_u32(gxp + GXP_DEPENDENT_SAMPLER_COUNT);
+    uint32_t dependents = snx_ld_le32(gxp + GXP_DEPENDENT_SAMPLER_COUNT);
     const unsigned char* d = gxp_at(gxp, GXP_DEPENDENT_SAMPLERS);
     for (uint32_t i = 0; i < dependents && sa_base; ++i) {
-        uint32_t texture = gxp_u16(d + i * 4) / 4, reg = base + gxp_u16(d + i * 4 + 2);
+        uint32_t texture = snx_ld_le16(d + i * 4) / 4, reg = base + snx_ld_le16(d + i * 4 + 2);
         if (texture < USSE_TEXTURES && reg < BANK_WORDS) t->dependent[reg] = (uint8_t)(texture + 1);
     }
     /* the literals: (SA offset, float) pairs */
-    uint32_t literals = gxp_u32(gxp + GXP_LITERALS_COUNT);
+    uint32_t literals = snx_ld_le32(gxp + GXP_LITERALS_COUNT);
     const unsigned char* l = gxp_at(gxp, GXP_LITERALS);
-    for (uint32_t i = 0; i < literals; ++i) store_word(t, B_SA, gxp_u32(l + i * 8), cu(t, gxp_u32(l + i * 8 + 4)));
+    for (uint32_t i = 0; i < literals; ++i) store_word(t, B_SA, snx_ld_le32(l + i * 8), cu(t, snx_ld_le32(l + i * 8 + 4)));
 }
 /* the vertex outputs (gxp.cpp: get_vertex_outputs) from O0 on, in order, and the position's viewport transform
    (make_vert_finalize_function) */
 static void vertex_outputs(T* t) {
     const unsigned char* varyings = gxp_at(t->gxp, GXP_VARYINGS);
-    uint32_t vo1 = gxp_u32(varyings + 16), vo2 = gxp_u32(varyings + 20);
+    uint32_t vo1 = snx_ld_le32(varyings + 16), vo2 = snx_ld_le32(varyings + 20);
     unsigned o = 0;
     Operand out = {0, B_OUT, 0, {SW_X, SW_Y, SW_Z, SW_W}, T_F32};
     /* the position */
@@ -1989,7 +1989,7 @@ static void vertex_outputs(T* t) {
 static void fragment_output(T* t) {
     const unsigned char* gxp = t->gxp;
     const unsigned char* varyings = gxp_at(gxp, GXP_VARYINGS);
-    bool native = gxp_u32(gxp + GXP_FLAGS) & GXP_FLAG_NATIVECOLOR_USED;
+    bool native = snx_ld_le32(gxp + GXP_FLAGS) & GXP_FLAG_NATIVECOLOR_USED;
     Type type = parameter_store_type(varyings[10]);
     if (type == T_I32 || type == T_U32) type = T_F32;
     unsigned offset = !native && varyings[10] == 1 ? varyings[8] : 0;
@@ -2004,7 +2004,7 @@ static void fragment_output(T* t) {
 bool usse_translate(const unsigned char* gxp, size_t size, const UsseHints* hints, bool preserve_infnan,
                     UsseShader* out, char* error, size_t error_size) {
     memset(out, 0, sizeof *out);
-    if (size < 160 || gxp_u32(gxp) != GXP_MAGIC) {
+    if (size < 160 || snx_ld_le32(gxp) != GXP_MAGIC) {
         snprintf(error, error_size, "not a GXP program");
         return false;
     }
@@ -2049,7 +2049,7 @@ bool usse_translate(const unsigned char* gxp, size_t size, const UsseHints* hint
         vertex_inputs(t);
     /* a program that blends itself (FRAGCOLOR_USED) starts with its pixel's color in O0, of its output's type
        (spirv_recompiler.cpp: the input attachment read, its last_frag_data) */
-    if (t->fragment && (gxp_u32(gxp + GXP_FLAGS) & GXP_FLAG_FRAGCOLOR_USED)) {
+    if (t->fragment && (snx_ld_le32(gxp + GXP_FLAGS) & GXP_FLAG_FRAGCOLOR_USED)) {
         spv_emit_capability(e, 40 /* InputAttachment */);
         uint32_t image = spv_emit_type_image(e, t->t_f32, 6 /* SubpassData */, 0, 0, 0, 2, 0);
         uint32_t color = spv_emit_resource(e, SPV_STORAGE_UNIFORM_CONSTANT, image, 0, USSE_COLOR_BINDING);
@@ -2069,14 +2069,14 @@ bool usse_translate(const unsigned char* gxp, size_t size, const UsseHints* hint
         out->reads_color = true;
     }
     /* the depth a program that writes it (DEPTHF) leaves alone where it doesn't: the fragment's */
-    if (t->fragment && (gxp_u32(gxp + GXP_FLAGS) & GXP_FLAG_DEPTH_USED)) {
+    if (t->fragment && (snx_ld_le32(gxp + GXP_FLAGS) & GXP_FLAG_DEPTH_USED)) {
         t->frag_depth = spv_emit_builtin(e, SPV_STORAGE_OUTPUT, t->t_f32, SPV_BUILT_IN_FRAG_DEPTH);
         global(t, t->frag_depth);
         uint32_t z = SPV(e, SPV_OP_COMPOSITE_EXTRACT, t->t_f32, SPV(e, SPV_OP_LOAD, t->t_v4f, frag_coord(t)), 2);
         SPV_VOID(e, SPV_OP_STORE, t->frag_depth, z);
     }
     /* the secondary program (once per draw on the console, its results in SA), then the primary */
-    uint32_t secondary = gxp_u32(gxp + GXP_SECONDARY_COUNT);
+    uint32_t secondary = snx_ld_le32(gxp + GXP_SECONDARY_COUNT);
     const unsigned char* start = gxp_at(gxp, GXP_SECONDARY);
     const unsigned char* end = gxp_at(gxp, GXP_SECONDARY_END);
     if (end > start && (size_t)(end - gxp) <= size) secondary = (uint32_t)((end - start) / 8);
@@ -2086,7 +2086,7 @@ bool usse_translate(const unsigned char* gxp, size_t size, const UsseHints* hint
         t->secondary = false;
         reset_repeats(t);
     }
-    uint32_t primary = gxp_u32(gxp + GXP_PRIMARY_COUNT);
+    uint32_t primary = snx_ld_le32(gxp + GXP_PRIMARY_COUNT);
     const unsigned char* code = gxp_at(gxp, GXP_PRIMARY);
     if ((size_t)(code - gxp) + primary * 8ull > size) fail(t, "the program's code is past its end");
     if (!t->failed) translate_code(t, code, primary);
@@ -2160,18 +2160,18 @@ bool usse_corpus_read(const char* path, unsigned char** program, size_t* size, U
 }
 static void survey_code(const unsigned char* code, uint32_t count, void (*each)(void*, const char*, bool), void* c) {
     for (uint32_t pc = 0; pc < count; ++pc) {
-        uint64_t w = (uint64_t)gxp_u32(code + pc * 8) | (uint64_t)gxp_u32(code + pc * 8 + 4) << 32;
+        uint64_t w = (uint64_t)snx_ld_le32(code + pc * 8) | (uint64_t)snx_ld_le32(code + pc * 8 + 4) << 32;
         const Pattern* p = match(w);
         each(c, p ? p->name : NULL, p && p->handler);
     }
 }
 void usse_survey(const unsigned char* gxp, size_t size, void (*each)(void* context, const char* name, bool known),
                  void* context) {
-    if (size < 160 || gxp_u32(gxp) != GXP_MAGIC) return;
+    if (size < 160 || snx_ld_le32(gxp) != GXP_MAGIC) return;
     patterns_init();
     const unsigned char *start = gxp_at(gxp, GXP_SECONDARY), *end = gxp_at(gxp, GXP_SECONDARY_END);
     if (end > start && (size_t)(end - gxp) <= size) survey_code(start, (uint32_t)((end - start) / 8), each, context);
-    uint32_t primary = gxp_u32(gxp + GXP_PRIMARY_COUNT);
+    uint32_t primary = snx_ld_le32(gxp + GXP_PRIMARY_COUNT);
     const unsigned char* code = gxp_at(gxp, GXP_PRIMARY);
     if ((size_t)(code - gxp) + primary * 8ull <= size) survey_code(code, primary, each, context);
 }

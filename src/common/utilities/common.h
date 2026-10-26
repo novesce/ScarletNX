@@ -71,6 +71,11 @@ int snx_replace(const char* src, const char* dst);
 int snx_list_dir(const char* path, char*** names, size_t* count);
 void snx_free_strings(char** strings, size_t count);
 unsigned char* snx_read_file(const char* path, size_t* size);
+/* Whether the file at path holds a record of size bytes, its first magic_size bytes magic, that accept takes: it is
+   given each such record in the file, at any offset, until it takes one. What a compiled module was compiled for,
+   read from its descriptor in the file before the module is loaded */
+int snx_file_has_record(const char* path, const void* magic, size_t magic_size, size_t size,
+                        int (*accept)(const unsigned char* record, const void* context), const void* context);
 int snx_write_file(const char* path, const void* data, size_t size);
 int snx_write_changed(const char* path, const void* data, size_t size);
 char* snx_temp_dir(const char* parent);
@@ -214,10 +219,6 @@ int snx_terminal(void);
 /* The program name names: a path, or a file of that name in a folder of PATH (with .exe on Windows). Its folder is
    resolved and its name kept, as a link's name can say what the program does; NULL when there is none */
 char* snx_find_tool(const char* name);
-/* The C compiler to run, owned: built (the path the build's own compiler had, on the machine that built it) where it is
-   a file here, else a clang in the folder beside (NULL: none), else one on PATH. NULL, the places looked at in error,
-   when there is none: a release runs on machines without the build's own */
-char* snx_find_compiler(const char* built, const char* beside, char* error, size_t error_size);
 /* argv is NULL terminated. No shell. Captured output is heap-owned by caller.
    home isolates HOME/USERPROFILE and removes XDG_CONFIG_HOME in the child. */
 int snx_run(const char* const* argv, const char* cwd, const char* home, char** output);

@@ -15,7 +15,7 @@ nx=ON
 targets=()
 if [ "${1:-}" = --gnuabi-only ]; then # the GNU ABI runtime and the recompiler under it, not the tests
     nx=OFF
-    targets=(--target scarletnx-gnuabi-run)
+    targets=(--target scarletnx-gnuabi) # the library, its command line in it: a target both trees have
     shift
 fi
 root=$(git rev-parse --show-toplevel)

@@ -4,15 +4,10 @@
 #include "agb/board/board.h"
 #include "common/utilities/common.h"
 #include "common/cpu/arm/llvm.h"
-#include "agb/cpu/runtime.h"
-#ifdef SNX_AGB_JIT
 #include "common/cpu/arm/exec.h"
-#endif
-#include <llvm-c/Analysis.h>
+#include "common/cpu/recompiler/llvm/ir.h"
+#include "common/cpu/recompiler/llvm/link.h"
 #include <llvm-c/Core.h>
-#include <llvm-c/Target.h>
-#include <llvm-c/TargetMachine.h>
-#include <llvm-c/Transforms/PassBuilder.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,11 +25,10 @@
 static const SnxArmCodegenOptions agb_codegen = {SNX_ARM_CODEGEN_OPTIONS_ABI, SNX_ARM_PROFILE_ARM7TDMI,
                                                  SNX_ARM_MEMORY_FLAT};
 
-void agb_recomp_init(AgbRecomp* recomp, const char* base, const char* cc) {
+void agb_recomp_init(AgbRecomp* recomp, const char* base) {
     memset(recomp, 0, sizeof(*recomp));
     recomp->base = (char*)malloc(strlen(base) + 1);
     if (recomp->base) strcpy(recomp->base, base);
-    recomp->cc = cc;
 }
 
 static void close_module(void* handle) {
@@ -45,35 +39,15 @@ static void close_module(void* handle) {
 #endif
 }
 
-/* The modules of the blocks compiled at run time go away with their files: the cached module takes their
-   blocks when the run is saved. */
-static void close_patches(AgbRecomp* recomp) {
-    char* path = recomp->base ? (char*)malloc(strlen(recomp->base) + 32) : NULL;
-    for (size_t i = 0; i < recomp->patch_count; ++i) {
-        close_module(recomp->patches[i]);
-        if (path) {
-            sprintf(path, "%s.%zu.so", recomp->base, i + 1);
-            remove(path);
-        }
-    }
-    free(path);
-    free(recomp->patches);
-    recomp->patches = NULL;
-    recomp->patch_count = 0;
-}
-
 void agb_recomp_free(AgbRecomp* recomp) {
-    close_patches(recomp);
-#ifdef SNX_AGB_JIT
     snx_arm_exec_free(recomp->exec);
-#endif
     if (recomp->handle) close_module(recomp->handle);
     free(recomp->blocks);
     free(recomp->base);
     memset(recomp, 0, sizeof(*recomp));
 }
 
-static void block_name(char* out, size_t size, size_t index) { snprintf(out, size, "snx_agb_%zu", index); }
+static char* block_name(size_t index) { return snx_format("snx_agb_%zu", index); }
 
 /* FNV-1a over size bytes, from hash on: what tells one ROM, or one block's code, from another */
 static uint64_t fnv(uint64_t hash, const void* bytes, size_t size) {
@@ -107,13 +81,15 @@ static uint64_t code_hash(AgbBoard* board, uint32_t pc, int thumb, size_t count)
 }
 
 static void* module_symbol(void* handle, size_t index) {
-    char name[32];
-    block_name(name, sizeof(name), index);
+    char* name = block_name(index);
+    void* symbol = NULL;
 #ifdef _WIN32
-    return (void*)GetProcAddress((HMODULE)handle, name);
+    if (name) symbol = (void*)GetProcAddress((HMODULE)handle, name);
 #else
-    return dlsym(handle, name);
+    if (name) symbol = dlsym(handle, name);
 #endif
+    free(name);
+    return symbol;
 }
 
 /* ---- block discovery ---- */
@@ -288,40 +264,42 @@ static void discover(AgbRecomp* recomp, AgbBoard* board, uint32_t pc, int thumb)
 
 /* ---- linking ---- */
 
-/* Emits the blocks from index first on into <path>.so. */
-static int emit_module(AgbRecomp* recomp, AgbBoard* board, const char* path, size_t first, char* error,
-                       size_t error_size) {
-    static int initialized;
-    char *object = NULL, *runtime = NULL, *library = NULL, *message = NULL, *triple;
-    const char* args[10];
-    LLVMContextRef ctx = NULL;
+static const char* leaf(const char* path) {
+    const char* last = path;
+    for (const char* p = path; *p; ++p)
+        if (*p == '/' || *p == '\\') last = p + 1;
+    return last;
+}
+
+/* Emits every block into <base>.so: compiled for this machine as the backend compiles the Switch's
+   32-bit modules (module_arm.c), with the helpers they call (armlib.c), and linked by the backend's own linker, which
+   exports each block's function by its name */
+static int emit_module(AgbRecomp* recomp, AgbBoard* board, char* error, size_t error_size) {
+    size_t count = recomp->count, object_size = 0, armlib_size = 0;
+    unsigned char *object = NULL, *armlib = NULL;
+    char **names = (char**)calloc(count ? count : 1, sizeof(*names)), *library = snx_format("%s.so", recomp->base), *tmp = NULL;
+    SnxIr* ir = NULL;
     LLVMModuleRef module = NULL;
-    LLVMTargetMachineRef machine = NULL;
-    LLVMTargetDataRef layout = NULL;
-    LLVMPassBuilderOptionsRef options = NULL;
-    LLVMTargetRef target;
-    size_t n = 0;
+    SnxLinkInput inputs[2];
+    SnxLinkOutput linked = {NULL, 0};
     int result = -1;
-    if (!initialized) {
-        LLVMInitializeNativeTarget();
-        LLVMInitializeNativeAsmPrinter();
-        initialized = 1;
+    if (!names || !library) {
+        snprintf(error, error_size, "out of memory");
+        goto done;
     }
-    ctx = LLVMContextCreate();
-    module = LLVMModuleCreateWithNameInContext("agb-code", ctx);
-    triple = LLVMGetDefaultTargetTriple();
-    if (LLVMGetTargetFromTriple(triple, &target, &message)) goto done;
-    machine = LLVMCreateTargetMachine(target, triple, "generic", "", LLVMCodeGenLevelDefault, LLVMRelocPIC,
-                                      LLVMCodeModelDefault);
-    LLVMSetTarget(module, triple);
-    layout = LLVMCreateTargetDataLayout(machine);
-    LLVMSetModuleDataLayout(module, layout);
-    for (size_t i = first; i <= recomp->count; ++i) {
+    if (snx_ir_init(error, error_size) || !(ir = snx_ir_new("agb-code", '2', error, error_size))) goto done;
+    module = LLVMModuleCreateWithNameInContext("agb-code", ir->ctx);
+    LLVMSetTarget(module, LLVMGetTarget(ir->mod));
+    LLVMSetDataLayout(module, LLVMGetDataLayoutStr(ir->mod));
+    for (size_t i = 1; i <= recomp->count; ++i) {
         AgbBlock* block = &recomp->blocks[i];
-        char name[32];
+        char* name = names[i - 1] = block_name(i);
         size_t consumed = 0;
         LLVMValueRef fn;
-        block_name(name, sizeof(name), i);
+        if (!name) {
+            snprintf(error, error_size, "out of memory");
+            goto done;
+        }
         if (block->thumb) {
             uint16_t words[AGB_BLOCK_MAX];
             for (uint32_t j = 0; j < AGB_BLOCK_MAX; ++j) words[j] = agb_read16(board, block->pc + j * 2);
@@ -338,77 +316,37 @@ static int emit_module(AgbRecomp* recomp, AgbBoard* board, const char* path, siz
         block->instructions = (uint16_t)(consumed > 0xFFFF ? 0xFFFF : consumed);
         block->code = code_hash(board, block->pc, block->thumb, block->instructions);
     }
-    if (LLVMVerifyModule(module, LLVMReturnStatusAction, &message)) goto done;
-    LLVMDisposeMessage(message); /* an empty one on success, still allocated */
-    message = NULL;
-    options = LLVMCreatePassBuilderOptions();
-    {
-        LLVMErrorRef pass = LLVMRunPasses(module, "default<O2>", machine, options);
-        if (pass) {
-            char* failure = LLVMGetErrorMessage(pass);
-            snprintf(error, error_size, "%.300s", failure);
-            LLVMDisposeErrorMessage(failure);
-            goto done;
-        }
-    }
-    if (LLVMVerifyModule(module, LLVMReturnStatusAction, &message)) goto done;
-    LLVMDisposeMessage(message); /* an empty one on success, still allocated */
-    message = NULL;
-    object = (char*)malloc(strlen(path) + 8);
-    runtime = (char*)malloc(strlen(path) + 8);
-    library = (char*)malloc(strlen(path) + 8);
-    if (!object || !runtime || !library) {
-        snprintf(error, error_size, "out of memory");
+    if (snx_ir_module_object(ir, module, '2', &object, &object_size, error, error_size) ||
+        snx_ir_armlib_object('2', &armlib, &armlib_size, error, error_size))
+        goto done;
+    inputs[0].data = armlib, inputs[0].size = armlib_size, inputs[0].name = "armlib";
+    inputs[1].data = object, inputs[1].size = object_size, inputs[1].name = "blocks";
+    if (snx_link(inputs, 2, (const char* const*)names, count, leaf(library), &linked, error, error_size)) goto done;
+    tmp = snx_format("%s.tmp", library);
+    if (!tmp || snx_write_file(tmp, linked.data, linked.size) || snx_replace(tmp, library)) {
+        snprintf(error, error_size, "cannot write %s", library);
+        if (tmp) remove(tmp);
         goto done;
     }
-    sprintf(object, "%s.obj", path);
-    sprintf(runtime, "%s.rt.a", path);
-    sprintf(library, "%s.so", path);
-    if (LLVMTargetMachineEmitToFile(machine, module, object, LLVMObjectFile, &message)) goto done;
-    /* the blocks call the runtime library (snx_arm_undefined for what the board interprets): the module links it */
-    if (snx_write_file(runtime, agb_arm_runtime, agb_arm_runtime_size)) {
-        snprintf(error, error_size, "cannot write %s", runtime);
-        goto done;
-    }
-    args[n++] = recomp->cc;
-    args[n++] = "-shared";
-    args[n++] = "-o";
-    args[n++] = library;
-    args[n++] = object;
-    args[n++] = runtime;
-#ifndef _WIN32
-    args[n++] = "-lm";
-#endif
-    args[n] = NULL;
-    {
-        char* output = NULL;
-        if (snx_run(args, NULL, NULL, &output)) {
-            snprintf(error, error_size, "linking the recompiled ROM failed: %.300s", output ? output : "");
-            free(output);
-            goto done;
-        }
-        free(output);
-    }
-    remove(object);
-    remove(runtime);
     result = 0;
 done:
-    if (result && message && !error[0]) snprintf(error, error_size, "%.300s", message);
-    LLVMDisposeMessage(message);
-    free(object);
-    free(runtime);
+    if (result && !error[0]) snprintf(error, error_size, "linking the recompiled ROM failed");
+    if (names)
+        for (size_t i = 0; i < count; ++i) free(names[i]);
+    free(names);
     free(library);
-    if (options) LLVMDisposePassBuilderOptions(options);
-    if (layout) LLVMDisposeTargetData(layout);
-    if (machine) LLVMDisposeTargetMachine(machine);
+    free(tmp);
+    free(object);
+    free(armlib);
+    free(linked.data);
     if (module) LLVMDisposeModule(module);
-    if (ctx) LLVMContextDispose(ctx);
-    free(triple);
+    snx_ir_free(ir);
     return result;
 }
 
-/* Loads <path>.so and takes the blocks from index first on out of it. */
-static void* open_module(AgbRecomp* recomp, const char* path, size_t first, char* error, size_t error_size) {
+/* Loads <base>.so and takes the blocks out of it. */
+static void* open_module(AgbRecomp* recomp, char* error, size_t error_size) {
+    const char* path = recomp->base;
     size_t length = strlen(path);
     char* library = (char*)malloc(length + 12);
     void* handle;
@@ -433,7 +371,7 @@ static void* open_module(AgbRecomp* recomp, const char* path, size_t first, char
 #endif
         return NULL;
     }
-    for (size_t i = first; i <= recomp->count; ++i)
+    for (size_t i = 1; i <= recomp->count; ++i)
         recomp->blocks[i].fn =
             recomp->blocks[i].symbol ? (SnxArmBlock)module_symbol(handle, recomp->blocks[i].symbol) : NULL;
     return handle;
@@ -449,7 +387,6 @@ static void stamp(const AgbRecomp* recomp, unsigned long long* size, unsigned lo
 
 /* Links every known block into the cached module. */
 static int relink(AgbRecomp* recomp, AgbBoard* board, char* error, size_t error_size) {
-    close_patches(recomp);
     if (recomp->handle) {
         close_module(recomp->handle);
         recomp->handle = NULL;
@@ -459,39 +396,14 @@ static int relink(AgbRecomp* recomp, AgbBoard* board, char* error, size_t error_
         recomp->blocks[i].symbol = (uint32_t)i; /* emit_module names each block's function by its index */
         recomp->blocks[i].hint = 0;
     }
-    if (emit_module(recomp, board, recomp->base, 1, error, error_size)) return -1;
-    recomp->handle = open_module(recomp, recomp->base, 1, error, error_size);
+    if (emit_module(recomp, board, error, error_size)) return -1;
+    recomp->handle = open_module(recomp, error, error_size);
     if (!recomp->handle) return -1;
     stamp(recomp, &recomp->module_size, &recomp->module_time);
     recomp->dirty = 0;
     return 0;
 }
 
-#ifndef SNX_AGB_JIT
-/* Compiles the blocks from index first on into a module of their own. Linking everything again for each
-   block a run reaches would cost the whole ROM's compile per block. */
-static int patch(AgbRecomp* recomp, AgbBoard* board, size_t first, char* error, size_t error_size) {
-    char* path = (char*)malloc(strlen(recomp->base) + 32);
-    void** grown = (void**)realloc(recomp->patches, (recomp->patch_count + 1) * sizeof(*grown));
-    void* handle = NULL;
-    if (grown) recomp->patches = grown;
-    if (!path || !grown) {
-        free(path);
-        snprintf(error, error_size, "out of memory");
-        return -1;
-    }
-    sprintf(path, "%s.%zu", recomp->base, recomp->patch_count + 1);
-    for (size_t i = first; i <= recomp->count; ++i) recomp->blocks[i].symbol = (uint32_t)i;
-    if (!emit_module(recomp, board, path, first, error, error_size))
-        handle = open_module(recomp, path, first, error, error_size);
-    free(path);
-    if (!handle) return -1;
-    recomp->patches[recomp->patch_count++] = handle;
-    return 0;
-}
-#endif
-
-#ifdef SNX_AGB_JIT
 /* The block compiled in this process by the backend's executor (exec.c), at its first dispatch: no module file and no
    link, which cost a run about a second for each batch of blocks it reached */
 static int compile_block(AgbRecomp* recomp, AgbBoard* board, AgbBlock* block, char* error, size_t error_size) {
@@ -521,7 +433,6 @@ static int compile_block(AgbRecomp* recomp, AgbBoard* board, AgbBlock* block, ch
     }
     return 0;
 }
-#endif
 
 /* The cache beside the ROM: the module plus a map of the blocks it holds, under the ROM's hash. */
 static int write_cache(AgbRecomp* recomp, const AgbBoard* board) {
@@ -602,7 +513,7 @@ int agb_recomp_load_map(AgbRecomp* recomp, AgbBoard* board, char* error, size_t 
 
 int agb_recomp_load_cache(AgbRecomp* recomp, AgbBoard* board, char* error, size_t error_size) {
     if (agb_recomp_load_map(recomp, board, error, error_size)) return -1;
-    recomp->handle = open_module(recomp, recomp->base, 1, error, error_size);
+    recomp->handle = open_module(recomp, error, error_size);
     if (recomp->handle) stamp(recomp, &recomp->module_size, &recomp->module_time);
     return recomp->handle ? 0 : -1;
 }
@@ -638,20 +549,10 @@ const AgbBlock* agb_recomp_lookup(AgbRecomp* recomp, AgbBoard* board, uint32_t p
             snprintf(error, error_size, "out of memory");
             return NULL;
         }
-#ifndef SNX_AGB_JIT
-        if (patch(recomp, board, first, error, error_size)) return NULL;
-        recomp->compiled += recomp->count + 1 - first;
-#endif
         block = find(recomp, pc, thumb);
     }
-#ifdef SNX_AGB_JIT
     /* this one alone: the others discovery found wait for their own dispatch, and the saved module for all of them */
     if (block && !block->fn && compile_block(recomp, board, block, error, error_size)) return NULL;
-#else
-    /* a block the cached module lacks: link everything again */
-    else if (!block->fn && relink(recomp, board, error, error_size))
-        return NULL;
-#endif
     block = find(recomp, pc, thumb);
     if (!block || !block->fn || !block->instructions) {
         if (!error[0]) snprintf(error, error_size, "no block at 0x%08X", pc);
@@ -662,7 +563,6 @@ const AgbBlock* agb_recomp_lookup(AgbRecomp* recomp, AgbBoard* board, uint32_t p
 
 int agb_recomp_save(AgbRecomp* recomp, AgbBoard* board, char* error, size_t error_size) {
     if (!recomp->dirty) return 0;
-#ifdef SNX_AGB_JIT
     {
         /* the blocks the run ran: the ones discovery found that never did would cost the module's optimized compile
            (about 15 ms each), and a run that reaches them compiles them then */
@@ -692,8 +592,4 @@ int agb_recomp_save(AgbRecomp* recomp, AgbBoard* board, char* error, size_t erro
     }
     recomp->dirty = 0;
     return 0;
-#else
-    if (relink(recomp, board, error, error_size)) return -1;
-    return write_cache(recomp, board);
-#endif
 }

@@ -23,6 +23,9 @@ static GuiSetting* row(GuiSettings* s, const char* section, const char* key, con
                                  : (size_t)((char*)v->text - (char*)s->values);
     k->size = type == GUI_KEY_WORD ? sizeof v->word : sizeof v->text;
     k->max = 0;
+    k->numeric = k->whole = 0;
+    k->lo = k->hi = 0;
+    k->def = NULL;
     v->key = key;
     return v;
 }
@@ -117,7 +120,15 @@ int gui_settings_read(GuiSettings* s, const char* runtime) {
         v = row(s, field[0], field[1], field[7], field[6], words, words ? GUI_KEY_WORD : GUI_KEY_TEXT);
         v->values = values;
         v->type_text = !strcmp(field[3], "text");
+        if (!words && (field[3][0] == 'i' || field[3][0] == 'f')) { /* typed, not picked: a number of its range */
+            GuiThemeKey* k = &s->keys[s->count - 1];
+            k->numeric = 1;
+            k->whole = field[3][0] == 'i';
+            k->lo = strtod(field[4], NULL);
+            k->hi = strtod(field[5], NULL);
+        }
         v->fallback = v->def = field[2];
+        s->keys[s->count - 1].def = v->def; /* what a number's row shows when it is emptied */
         for (w = 1; words && words[w]; ++w) /* the word of the default's value */
             if (!strcmp(values ? values[w] : words[w], field[2])) v->fallback = words[w];
         if (page) {

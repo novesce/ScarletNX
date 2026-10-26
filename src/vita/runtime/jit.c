@@ -9,22 +9,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifndef SNX_VITA_JIT /* a build without the executor (snx_llvm comes with the Switch runtime) */
-VitaJit* vita_jit_new(VitaProcess* p, char* error, size_t error_size) {
-    (void)p;
-    snprintf(error, error_size, "this build has none");
-    return NULL;
-}
-SnxArmBlock vita_jit_block(VitaJit* jit, uint32_t pc, bool thumb) {
-    (void)jit, (void)pc, (void)thumb;
-    return NULL;
-}
-size_t vita_jit_save_hints(VitaJit* jit, const char* folder) {
-    (void)jit, (void)folder;
-    return 0;
-}
-void vita_jit_free(VitaJit* jit) { (void)jit; }
-#else
 #include "common/cpu/arm/exec.h"
 
 struct VitaJit {
@@ -92,4 +76,3 @@ void vita_jit_free(VitaJit* j) {
     free(j->compiled);
     free(j);
 }
-#endif

@@ -26,7 +26,7 @@ typedef struct {
     uint16_t dispstat;
     uint16_t vcount;
     uint32_t dot;                                               /* cycles into the current scanline */
-    uint32_t framebuffer[AGB_SCREEN_WIDTH * AGB_SCREEN_HEIGHT]; /* RGBA8888, one scanline at a time */
+    uint32_t framebuffer[AGB_SCREEN_WIDTH * AGB_SCREEN_HEIGHT]; /* 0xAABBGGRR words, one scanline at a time */
 } AgbPpu;
 
 /* The register window at 0x04000000 to 0x0400005F, halfword addressed. */
