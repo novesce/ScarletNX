@@ -38,6 +38,8 @@ const char* backend_pressed(void);
    own folder (g_exedir), which snx_menu_dir walks up from to the data folder; on Android the data folder in the
    app's files (src/gui/android.c), wherever the game is */
 char* backend_launcher_folder(void);
+/* the refresh period of the display the window is on, in ns: 0 when headless or the display doesn't say. Any thread */
+u64 backend_display_refresh_ns(void);
 /* changes whenever the surface comes back, so the renderer knows to make a new Vulkan surface */
 u32 backend_window_generation(void);
 

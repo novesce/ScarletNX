@@ -37,8 +37,10 @@ void logf_(int lvl, const char* fmt, ...) {
 u64 nvmap_addr_by_id(u32 id) { return id == 7 ? 0x1000 : 0; }
 void cheats_frame(void) {}
 static u64 presented;
-static void test_present(u64 a, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt, const i32 crop[4], u32 t) {
-    (void)w, (void)h, (void)pitch, (void)layout, (void)bhl, (void)fmt, (void)crop, (void)t;
+static void test_present(u64 a, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt, const i32 crop[4], u32 t,
+                         u64 released, u64 period) {
+    (void)w, (void)h, (void)pitch, (void)layout, (void)bhl, (void)fmt, (void)crop, (void)t, (void)released,
+        (void)period;
     presented = a;
 }
 static Renderer test_renderer;
@@ -62,35 +64,71 @@ static void pacing(void) {
     int i;
     now_ns = 1000;
     slept_ns = 0;
-    present_pace(2); /* the first frame doesn't wait */
+    present_pace(2, -1); /* the first frame doesn't wait */
     CHECK(!slept_ns, "the first frame waited %llu ns", (unsigned long long)slept_ns);
     for (i = 0; i < 3; i++) {
         before = slept_ns;
         now_ns += 1000000; /* the game took 1 ms for its frame */
-        present_pace(2);
+        present_pace(2, -1);
         CHECK(slept_ns - before == 2 * refresh - 1000000, "interval 2 waited %llu ns",
               (unsigned long long)(slept_ns - before));
     }
     before = slept_ns;
-    present_pace(0);
+    present_pace(0, -1);
     CHECK(slept_ns == before, "the game's pace with interval 0 waited");
     now_ns += 10 * refresh; /* a load: the schedule starts again rather than catching up */
-    present_pace(1);
+    present_pace(1, -1);
     CHECK(slept_ns == before, "a late frame waited");
-    present_pace(1);
+    present_pace(1, -1);
     CHECK(slept_ns - before == refresh, "the frame after a late one waited %llu ns",
           (unsigned long long)(slept_ns - before));
     g_opt_fps = 30;
     before = slept_ns;
-    present_pace(0);
-    present_pace(4); /* a number ignores the interval */
+    present_pace(0, -1);
+    present_pace(4, -1); /* a number ignores the interval */
     CHECK(slept_ns - before == 2 * (1000000000u / 30), "fps_limit=30 waited %llu ns over two frames",
           (unsigned long long)(slept_ns - before));
     g_opt_fps = 0;
     before = slept_ns;
-    present_pace(1);
+    present_pace(1, -1);
     CHECK(slept_ns == before, "fps_limit=0 waited");
     g_opt_fps = SNX_FPS_GAME;
+}
+
+/* the display's clock: its refresh sets the period, and one that didn't take the frames in time is only asked,
+   without waiting, until it takes them again */
+static int display_r;
+static u64 display_deadline;
+static int test_display_wait(u64 deadline_ns, u64* refresh_ns) {
+    display_deadline = deadline_ns;
+    *refresh_ns = 16683350; /* 59.94 Hz */
+    return display_r;
+}
+static void display_pacing(void) {
+    u64 before;
+    test_renderer.display_wait = test_display_wait;
+    now_ns += 1000000000u;
+    display_r = 1;
+    present_pace(2, -1); /* late: no wait */
+    before = slept_ns;
+    present_pace(2, -1);
+    CHECK(slept_ns - before == 2 * 16683350u, "a 59.94 Hz display's two refreshes waited %llu ns",
+          (unsigned long long)(slept_ns - before));
+    display_r = 0;
+    present_pace(2, -1);
+    CHECK(display_deadline > now_ns, "the first wait for the display has no time");
+    present_pace(2, -1);
+    CHECK(display_deadline <= now_ns, "a stuck display was waited for");
+    display_r = 1;
+    present_pace(2, -1);
+    present_pace(2, -1);
+    CHECK(display_deadline > now_ns, "a display taking frames again isn't waited for");
+    display_r = -1;
+    before = slept_ns;
+    present_pace(2, -1);
+    present_pace(2, -1);
+    CHECK(slept_ns - before >= 2 * (1000000000u / 60) - 1000, "without a clock, the timer's period");
+    test_renderer.display_wait = NULL;
 }
 
 int main(void) {
@@ -98,9 +136,10 @@ int main(void) {
     clock_start();
     ticks();
     pacing();
+    display_pacing();
     test_renderer.present_buffer = test_present;
-    vi_show_buffer(7, 0x40, 1, 1, 4, 1, 0, 1, crop, 0);
-    vi_show_buffer(8, 0, 1, 1, 4, 1, 0, 1, crop, 0);
+    vi_show_buffer(7, 0x40, 1, 1, 4, 1, 0, 1, crop, 0, 0);
+    vi_show_buffer(8, 0, 1, 1, 4, 1, 0, 1, crop, 0, 0);
     CHECK(presented == 0x1040 && g_frames == 1, "presented %llx, %d frames", (unsigned long long)presented,
           g_frames);
     if (failures) {

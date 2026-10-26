@@ -1275,3 +1275,9 @@ void plat_install_crash_handler(void) {
 }
 
 void plat_prof_start(void) {}
+
+u64 plat_monotonic_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (u64)ts.tv_sec * 1000000000u + (u64)ts.tv_nsec;
+}
