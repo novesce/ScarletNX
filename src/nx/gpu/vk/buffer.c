@@ -232,6 +232,9 @@ typedef struct GfxOut {
     VmaAllocation mem;
     u8* ptr;
     u8* org;
+    /* GPU-owned input snapshotted before shader writes, read only at the frame fence. */
+    u8* initial;
+    VmaAllocation initial_mem;
     u64* pages; /* sorted guest CPU pages behind this GPU virtual range */
     u64* vmap;  /* the same pages in the range's order, ~0 for an unmapped one */
     u32 npages;
@@ -484,6 +487,12 @@ void vk_buf_frame_done(u64 frame) {
             if (!VK_OK(vmaInvalidateAllocation(g_vk.vma, o->mem, 0, VK_WHOLE_SIZE)))
                 fatal("Could not invalidate a graphics storage buffer after its frame completed");
             invalidated = o->mem;
+        }
+        if (o->initial) {
+            if (!VK_OK(vmaInvalidateAllocation(g_vk.vma, o->initial_mem, 0, VK_WHOLE_SIZE)))
+                fatal("Could not invalidate a graphics storage buffer baseline");
+            memcpy(o->org, o->initial, o->size);
+            o->initial = NULL;
         }
         g_nchg = 0;
         vk_write_changed_runs(o->addr, o->ptr, o->org, o->size, chg_add, o);
@@ -765,8 +774,12 @@ static void read_untracked(u64 gva, u8* dst, u64 len) {
 /* a pending result can be copied over guest memory on the GPU: this frame's staging or the last one's still holds
    it, and the guest hasn't written the bytes it covers in [lo, hi) since it was snapshotted */
 static int out_copyable(const GfxOut* o, u64 lo, u64 hi) {
-    const u8* host = gmem_ptr_untracked(lo, hi - lo);
-    return o->frame_id + 1 >= vk_frame_id() && host && !memcmp(host, o->org + (lo - o->addr), hi - lo);
+    const u8* host = gmem_host(lo, hi - lo);
+    if (o->frame_id + 1 < vk_frame_id() || !host) return 0;
+    if (vk_written_since(host, hi - lo, o->wseen) == 0) return 1;
+    if (o->initial) return 0; /* the baseline is still being produced by the GPU */
+    host = gmem_ptr_untracked(lo, hi - lo);
+    return host && !memcmp(host, o->org + (lo - o->addr), hi - lo);
 }
 /* the same for each run of o's bytes in [gva, gva + len), through whichever GPU address maps them (out_spans) */
 typedef struct {
@@ -780,13 +793,18 @@ typedef struct {
    next write epoch on, which is when the stream can see it too, and a host without tracking compares */
 static void copyable_span(void* user, u64 at, u64 from, u64 n) {
     Copyable* c = user;
-    const u8* host = c->ok ? gmem_ptr_untracked(c->gva + at, n) : NULL;
+    const u8* host = c->ok ? gmem_host(c->gva + at, n) : NULL;
     if (!host) {
         c->ok = 0;
         return;
     }
     if (vk_written_since(host, n, c->o->wseen) == 0) return;
-    if (memcmp(host, c->o->org + from, n)) c->ok = 0;
+    if (c->o->initial) {
+        c->ok = 0;
+        return;
+    }
+    host = gmem_ptr_untracked(c->gva + at, n);
+    if (!host || memcmp(host, c->o->org + from, n)) c->ok = 0;
 }
 /* A composition takes each byte from the newest pending result over it: that result was made over the ones before it
    (composed, or over guest memory they hadn't touched) and its draw ran after theirs, so its buffer holds the byte as
@@ -1433,6 +1451,27 @@ int vk_buf_copy(u64 gva, u64 len, VkBuffer* buf, u64* off) {
     return 1;
 }
 
+static int range_owned(u64 gva, u64 len);
+static int written_since_gva(u64 gva, u64 len, u32 since);
+/* Keep an owned input on the GPU. Only the baseline needed to merge later CPU edits
+   is copied to host-cached staging, asynchronously with the draw. */
+static int writable_owned(GfxOut* o, u64 gva, u32 len, VkBuffer buf, u64 off) {
+    VkBuffer back;
+    u64 at;
+    o->initial = vk_stage_back(len, &back, &at, &o->initial_mem);
+    if (!o->initial) return 0;
+    vk_render_end();
+    vk_guest_read(gva, len, o->ptr, buf, off);
+    copy_barrier(VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+    VkBufferCopy copy = {off, at, len};
+    rec_CmdCopyBuffer(vk_cmd(), buf, back, 1, &copy);
+    copy_barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                 VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+    return 1;
+}
+
 /* Each writable binding keeps its original bytes until its draw's frame completes. The guest can keep writing RAM:
    vk_write_changed resolves those writes against the GPU result at the fence. */
 int vk_buf_copy_writable(u64 gva, u32 len, VkBuffer* buf, u64* off) {
@@ -1447,12 +1486,15 @@ int vk_buf_copy_writable(u64 gva, u32 len, VkBuffer* buf, u64* off) {
         }
     int pending = gfx_gpu_src(gva, len, buf, off, 1, vk_stage_align());
     if (pending == 1) return 1;
+    if (!pending) gmem_need(gva, len);
+    int owned = !pending && range_owned(gva, len);
+    if (owned) (void)written_since_gva(gva, len, 0); /* establish the CPU-write baseline before the GPU copy */
     o = gfx_out_new((u32)(((gva & 0xFFF) + len + 0xFFF) >> 12), len);
     if (!o) return 0;
     if (pending == 2) { /* guest memory's bytes, with the earlier results copied over them below (out_rebase) */
         read_untracked(gva, o->org, len);
         o->composed = 1;
-    } else {
+    } else if (!owned) {
         const u8* src = guest_bytes(gva, len);
         if (!src) {
             free(o);
@@ -1468,7 +1510,13 @@ int vk_buf_copy_writable(u64 gva, u32 len, VkBuffer* buf, u64* off) {
         free(o);
         return 0;
     }
-    memcpy(o->ptr, o->org, len);
+    if (owned) {
+        if (!writable_owned(o, gva, len, *buf, *off)) {
+            free(o);
+            return 0;
+        }
+    } else
+        memcpy(o->ptr, o->org, len);
     if (pending == 2) gfx_overlay(gva, len, *buf, *off);
     o->addr = gva;
     o->size = len;

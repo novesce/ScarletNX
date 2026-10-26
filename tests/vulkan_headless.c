@@ -7,6 +7,10 @@
 #include "nx/gpu/maxwell/draw_state.h"
 #include "nx/gpu/renderer.h"
 #include "nx/gpu/vk/vk.h"
+#include "nx/gpu/maxwell/kepler_compute_regs.h"
+#include "nx/gpu/maxwell/engines_int.h"
+#include "nx/gpu/maxwell/maxwell_3d_regs.h"
+#include "nx/gpu/maxwell/gob.h"
 #include "nx/gpu/video/vic.h"
 #include "nx/memory/mem.h"
 #include "nx/memory/own.h"
@@ -1049,7 +1053,7 @@ static int check_blit(void) {
 }
 
 /* a block linear A8B8G8R8 target of w by h at gva (blocks 2^bh GOBs high) cleared to red or blue */
-static void rt_clear(GpuChannel* ch, u64 gva, u32 w, u32 h, u32 bh, int blue) {
+static void rt_clear_format(GpuChannel* ch, u64 gva, u32 w, u32 h, u32 bh, int blue, u32 format) {
     u32* r = ch->r3d;
     const float color[4] = {blue ? 0.0f : 1.0f, 0, blue ? 1.0f : 0.0f, 1};
     r[0x487] = 1;
@@ -1057,13 +1061,16 @@ static void rt_clear(GpuChannel* ch, u64 gva, u32 w, u32 h, u32 bh, int blue) {
     r[0x201] = (u32)gva;
     r[0x202] = w;
     r[0x203] = h;
-    r[0x204] = 0xD5;
+    r[0x204] = format;
     r[0x205] = bh << 4;
     r[0x206] = 1;
     r[0x207] = 0;
     memcpy(&r[0x360], color, sizeof color);
     engine_clear(ch, 15 << 2);
     vk_render_end();
+}
+static void rt_clear(GpuChannel* ch, u64 gva, u32 w, u32 h, u32 bh, int blue) {
+    rt_clear_format(ch, gva, w, h, bh, blue, 0xD5);
 }
 /* n bytes at p all blue pixels */
 static int all_blue(const u8* p, u32 n) {
@@ -1141,12 +1148,35 @@ static int check_rt_overlap(void) {
     CHECK(g_renderer->dma_copy(&o));
     CHECK(all_bytes(GP(DMA_B), 0x28000, 0x37));
     CHECK(all_bytes(GP(DMA_A + 0x40000), 512, 0x37));
+    /* Dirty metadata queries must leave GPU-owned pixels on the GPU. */
+    const u64 tracked = DMA_GA + 0xe0000, tracked_cpu = DMA_A + 0xe0000;
+    rt_clear(ch, tracked, 64, 64, 3, 1);
+    vk_lock();
+    Surf* target = vk_rt_find(tracked);
+    CHECK(target && vk_surf_publish(target));
+    int tracking = vk_written_since(gmem_host(tracked, 0x4000), 0x4000, 0) >= 0;
+    u64 landings = own_landings();
+    vk_rt_drawn_full(target);
+    (void)vk_rt_drawn_fresh(target);
+    CHECK(own_landings() == landings);
+    if (own_traps()) CHECK(own_lookup(tracked_cpu, 0x4000, NULL, 0) > 0);
+    vk_unlock();
+    memset(GP(tracked_cpu + 16), 0x39, 16);
+    g_renderer->mem_may_have_changed();
+    vk_lock();
+    if (tracking) CHECK(!vk_rt_drawn_fresh(target));
+    vk_unlock();
     free(ch);
     return 0;
 }
 
 #include "vulkan_shader_invalidate.inc"
 #include "vulkan_index_draws.inc"
+#include "vulkan_storage_formats.inc"
+#include "vulkan_storage_atomics.inc"
+#include "vulkan_surface_loads.inc"
+#include "vulkan_owned_readback.inc"
+#include "vulkan_mesh_inputs.inc"
 
 int main(int argc, char** argv) {
     const u32 w = 32, h = 16;
@@ -1175,9 +1205,15 @@ int main(int argc, char** argv) {
     }
     CHECK(!check_hash_copy());
     CHECK(!check_staging_overflow());
+    CHECK(!check_owned_readback());
+    CHECK(!check_owned_writable());
     CHECK(!check_buffer_texture_rows());
+    CHECK(!check_storage_image_formats());
+    CHECK(!check_volume_surface_atomics());
+    CHECK(!check_layered_surface_loads());
     CHECK(!check_viewport_orientation());
     CHECK(!check_index_draws());
+    CHECK(!check_mesh_inputs());
     CHECK(!check_packed_depth());
     CHECK(!check_depth_array());
     CHECK(!check_srgb_write());
