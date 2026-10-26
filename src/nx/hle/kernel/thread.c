@@ -53,9 +53,16 @@ static void core_unlink_nl(int k, KThread* t) {
 static int core_before(const KThread* a, const KThread* b) {
     return a->prio < b->prio || (a->prio == b->prio && a->core_ticket < b->core_ticket);
 }
+/* t, which held core k since core_give_nl, lets go of it: the time goes to the report at exit (kernel_core_report) */
+static void core_held_nl(int k, KThread* t) {
+    u64 held = plat_ns() - g_host.thread.core_since[k];
+    g_host.thread.core_held_ns[k] += held;
+    t->core_held_ns += held;
+}
 /* t holds core k from now on, and the host thread waiting for it (if any) goes on */
 static void core_give_nl(int k, KThread* t) {
     g_hle.thread.core_owner[k] = kt_ix(t);
+    g_host.thread.core_since[k] = plat_ns();
     t->core = k;
     t->on_core = k;
     __atomic_store_n(&t->cpu.poll, 0u, __ATOMIC_RELAXED);
@@ -102,7 +109,12 @@ static void core_wait_nl(KThread* t, int k) {
     g_hle.thread.core_wait[k] = kt_ix(t);
     if (t->prio < g_hle.thread.core_best[k]) g_hle.thread.core_best[k] = t->prio;
     core_flag_nl(k);
+    u64 t0 = plat_ns(), waited;
     while (t->on_core == -2) pc_wait(kt_cv(t), &g_host.thread.core_lk, -1);
+    waited = plat_ns() - t0;
+    t->core_wait_ns += waited;
+    t->core_waits++;
+    g_host.thread.core_wait_ns[k] += waited;
 }
 /* t (holding no core) takes one: its own if free; with a holder it would preempt, it waits there and flags the holder;
    otherwise an idle core of its mask, or a place in its own core's line */
@@ -123,7 +135,10 @@ static void core_release_nl(KThread* t) {
     int k = t->on_core;
     t->on_core = -1;
     __atomic_store_n(&t->cpu.poll, 0u, __ATOMIC_RELAXED);
-    if (g_hle.thread.core_owner[k] == kt_ix(t)) g_hle.thread.core_owner[k] = 0;
+    if (g_hle.thread.core_owner[k] == kt_ix(t)) {
+        g_hle.thread.core_owner[k] = 0;
+        core_held_nl(k, t);
+    }
     core_handoff_nl(k);
 }
 /* after t took a core: its host thread moves to the core's share of the host CPUs, if it was on another one. Fewer
@@ -143,14 +158,14 @@ static void core_pin(KThread* t) {
     LOG("kernel: core %d runs on host CPUs%s\n", k, list);
 }
 void core_enter(KThread* t) {
-    if (!t) return;
+    if (!t || !g_settings.emulated_cores) return;
     pm_lock(&g_host.thread.core_lk);
     if (t->on_core < 0) core_take_nl(t);
     pm_unlock(&g_host.thread.core_lk);
     core_pin(t);
 }
 void core_leave(KThread* t) {
-    if (!t) return;
+    if (!t || !g_settings.emulated_cores) return;
     pm_lock(&g_host.thread.core_lk);
     if (t->on_core >= 0) core_release_nl(t);
     pm_unlock(&g_host.thread.core_lk);
@@ -161,6 +176,12 @@ void core_preempt(KThread* t) {
     int k;
     if (!t || !__atomic_load_n(&t->cpu.poll, __ATOMIC_RELAXED)) return;
     pm_lock(&g_host.thread.core_lk);
+    if (!g_settings.emulated_cores) { /* only a game pause sets poll: kernel_hold, under core_lk */
+        if (!__atomic_load_n(&g_hle.thread.hold, __ATOMIC_RELAXED))
+            __atomic_store_n(&t->cpu.poll, 0u, __ATOMIC_RELAXED);
+        pm_unlock(&g_host.thread.core_lk);
+        return;
+    }
     k = t->on_core;
     if (k >= 0 && g_hle.thread.core_best[k] < t->prio) {
         core_release_nl(t);
@@ -174,13 +195,38 @@ void core_poll(KThread* t) {
     core_preempt(t);
     if (kthread_hold_point(t, PARK_RUN)) core_enter(t);
 }
-/* svcSleepThread's yields. With nobody waiting for its core the thread goes on at once, as on the console. Otherwise
-   the core goes to the best waiter, whatever its priority, and t lines up behind the waiters of its own priority. A
-   waiter of worse priority that took the core gives it back at its next poll: a yield doesn't hand a better thread's
-   time to a worse one. migrate (2, for -1 and -2) also lets it run on an idle core of its mask meanwhile */
+/* the thread a yield with core migration moves to core k on the console (Mesosphère's
+   KScheduler::YieldWithCoreMigration): one waiting for another core that core k is in the mask of, of the yielding
+   thread's priority or better, the best first. Not from a core whose holder is of priority 0 or 1, which nothing is
+   moved away from (HighestCoreMigrationAllowedPriority). NULL for none, else its core in *from */
+static KThread* core_suggested_nl(const KThread* t, int k, int* from) {
+    KThread *best = NULL, *w;
+    int j;
+    for (j = 0; j < NCORES; j++) {
+        if (j == k || (g_hle.thread.core_owner[j] && kt_at(g_hle.thread.core_owner[j])->prio < 2)) continue;
+        for (w = kt_at(g_hle.thread.core_wait[j]); w; w = kt_at(w->core_next))
+            if (((w->affinity >> k) & 1) && w->prio <= t->prio && (!best || core_before(w, best))) {
+                best = w;
+                *from = j;
+            }
+    }
+    return best;
+}
+/* svcSleepThread's yields. With waiters for its core, the core goes to the best of them, whatever its priority, and t
+   lines up behind the waiters of its own priority. A waiter of worse priority that took the core gives it back at its
+   next poll: a yield doesn't hand a better thread's time to a worse one. migrate (2, for -1 and -2) also lets it run
+   on an idle core of its mask meanwhile. With none, a migrating yield takes a thread waiting for another core onto
+   this one and lines up behind it, as the console does: a thread that polls with svcSleepThread(-1) lends its core to
+   threads its core could run, which otherwise wait for a busy core of their own. Without that either, t goes on at
+   once */
 void core_yield(KThread* t, int migrate) {
     int k, j;
+    KThread* w;
     if (!t) return;
+    if (!g_settings.emulated_cores) { /* the host's threads are the cores: let it run another */
+        plat_yield();
+        return;
+    }
     pm_lock(&g_host.thread.core_lk);
     k = t->on_core;
     if (k >= 0 && g_hle.thread.core_wait[k]) {
@@ -189,6 +235,14 @@ void core_yield(KThread* t, int migrate) {
             core_give_nl(j, t);
         else
             core_wait_nl(t, k);
+    } else if (k >= 0 && migrate && (w = core_suggested_nl(t, k, &j))) {
+        core_unlink_nl(j, w);
+        core_flag_nl(j);
+        t->on_core = -1;
+        __atomic_store_n(&t->cpu.poll, 0u, __ATOMIC_RELAXED);
+        core_held_nl(k, t);
+        core_give_nl(k, w); /* not core_release_nl: its hand-off could pick another thread */
+        core_wait_nl(t, k);
     }
     pm_unlock(&g_host.thread.core_lk);
     core_pin(t);
@@ -515,6 +569,11 @@ int kernel_hold(int timeout_ms) {
     /* under the cores' lock, so that no core_flag_nl that read hold before it was set clears a flag after this */
     pm_lock(&g_host.thread.core_lk);
     for (k = 0; k < NCORES; k++) core_flag_nl(k);
+    if (!g_settings.emulated_cores) { /* no thread holds a core: each one running game code is asked itself */
+        pm_lock(&g_host.kernel.pool_lk);
+        FOR_LIVE_THREADS(t) __atomic_store_n(&t->cpu.poll, 1u, __ATOMIC_RELAXED);
+        pm_unlock(&g_host.kernel.pool_lk);
+    }
     pm_unlock(&g_host.thread.core_lk);
     pm_unlock(&g_host.kernel.klock);
     for (;;) {
