@@ -12,8 +12,8 @@
    halves (FEAT_FP16) as on singles and doubles. Every lane is the architecture's: FPCR (FZ, FZ16, DN, AHP, RMode),
    NaN propagation and FPSR's cumulative flags are the soft-float helpers' (helpers/fp.c), one call per lane. The
    common single and double operations first try the host's IEEE arithmetic on whole vectors, behind the guards
-   ir_fpu.c's scalar fast paths use, checked in every lane: round to nearest without FZ, a finite result above the
-   smallest normal or an exact zero, and IXC computed exactly or already set. */
+   ir_fpu.c's scalar fast paths use, checked in every lane: round to nearest, no denormal operand under FZ, a finite
+   result above the smallest normal or an exact zero, and IXC computed exactly or already set. */
 #include "common/cpu/recompiler/llvm/ir_vec.h"
 #include "common/cpu/aarch64/cpu.h"
 
@@ -350,7 +350,8 @@ static void fast_binary(SnxIr* ir, unsigned op, unsigned width, V a, V b, Fast* 
     ok = either(ir, roomy(ir, width, rb), exact_zero);
     if (cut) ok = both(ir, ok, cut);
     f->value = rb;
-    f->ok = both(ir, fpcr_clear(ir, FPCR_RMODE | FPCR_FZ), ir_vec_all(ir, ok));
+    f->ok = both(ir, both(ir, fpcr_clear(ir, FPCR_RMODE), both(ir, unflushed(ir, width, a), unflushed(ir, width, b))),
+                 ir_vec_all(ir, ok));
     f->inexact = inexact ? ir_vec_any(ir, inexact) : NULL;
     if (!inexact) f->ok = both(ir, f->ok, ixc_set(ir));
     f->quick = NULL;
@@ -365,8 +366,9 @@ static void fast_fma(SnxIr* ir, unsigned width, V add, V n, V m, Fast* f) {
     V r = as_bits(ir, fma3(ir, as_float(ir, n, width), as_float(ir, m, width), as_float(ir, add, width)), width);
     V zero_product = either(ir, is_zero(ir, width, n), is_zero(ir, width, m));
     V result = either(ir, roomy(ir, width, r), both(ir, is_zero(ir, width, r), zero_product));
+    V operands = both(ir, unflushed(ir, width, add), both(ir, unflushed(ir, width, n), unflushed(ir, width, m)));
     f->value = r;
-    f->ok = both(ir, both(ir, fpcr_clear(ir, FPCR_RMODE | FPCR_FZ), ixc_set(ir)), ir_vec_all(ir, result));
+    f->ok = both(ir, both(ir, fpcr_clear(ir, FPCR_RMODE), ixc_set(ir)), both(ir, operands, ir_vec_all(ir, result)));
     f->quick = both(ir, both(ir, fpcr_clear(ir, FPCR_RMODE | FPCR_FZ), ixc_set(ir)), ir_vec_all(ir, roomy(ir, width, r)));
     f->inexact = NULL;
 }
@@ -379,8 +381,9 @@ static void fast_step(SnxIr* ir, unsigned width, unsigned rsqrt, V a, V b, Fast*
     r = fma3(ir, fa, as_float(ir, b, width), KF(ir, width, lanes, rsqrt ? 3.0 : 2.0));
     if (rsqrt) r = LLVMBuildFMul(B, r, KF(ir, width, lanes, 0.5), "");
     f->value = as_bits(ir, r, width);
-    f->ok = both(ir, both(ir, fpcr_clear(ir, FPCR_RMODE | FPCR_FZ), ixc_set(ir)),
-                 ir_vec_all(ir, roomy(ir, width, f->value)));
+    f->ok = both(ir, both(ir, fpcr_clear(ir, FPCR_RMODE), ixc_set(ir)),
+                 both(ir, both(ir, unflushed(ir, width, a), unflushed(ir, width, b)),
+                      ir_vec_all(ir, roomy(ir, width, f->value))));
     f->inexact = NULL;
     f->quick = NULL;
 }
@@ -396,7 +399,7 @@ static void fast_sqrt(SnxIr* ir, unsigned width, V a, Fast* f) {
         ok = both(ir, ok, either(ir, zero, magnitude_in(ir, 64, a, RESIDUAL_FLOOR, inf_bits(64))));
     }
     f->value = rb;
-    f->ok = both(ir, fpcr_clear(ir, FPCR_RMODE | FPCR_FZ), ir_vec_all(ir, ok));
+    f->ok = both(ir, both(ir, fpcr_clear(ir, FPCR_RMODE), unflushed(ir, width, a)), ir_vec_all(ir, ok));
     f->inexact = inexact ? ir_vec_any(ir, inexact) : NULL;
     if (!inexact) f->ok = both(ir, f->ok, ixc_set(ir));
     f->quick = NULL;
@@ -417,11 +420,11 @@ static void fast_minmax(SnxIr* ir, unsigned width, unsigned minimum, V n, V m, F
     f->quick = NULL;
 }
 
-/* without FPSR's flags (snx_ir_fpsr_flags): the host's lanes wherever none is a NaN (ir_fpu.c's relax) */
+/* without FPSR's flags (snx_ir_fpsr_flags): the host's lanes wherever none is a NaN, without FZ, and where the
+   exact guard holds (ir_fpu.c's relax) */
 static void relax(SnxIr* ir, unsigned width, Fast* f) {
     if (snx_ir_fpsr_exact()) return;
-    f->ok = both(ir, fpcr_clear(ir, FPCR_RMODE | FPCR_FZ), no_nan(ir, width, f->value));
-    f->quick = NULL;
+    f->ok = either(ir, f->ok, both(ir, fpcr_clear(ir, FPCR_RMODE | FPCR_FZ), no_nan(ir, width, f->value)));
     f->inexact = NULL;
 }
 

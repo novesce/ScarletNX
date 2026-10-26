@@ -173,10 +173,12 @@ static V call_from_int(SnxIr* ir, V v, unsigned integer, unsigned width, unsigne
 }
 
 /* ---- the fast paths ----
-   The host's IEEE operations in round to nearest without FZ give the helpers' exact result when the result is finite
-   and above the smallest normal, or an exact zero: then no NaN was processed (a NaN operand gives a NaN), no infinity
-   was an operand (it gives an infinity or a NaN), a denormal operand is the IEEE value it is without FZ and raises
-   nothing, tininess (before rounding, as the Arm ARM detects it) can't have occurred, and IXC is the only flag. A
+   The host's IEEE operations in round to nearest give the helpers' exact result when the result is finite and above
+   the smallest normal, or an exact zero, and under FZ no operand is a denormal (unflushed): then no NaN was processed
+   (a NaN operand gives a NaN), no infinity was an operand (it gives an infinity or a NaN), a denormal operand is the
+   IEEE value it is without FZ and raises nothing, nothing is flushed, tininess (before rounding, as the Arm ARM
+   detects it) can't have occurred, and IXC is the only flag. Many games run with FZ set: a guard of FZ clear
+   would send all of their arithmetic to the helpers. A
    result above the smallest normal rounds a value above it; a zero is exact for any sum (sums only cancel exactly),
    and for a product or quotient only with a zero operand. IXC is computed
    exactly where that is cheap (TwoSum for sums; for singles the double product, quotient remainder or square, all
@@ -322,7 +324,8 @@ static V fast_binary(SnxIr* ir, unsigned op, unsigned width, V a, V b, V* ok, V*
             if (*inexact) *inexact = both(ir, *inexact, LLVMBuildNot(B, exact_zero, ""));
             break;
     }
-    *ok = both(ir, fpcr_clear(ir, FPCR_RMODE | FPCR_FZ), either(ir, roomy(ir, width, rb), exact_zero));
+    *ok = both(ir, both(ir, fpcr_clear(ir, FPCR_RMODE), both(ir, unflushed(ir, width, a), unflushed(ir, width, b))),
+               either(ir, roomy(ir, width, rb), exact_zero));
     if (cut) *ok = both(ir, *ok, cut);
     if (!*inexact) *ok = both(ir, *ok, ixc_set(ir));
     return rb;
@@ -333,7 +336,7 @@ static V fast_sqrt(SnxIr* ir, unsigned width, V a, V* ok, V* inexact) {
     V fa = as_float(ir, a, width), r = ir_intrinsic(ir, "llvm.sqrt", LLVMTypeOf(fa), &fa, 1);
     V rb = as_bits(ir, r, width), zero = is_zero(ir, width, a);
     *inexact = NULL;
-    *ok = both(ir, fpcr_clear(ir, FPCR_RMODE | FPCR_FZ), either(ir, roomy(ir, width, rb), zero));
+    *ok = both(ir, both(ir, fpcr_clear(ir, FPCR_RMODE), unflushed(ir, width, a)), either(ir, roomy(ir, width, rb), zero));
     if (width == 32)
         *inexact = float_ne(ir, widen(ir, fa), LLVMBuildFMul(B, widen(ir, r), widen(ir, r), ""));
     else if (host_fma(ir)) {
@@ -349,15 +352,18 @@ static V fast_fma(SnxIr* ir, unsigned width, V add, V n, V m, V* ok) {
     V r = as_bits(ir, fma3(ir, as_float(ir, n, width), as_float(ir, m, width), as_float(ir, add, width)), width);
     V zero_product = either(ir, is_zero(ir, width, n), is_zero(ir, width, m));
     V result = either(ir, roomy(ir, width, r), both(ir, is_zero(ir, width, r), zero_product));
-    *ok = both(ir, both(ir, fpcr_clear(ir, FPCR_RMODE | FPCR_FZ), ixc_set(ir)), result);
+    V operands = both(ir, unflushed(ir, width, add), both(ir, unflushed(ir, width, n), unflushed(ir, width, m)));
+    *ok = both(ir, both(ir, fpcr_clear(ir, FPCR_RMODE), ixc_set(ir)), both(ir, operands, result));
     return r;
 }
 
 /* without FPSR's flags (snx_ir_fpsr_flags): the host's result wherever it is not a NaN, in round to nearest without
-   FZ. Infinities, denormals and zeros are the IEEE values the console gives there too */
+   FZ (infinities, denormals and zeros are the IEEE values the console gives there too), and where the exact guard
+   holds, as under FZ */
 static void relax(SnxIr* ir, unsigned width, V value, V* ok, V* inexact) {
     if (snx_ir_fpsr_exact()) return;
-    *ok = both(ir, fpcr_clear(ir, FPCR_RMODE | FPCR_FZ), LLVMBuildNot(B, is_nan(ir, width, value), ""));
+    *ok = either(ir, *ok,
+                 both(ir, fpcr_clear(ir, FPCR_RMODE | FPCR_FZ), LLVMBuildNot(B, is_nan(ir, width, value), "")));
     if (inexact) *inexact = NULL;
 }
 
