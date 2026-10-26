@@ -391,30 +391,36 @@ uint16_t snx_net_checksum(const void* data, size_t size, uint32_t sum) {
 
 /* ============================================================ addresses */
 int snx_net_addr_to_host(const SnxSockAddr* in, struct sockaddr_storage* out, snx_socklen* size) {
+    /* each address is made as its own type and copied in: stores through a sockaddr_in into a sockaddr_storage would
+       be another type's object, which the optimizer may assume they don't touch */
     memset(out, 0, sizeof *out);
     switch (in->family) {
         case SNX_AF_INET: {
-            struct sockaddr_in* a = (struct sockaddr_in*)out;
-            a->sin_family = AF_INET;
-            a->sin_port = in->port;
-            memcpy(&a->sin_addr, in->addr, 4);
+            struct sockaddr_in a;
+            memset(&a, 0, sizeof a);
+            a.sin_family = AF_INET;
+            a.sin_port = in->port;
+            memcpy(&a.sin_addr, in->addr, 4);
 #if defined(__APPLE__) || defined(__FreeBSD__)
-            a->sin_len = sizeof *a;
+            a.sin_len = sizeof a;
 #endif
-            *size = sizeof *a;
+            memcpy(out, &a, sizeof a);
+            *size = sizeof a;
             return 0;
         }
         case SNX_AF_INET6: {
-            struct sockaddr_in6* a = (struct sockaddr_in6*)out;
-            a->sin6_family = AF_INET6;
-            a->sin6_port = in->port;
-            a->sin6_flowinfo = in->flowinfo;
-            memcpy(&a->sin6_addr, in->addr, 16);
-            a->sin6_scope_id = in->scope_id;
+            struct sockaddr_in6 a;
+            memset(&a, 0, sizeof a);
+            a.sin6_family = AF_INET6;
+            a.sin6_port = in->port;
+            a.sin6_flowinfo = in->flowinfo;
+            memcpy(&a.sin6_addr, in->addr, 16);
+            a.sin6_scope_id = in->scope_id;
 #if defined(__APPLE__) || defined(__FreeBSD__)
-            a->sin6_len = sizeof *a;
+            a.sin6_len = sizeof a;
 #endif
-            *size = sizeof *a;
+            memcpy(out, &a, sizeof a);
+            *size = sizeof a;
             return 0;
         }
         case SNX_AF_UNSPEC: /* connect() with it dissolves a datagram socket's association */
@@ -425,24 +431,32 @@ int snx_net_addr_to_host(const SnxSockAddr* in, struct sockaddr_storage* out, sn
     return -SNX_EAFNOSUPPORT;
 }
 int snx_net_addr_from_host(const struct sockaddr* in, snx_socklen size, SnxSockAddr* out) {
+    /* read as bytes: in is whichever type the system wrote, a sockaddr_storage or the address's own */
+    struct sockaddr head;
+    int family;
     memset(out, 0, sizeof *out);
-    if (size >= (snx_socklen)sizeof(struct sockaddr_in) && in->sa_family == AF_INET) {
-        const struct sockaddr_in* a = (const struct sockaddr_in*)in;
+    memset(&head, 0, sizeof head);
+    if (size > 0) memcpy(&head, in, (size_t)size < sizeof head ? (size_t)size : sizeof head);
+    family = head.sa_family;
+    if (size >= (snx_socklen)sizeof(struct sockaddr_in) && family == AF_INET) {
+        struct sockaddr_in a;
+        memcpy(&a, in, sizeof a);
         out->family = SNX_AF_INET;
-        out->port = a->sin_port;
-        memcpy(out->addr, &a->sin_addr, 4);
+        out->port = a.sin_port;
+        memcpy(out->addr, &a.sin_addr, 4);
         return 0;
     }
-    if (size >= (snx_socklen)sizeof(struct sockaddr_in6) && in->sa_family == AF_INET6) {
-        const struct sockaddr_in6* a = (const struct sockaddr_in6*)in;
+    if (size >= (snx_socklen)sizeof(struct sockaddr_in6) && family == AF_INET6) {
+        struct sockaddr_in6 a;
+        memcpy(&a, in, sizeof a);
         out->family = SNX_AF_INET6;
-        out->port = a->sin6_port;
-        out->flowinfo = a->sin6_flowinfo;
-        memcpy(out->addr, &a->sin6_addr, 16);
-        out->scope_id = a->sin6_scope_id;
+        out->port = a.sin6_port;
+        out->flowinfo = a.sin6_flowinfo;
+        memcpy(out->addr, &a.sin6_addr, 16);
+        out->scope_id = a.sin6_scope_id;
         return 0;
     }
-    if (size > 0 && in->sa_family == AF_UNIX) {
+    if (size > 0 && family == AF_UNIX) {
         out->family = SNX_AF_UNIX; /* unnamed: socketpair()'s ends */
         return 0;
     }

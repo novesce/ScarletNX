@@ -272,22 +272,23 @@ void gamepad_scan(void) {
     for (i = 0; i < n; i++) gamepad_detect(ids[i]);
     SDL_free(ids);
 }
-/* the slot a pad takes: the player that names it its controller, else the first that takes the next one; -1 for none */
+/* the slot a pad takes: the player that names it its controller, else the first that takes the next one; -1 for none
+   (snx_pad_slot, which the launcher's button map takes a player's pad by too) */
 static int slot_for(u32 id) {
-    char want[48], one[33];
+    char want[33], one[33];
+    const char* players[SNX_GAMEPADS];
+    unsigned taken = 0;
     int i, alike = 0;
-    SDL_GUIDToString(SDL_GetGamepadGUIDForID(id), want, 33);
-    for (i = 0; i < SNX_GAMEPADS; i++)
+    SDL_GUIDToString(SDL_GetGamepadGUIDForID(id), want, sizeof want);
+    for (i = 0; i < SNX_GAMEPADS; i++) {
+        players[i] = g_settings.player_controller[i];
         if (g_pads[i]) {
+            taken |= 1u << i;
             SDL_GUIDToString(SDL_GetJoystickGUIDForID(SDL_GetGamepadID(g_pads[i])), one, sizeof one);
             alike += !SDL_strcasecmp(one, want);
         }
-    if (alike) snprintf(want + strlen(want), sizeof want - strlen(want), "/%d", alike + 1);
-    for (i = 0; i < SNX_GAMEPADS; i++)
-        if (!g_pads[i] && !SDL_strcasecmp(g_settings.player_controller[i], want)) return i;
-    for (i = 0; i < SNX_GAMEPADS; i++)
-        if (!g_pads[i] && !g_settings.player_controller[i][0]) return i;
-    return -1;
+    }
+    return snx_pad_slot(want, alike, players, SNX_GAMEPADS, taken);
 }
 void gamepad_open(u32 id) {
     int i;

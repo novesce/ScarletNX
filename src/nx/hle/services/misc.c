@@ -1361,6 +1361,13 @@ static int nn_ngct_detail_IService_Filter(SvcObj* self, IpcBuf text, IpcBuf filt
     R_SUCCEED();
 }
 
+/* prepo's queue has nothing to send: the console's status when it is empty, as Eden answers */
+static int nn_prepo_detail_ipc_IPrepoService_GetTransmissionStatus(SvcObj* self, i32* status) {
+    (void)self;
+    *status = 0;
+    R_SUCCEED();
+}
+
 /* ============================================================ the services' objects */
 SvcObj* new_apm(void) { return nn_apm_IManager_new(); }
 SvcObj* new_lm(void) { return nn_lm_ILogService_new(); }

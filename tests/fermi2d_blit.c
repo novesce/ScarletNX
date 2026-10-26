@@ -5,9 +5,13 @@
    vk/blit.c is held to it on a device by vulkan_headless). A block linear source scaled down by two into a block
    linear destination, read back pixel by pixel through the block linear layout itself (bl_offset below, the whole
    formula); an odd destination window, and nothing written outside it; a source whose rows end inside a 16 byte run;
-   the renderer's blit asked once, and the render target over the destination reloaded once */
+   the renderer's blit asked once, and the render target over the destination reloaded once. Between float formats:
+   half floats to floats and back for every half and the rounding of floats to halves (half.c, the reference
+   texconv.glsl's TC_BLIT_FLOAT is held to), and a pitch linear RGBA32F source into a block linear RGBA16F window, the
+   renderer's blit asked with the conversion */
 #include "nx/gpu/maxwell/fermi2d.c"
 #include "support/fermi2d_ref.h"
+#include "support/half.h"
 
 static unsigned checks;
 #define CHECK(x)                                                                                                       \
@@ -40,10 +44,15 @@ u64 bl_offset(u32 x, u32 y, u32 z, u32 wb, u32 h, u32 bh_log2, u32 bd_log2) {
             ((u64)(z % bd) * bh + gy % bh) * 512;
     return o + (xb / 32) * 256 + (yb / 2) * 64 + ((xb % 32) / 16) * 32 + (yb % 2) * 16 + xb % 16;
 }
-u32 gpu_color_bpp(u32 format) {
-    (void)format;
-    return 4;
+int gmem_read(u64 gva, void* dst, u64 size) {
+    gmem_read_raw(gva, dst, size);
+    return 0;
 }
+int gmem_write(u64 gva, const void* src, u64 size) {
+    gmem_write_raw(gva, src, size);
+    return 0;
+}
+u32 gpu_color_bpp(u32 format) { return format == 0xC0 ? 16 : format == 0xCA ? 8 : 4; }
 int r3d_blit(const Surf2D* s, const Surf2D* d, int dx, int dy, int dw, int dh, double sx, double sy, double sdx,
              double sdy) {
     (void)s, (void)d, (void)dx, (void)dy, (void)dw, (void)dh, (void)sx, (void)sy, (void)sdx, (void)sdy;
@@ -149,10 +158,66 @@ static void odd_source(void) {
         }
 }
 
+/* ------------------------------------------------ between float formats */
+static void halves(void) {
+    for (u32 h = 0; h < 0x10000; h++) {
+        float f = half_to_float((u16)h);
+        if ((h & 0x7C00) == 0x7C00 && (h & 0x3FF))
+            CHECK(f != f && (float_to_half(f) & 0x7FFF) > 0x7C00); /* a NaN stays one */
+        else
+            CHECK(float_to_half(f) == h);
+    }
+    CHECK(half_to_float(0x3C00) == 1.0f && half_to_float(0xC000) == -2.0f && half_to_float(0x0001) == 0x1p-24f);
+    CHECK(float_to_half(0.1f) == 0x2E66);
+    CHECK(float_to_half(2049.0f) == 0x6800 && float_to_half(2051.0f) == 0x6802); /* ties to even */
+    CHECK(float_to_half(65504.0f) == 0x7BFF && float_to_half(65520.0f) == 0x7C00 && float_to_half(-1e9f) == 0xFC00);
+    CHECK(float_to_half(1e-7f) == 0x0002 && float_to_half(1e-9f) == 0 && float_to_half(-0.0f) == 0x8000);
+}
+enum { FW = 24, FH = 12 };
+static float float_px(u32 x, u32 y, u32 k) { return (float)((i32)(x * 7 + y * 131 + k * 1000) - 2000) / 64.0f; }
+static void convert(void) {
+    static GpuChannel ch;
+    u32* r = ch.r2d;
+    memset(&ch, 0, sizeof ch);
+    memset(mem, 0xEE, sizeof mem);
+    for (u32 y = 0; y < FH; y++)
+        for (u32 x = 0; x < FW; x++)
+            for (u32 k = 0; k < 4; k++) {
+                float v = float_px(x, y, k);
+                memcpy(mem + SRC + (u64)y * FW * 16 + x * 16 + k * 4, &v, 4);
+            }
+    surface(&ch, 0x80, DST, FW, FH);
+    surface(&ch, 0x8C, SRC, FW, FH);
+    r[0x80] = 0xCA;        /* R16G16B16A16_FLOAT, block linear */
+    r[0x8C] = 0xC0;        /* R32G32B32A32_FLOAT */
+    r[0x8C + 1] = 1;       /* pitch linear */
+    r[0x8C + 5] = FW * 16; /* the pitch */
+    r[0x223] = 1;
+    r[0x22C] = 3;
+    r[0x22D] = 2;
+    r[0x22E] = 17;
+    r[0x22F] = 7;
+    r[0x231] = 1; /* du/dx 1.0 */
+    r[0x233] = 1;
+    blits = reloads = 0;
+    fermi2d_method(&ch, 0x237, 0);
+    CHECK(blits == 1 && reloads == 1);
+    for (u32 y = 0; y < FH; y++)
+        for (u32 x = 0; x < FW; x++)
+            for (u32 k = 0; k < 4; k++) {
+                u16 v;
+                memcpy(&v, mem + DST + bl_offset(x * 8, y, 0, FW * 8, FH, 1, 0) + k * 2, 2);
+                int inside = x >= 3 && x < 20 && y >= 2 && y < 9;
+                CHECK(inside ? v == float_to_half(float_px(x - 3, y - 2, k)) : v == 0xEEEE);
+            }
+}
+
 int main(void) {
     whole();
     window();
     odd_source();
+    halves();
+    convert();
     printf("fermi2d_blit: %u checks passed\n", checks);
     return 0;
 }

@@ -2,6 +2,7 @@
    Copyright 2026 the ScarletNX contributors */
 #include "gui/model.h"
 #include "gui/browser.h"
+#include "gui/icons.h"
 #include "gui/latin.h"
 #include "gui/wide.h"
 #include <assert.h>
@@ -278,6 +279,23 @@ int main(void) {
         for (i = 1; i < (size_t)gui_wide_count; ++i) assert(gui_wide_points[i - 1] < gui_wide_points[i]);
         for (i = 0; i < (size_t)gui_wide_count; ++i)
             assert(gui_menu_glyph(gui_wide_points[i]) == 256 + gui_latin_count + 2 * (int)i);
+    }
+    /* the icons, two columns each after the wide letters, from U+E000 in icons.h's order: each with ink in its
+       glyph, the code point past the last '?', and each written as UTF-8 reads back as itself */
+    {
+        int i, wide = 256 + gui_latin_count + 2 * gui_wide_count;
+        char utf8[4];
+        const char* at;
+        for (i = 0; i < GUI_ICON_COUNT; ++i) {
+            int c = gui_menu_glyph((uint32_t)(GUI_ICON_FIRST + i)), ink = 0, r;
+            assert(c == wide + 2 * i && gui_glyph_cols(c) == 2);
+            for (r = 0; r < 32; ++r) ink |= gui_icon_font[i * 32 + r];
+            assert(ink);
+            at = gui_icon_utf8((unsigned)(GUI_ICON_FIRST + i), utf8);
+            assert(strlen(utf8) == 3 && gui_utf8_step(&at) == (uint32_t)(GUI_ICON_FIRST + i) && !*at);
+        }
+        assert(gui_menu_glyph(GUI_ICON_END) == '?' && gui_menu_glyph(GUI_ICON_FIRST - 1) == '?');
+        assert(!gui_icon_utf8(GUI_ICON_NONE, utf8)[0] && gui_text_cols(gui_icon_utf8(GUI_ICON_SAVE, utf8)) == 2);
     }
     /* UTF-8 a character a step; U+FFFD and a byte for what no character is (overlong, a surrogate, past U+10FFFF, cut
        short, a stray byte), 0 at the end */

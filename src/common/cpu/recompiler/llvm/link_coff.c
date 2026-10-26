@@ -354,7 +354,11 @@ static int compare_u32(const void* a, const void* b) {
     uint32_t x = *(const uint32_t*)a, y = *(const uint32_t*)b;
     return x < y ? -1 : x > y;
 }
-static int compare_function(const void* a, const void* b) { return compare_u32(a, b); }
+/* a .pdata entry (RUNTIME_FUNCTION) by its begin address, the image's bytes read as the little-endian word they are */
+static int compare_function(const void* a, const void* b) {
+    uint32_t x = rd32((const unsigned char*)a), y = rd32((const unsigned char*)b);
+    return x < y ? -1 : x > y;
+}
 static int compare_export(const void* a, const void* b) {
     return strcmp(*(const char* const*)a, *(const char* const*)b);
 }

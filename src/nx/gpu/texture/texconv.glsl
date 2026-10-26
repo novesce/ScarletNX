@@ -501,6 +501,46 @@ uint tc_16to32(uint v) {
 
 /* byte b of the input buffer (byte addressed) */
 uint tc_src_byte(uint b) { return (src[b >> 2] >> (8u * (b & 3u))) & 0xFFu; }
+
+/* the bits of the float a half is (tests/support/half.c's half_to_float). A subnormal's top bit p becomes the
+   implicit one: m * 2^-24 is 1.f * 2^(p - 24) */
+uint tc_half_float(uint h) {
+    uint sign = (h & 0x8000u) << 16, e = (h >> 10) & 31u, m = h & 0x3FFu;
+    if (e == 31u) return sign | 0x7F800000u | (m << 13);
+    if (e != 0u) return sign | ((e + 112u) << 23) | (m << 13);
+    if (m == 0u) return sign;
+    uint p = uint(findMSB(m));
+    return sign | ((p + 103u) << 23) | ((m << (23u - p)) & 0x7FFFFFu);
+}
+/* the half nearest the float x (its bits), ties to even, too large for one an infinity, a NaN kept quiet (half.c's
+   float_to_half). Integer arithmetic: packHalf2x16's rounding is the device's */
+uint tc_float_half(uint x) {
+    uint sign = (x >> 16) & 0x8000u, e = (x >> 23) & 0xFFu, m = x & 0x7FFFFFu, h, rem, tie;
+    if (e == 0xFFu) return sign | 0x7C00u | (m != 0u ? 0x200u | (m >> 13) : 0u);
+    if (e >= 143u) return sign | 0x7C00u; /* 2^16 and up */
+    if (e <= 112u) {                       /* a subnormal half, or zero below half the smallest */
+        if (e < 102u) return sign;
+        uint s = 126u - e; /* 14 to 24 */
+        m |= 0x800000u;
+        h = m >> s;
+        rem = m & ((1u << s) - 1u);
+        tie = 1u << (s - 1u);
+    } else {
+        h = ((e - 112u) << 10) | (m >> 13);
+        rem = m & 0x1FFFu;
+        tie = 0x1000u;
+    }
+    if (rem > tie || (rem == tie && (h & 1u) != 0u)) h++; /* a carry into the exponent rounds up to it, or infinity */
+    return sign | h;
+}
+/* TC_BLIT_FLOAT: the bits of component k of the source pixel at byte p as a float */
+uint tc_blit_component(uint p, uint k) {
+    uint sn = remap & 15u, sb = (remap >> 4) & 15u;
+    if (k >= sn || (k == 3u && (remap & 0x10000u) != 0u)) return k == 3u ? 0x3F800000u : 0u;
+    uint at = p + k * sb, v = tc_src_byte(at) | (tc_src_byte(at + 1u) << 8);
+    if (sb == 2u) return tc_half_float(v);
+    return v | (tc_src_byte(at + 2u) << 16) | (tc_src_byte(at + 3u) << 24);
+}
 /* TC_DMA_REMAP: byte ob of a line out, with the line in from byte in_line on and the byte now there in old */
 uint tc_remap_byte(uint ob, uint in_line, uint old) {
     uint cs = remap & 15u, ns = (remap >> 4) & 15u, nd = (remap >> 8) & 15u, eo = cs * nd;
@@ -525,6 +565,23 @@ void main() {
             r |= v << (8u * b);
         }
         dst[at] = r;
+        return;
+    }
+    if (mode == TC_BLIT_FLOAT) {
+        uint line = gl_GlobalInvocationID.y, at = out_bias + line * out_pitch + u, w = dst[at];
+        uint sp = (remap & 15u) * ((remap >> 4) & 15u), db = (remap >> 12) & 15u, dp = ((remap >> 8) & 15u) * db;
+        uint row = in_bias + src[const_b + line] * in_pitch;
+        /* the word's components (a pixel's are 2 or 4 bytes each, and pixels start on them) */
+        for (uint ob = 4u * u; ob < 4u * u + 4u && ob < line_out; ob += db) {
+            uint i = ob / dp, v = tc_blit_component(row + src[const_a + i] * sp, (ob - i * dp) / db);
+            if (db == 4u) {
+                w = v;
+            } else {
+                uint sh = 8u * (ob & 3u);
+                w = (w & ~(0xFFFFu << sh)) | (tc_float_half(v) << sh);
+            }
+        }
+        dst[at] = w;
         return;
     }
     if (mode == TC_DMA_REMAP) {

@@ -201,7 +201,7 @@ jobs:
         run: ctest --test-dir build/headless -R '^(vulkan_headless|vulkan_headless_vic_validation|nx_runtime_homebrew|nx_runtime_homebrew_64k_pages)$' --output-on-failure
       # The game modules compile src/common/cpu/aarch64/cpu_helpers.c, which no CMake target does
       - name: Check the ABI helpers compile
-        run: clang -fsyntax-only -Wall -fno-strict-aliasing -fwrapv -I src src/common/cpu/aarch64/cpu_helpers.c
+        run: clang -fsyntax-only -Wall -I src src/common/cpu/aarch64/cpu_helpers.c
       - name: Test native tooling and indexed filesystems
         run: ctest --test-dir build/default --output-on-failure --parallel 4
       - name: Check optional Python diagnostics
@@ -1464,7 +1464,7 @@ jobs:
           key: ${{ steps.deps-used.outputs.key }}
       - name: Check the ABI helpers compile
         if: ${{ !cancelled() && steps.macos-build.outcome == 'success' }}
-        run: clang -fsyntax-only -Wall -fno-strict-aliasing -fwrapv -I src src/common/cpu/aarch64/cpu_helpers.c
+        run: clang -fsyntax-only -Wall -I src src/common/cpu/aarch64/cpu_helpers.c
       - name: Test native tooling and indexed filesystems
         if: ${{ !cancelled() && steps.macos-build.outcome == 'success' }}
         run: ctest --test-dir build/macos --output-on-failure --parallel 4

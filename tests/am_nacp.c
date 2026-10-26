@@ -45,6 +45,13 @@ int main(void) {
     g_test_nacp_size = sizeof nacp;
     CHECK(nn_am_service_IApplicationFunctions_GetDisplayVersion(NULL, &version) == 0);
     CHECK(!strcmp((char*)version.v, "2.0.0"));
+    /* IsUserAccountSwitchLocked reads this byte, as acc's command does */
+    CHECK(am_user_account_switch_lock() == 0);
+    nacp[0x3026] = 1;
+    nacp_reset(); /* the helper reads the NACP again after the byte changed */
+    CHECK(am_user_account_switch_lock() == 1);
+    nacp[0x3026] = 0;
+    nacp_reset();
     CHECK(nn_am_service_IApplicationFunctions_GetSaveDataSize(NULL, 1, NULL, &normal, &journal) == 0);
     CHECK(normal == 0x4000000 && journal == 0x1000000);
     CHECK(nn_am_service_IApplicationFunctions_GetSaveDataSize(NULL, 3, NULL, &normal, &journal) == 0);
@@ -67,6 +74,7 @@ int main(void) {
     g_hle.am.save_extended[0] = g_hle.am.save_extended[1] = 0; /* a program just started, without a NACP: nothing extended yet */
     CHECK(nn_am_service_IApplicationFunctions_GetDisplayVersion(NULL, &version) == 0);
     CHECK(!strcmp((char*)version.v, "1.0.0"));
+    CHECK(am_user_account_switch_lock() == 0); /* no NACP: not locked */
     CHECK(nn_am_service_IApplicationFunctions_GetSaveDataSize(NULL, 1, NULL, &normal, &journal) == 0);
     CHECK(normal == 0x4000000 && journal == 0x4000000); /* 64 MiB each without a NACP */
     nacp_reset();

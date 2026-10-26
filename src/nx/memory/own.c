@@ -259,6 +259,13 @@ static void land_pages(u64 lo, u64 hi) {
         pm_unlock(&g_own_lk);
         g_hooks.land(r, dst, n);
         __atomic_add_fetch(&g_own_lands, 1, __ATOMIC_RELAXED);
+        /* the landed pages through the mirror, still trapped: no thread can write them before let_go below. An entry is
+           a run of pool pages, so its pages lie in the mirror as they do in guest memory, the edges' CPU bytes too */
+        if (g_hooks.landed)
+            for (i = 0; i < n; i++) {
+                u64 plo = r[i].addr & ~(g_page - 1), phi = (r[i].addr + r[i].size + g_page - 1) & ~(g_page - 1);
+                g_hooks.landed(plo, phi - plo, dst[i] - (r[i].addr - plo));
+            }
         pm_lock(&g_own_lk);
         for (i = 0; i < n; i++) cut_nl(r[i].addr, r[i].addr + r[i].size, &rel);
         pc_broadcast(&g_own_cv);

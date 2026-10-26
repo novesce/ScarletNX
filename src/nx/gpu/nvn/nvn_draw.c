@@ -421,6 +421,8 @@ static void make_dynamic(NvnDraw* d, u32 base_instance) {
                           ? DS_ORIGIN_FLIP_Y
                           : DS_ORIGIN_LOWER_LEFT;
     y.depth_mode = __atomic_load_n(&g_nvn_device.depth_mode, __ATOMIC_RELAXED) == NVN_DEPTH_MODE_NEAR_IS_ZERO;
+    y.point_nudge = 1; /* the game's driver leaves the OpenGL point center and half-integer pixel centers on (0x597
+                          and 0x649 zero) */
     for (f = 0; f < 2; f++) {
         y.face[f].fail = from1(nvn_field(s, f ? NVN_DS_FAIL_B : NVN_DS_FAIL_F), DS_STENCIL_DECREMENT_AND_WRAP, 0);
         y.face[f].zfail = from1(nvn_field(s, f ? NVN_DS_ZFAIL_B : NVN_DS_ZFAIL_F), DS_STENCIL_DECREMENT_AND_WRAP, 0);

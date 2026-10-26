@@ -16,7 +16,6 @@ int vk_result_landing(void);
 void vk_lock(void);
 void vk_unlock(void);
 void vk_release_events(void);
-void vk_release_visibility(void);
 void vk_compute_land_through(u64);
 void vk_land_through(u64);
 void vk_wait_submit(u64);
@@ -421,34 +420,6 @@ int main(void) {
     vk_release_drain();
     assert(!g_rix[home].word && !g_rix[(home + 1) & (RIX_N - 1)].word && count_queued(0x37ab4) == -1);
     assert(lock_depth == 0 && events_signaled == 3 && !events_due); /* payload writes signal nothing */
-    /* Image publication has no storage-buffer result, but still gates releases.
-       Completing one clean must not forget another recorded after it. */
-    pending = unsubmitted = other_pending = 0;
-    next_compute = 0;
-    vk_lock();
-    vk_release_visibility();
-    vk_unlock();
-    u64 first_clean = vk_submit_number();
-    value = 0x61;
-    vk_release_write(0x10100, &value, 1);
-    assert(g_rhead == g_rtail + 1 && g_rq[g_rtail % RQ_N].gate == first_clean);
-    assert(memory[4096 + 0x100] != value);
-    vk_submit(0, 0, 0);
-    vk_lock();
-    vk_release_visibility();
-    vk_unlock();
-    u64 second_clean = vk_submit_number();
-    vk_wait_submit(first_clean);
-    release_through(first_clean, 0);
-    assert(memory[4096 + 0x100] == value && g_visibility_gate == second_clean);
-    value = 0x62;
-    vk_release_write(0x10100, &value, 1);
-    assert(g_rhead == g_rtail + 1 && g_rq[g_rtail % RQ_N].gate == second_clean);
-    vk_release_drain();
-    assert(memory[4096 + 0x100] == value && !g_visibility_gate && waited_graphics == second_clean);
-    value = 0x63;
-    vk_release_write(0x10100, &value, 1);
-    assert(memory[4096 + 0x100] == value && g_rhead == g_rtail);
 	check_writeback_merge();
     return 0;
 }

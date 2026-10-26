@@ -27,8 +27,7 @@ enum {
     BARRIER_DATA_CACHE = 2,
     BARRIER_DESCRIPTOR_CACHE = 3,
     BARRIER_WAIT_FOR_IDLE = 4,
-    BARRIER_SHADER_INSTRUCTIONS = 5,
-    BARRIER_CPU_VISIBILITY = 6
+    BARRIER_SHADER_INSTRUCTIONS = 5
 };
 /* The draw held while the next ones may be more instances of it, as Eden's DrawManager holds an instanced draw
    (DrawMode::Instance) until a method that isn't one of its draws ends it (DrawDeferred). Unlike Eden it is one for
@@ -488,12 +487,14 @@ static const u16 g_m3d_group[MAXWELL3D_MACRO_REGISTERS_START] = {
     /* mx_draw_dynamic's: rasterize enable, depth mode, bias enables, the back stencil's reference and masks, the
        surface clip, depth test and write, alpha test, its reference and function, blend constants, the front stencil,
        line widths, the base instance word, bias factor, smooth lines, two-sided stencil and the back's operations,
-       bias units, MSAA mode, point sprite origin, bias clamp, cull and facing */
+       bias units, MSAA mode, point sprite origin, the OpenGL point center, bias clamp, cull and facing, half-integer
+       pixel centers */
     [0xDF] = R3D_DYNAMIC, [0x35F] = R3D_DYNAMIC, [0x370 ... 0x372] = R3D_DYNAMIC, [0x3D5 ... 0x3D7] = R3D_DYNAMIC,
     [0x3FE] = R3D_DYNAMIC, [0x4B3] = R3D_DYNAMIC, [0x4BA ... 0x4BB] = R3D_DYNAMIC, [0x4C3 ... 0x4C5] = R3D_DYNAMIC,
     [0x4C7 ... 0x4CA] = R3D_DYNAMIC, [0x4E0 ... 0x4E7] = R3D_DYNAMIC, [0x4EC ... 0x4ED] = R3D_DYNAMIC,
     [0x50E] = R3D_DYNAMIC, [0x55B ... 0x55C] = R3D_DYNAMIC, [0x565 ... 0x569] = R3D_DYNAMIC, [0x56F] = R3D_DYNAMIC,
-    [0x574] = R3D_DYNAMIC, [0x581] = R3D_DYNAMIC, [0x61F] = R3D_DYNAMIC, [0x646 ... 0x648] = R3D_DYNAMIC,
+    [0x574] = R3D_DYNAMIC, [0x581] = R3D_DYNAMIC, [0x597] = R3D_DYNAMIC, [0x61F] = R3D_DYNAMIC,
+    [0x646 ... 0x648] = R3D_DYNAMIC, [0x649] = R3D_DYNAMIC,
     [0x280 ... 0x33F] = R3D_VIEWPORTS, [0x380 ... 0x3BF] = R3D_VIEWPORTS, [0x64B] = R3D_VIEWPORTS,
     [0x7C0 ... 0x7FF] = R3D_VBUF, [0x591 ... 0x592] = R3D_INDEX, [0x5F2 ... 0x5F6] = R3D_INDEX,
     /* the bindings' registers: each capture buffer's enable, address and size (its start offset acts, above), the
@@ -589,7 +590,6 @@ static void method_acts(GpuChannel* ch, u32 m, u32 v, int last) {
         case MAXWELL3D_LAUNCH_DMA: i2m_launch(ch, r, MAXWELL3D_UPLOAD); break;
         case MAXWELL3D_INLINE_DATA: i2m_data(ch, v); break;
         case MAXWELL3D_SYNC_INFO: /* the syncpoint once the work before it is done, when the condition is ROP writes */
-            if (sync_info_clean_l2(v)) barrier(BARRIER_CPU_VISIBILITY);
             if (!sync_info_rop_writes_done(v))
                 LOG_LIMIT(4, "gpu: SyncInfo %08x without bit 20 doesn't increment\n", v);
             else if (g_renderer->stream_incr)

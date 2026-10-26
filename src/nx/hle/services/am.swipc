@@ -59,7 +59,7 @@ interface nn::am::service::ICommonStateGetter {
     @stub [59] SetVrPositionForDebug(i32 x, i32 y, i32 width, i32 height);
     [60] GetDefaultDisplayResolution() -> (i32 width, i32 height);
     [61] GetDefaultDisplayResolutionChangeEvent() -> handle<copy, event> event;
-    @stub [62] GetHdcpAuthenticationState() -> i32 state;
+    [62] GetHdcpAuthenticationState() -> i32 state;
     [63] GetHdcpAuthenticationStateChangeEvent() -> handle<copy, event> event;
     [66] SetCpuBoostMode(u32 mode);
     @stub [67] CancelCpuBoostMode();
@@ -144,9 +144,9 @@ interface nn::am::service::IApplicationFunctions {
     [23] GetDisplayVersion() -> nn::oe::DisplayVersion version;
     [25] ExtendSaveData(u8 type, nn::account::Uid uid, i64 normal_size, i64 journal_size) -> i64 required_size;
     [26] GetSaveDataSize(u8 type, nn::account::Uid uid) -> (i64 normal_size, i64 journal_size);
-    @stub [27] CreateCacheStorage(u16 index, i64 normal_size, i64 journal_size)
+    [27] CreateCacheStorage(u16 index, i64 normal_size, i64 journal_size)
         -> (u32 target_media, i64 required_size);
-    @stub [28] GetSaveDataSizeMax() -> (i64 normal_size, i64 journal_size);
+    [28] GetSaveDataSizeMax() -> (i64 normal_size, i64 journal_size);
     @stub [32] BeginBlockingHomeButton(i64 timeout_ns);
     @stub [33] EndBlockingHomeButton();
     @stub [34] SelectApplicationLicense(array<nn::oe::ApplicationLicenseType, 5> types)
@@ -154,7 +154,7 @@ interface nn::am::service::IApplicationFunctions {
     @stub [35] GetDeviceSaveDataSizeMax() -> (i64 normal_size, i64 journal_size);
     # 14.0.0+, its signature read from its name
     [37] GetLimitedApplicationLicenseUpgradableEvent() -> handle<copy, event> event;
-    @stub [40] NotifyRunning() -> b8 became_running;
+    [40] NotifyRunning() -> b8 became_running;
     [50] GetPseudoDeviceId() -> nn::util::Uuid id;
     @stub [60] SetMediaPlaybackStateForApplication(b8 playing);
     @stub [66] InitializeGamePlayRecording(u64 size, handle<copy, transfer_memory> transfer_memory);

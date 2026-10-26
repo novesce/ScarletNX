@@ -371,7 +371,6 @@ static int create_device(void) {
     g_shader_geometry = want->geometryShader != 0;
     g_shader_tessellation = want->tessellationShader != 0;
     const char** ext = g_vk.dev_ext;
-    int has_pipeline_robustness = 0, has_robustness2 = 0;
     int has_budget = 0;
     u32 next = 0;
     int has_shader_clock = 0, has_feedback_dynamic = 0, has_cond = 0, has_provoking = 0, video_exts = 0;
@@ -398,8 +397,6 @@ static int create_device(void) {
                 g_vk.has_local_read = 1;
             if (!strcmp(e[i].extensionName, VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME)) has_cond = 1;
             if (!strcmp(e[i].extensionName, VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME)) has_provoking = 1;
-            if (!strcmp(e[i].extensionName, VK_EXT_PIPELINE_ROBUSTNESS_EXTENSION_NAME)) has_pipeline_robustness = 1;
-            if (!strcmp(e[i].extensionName, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME)) has_robustness2 = 1;
             /* the driver's budget for each heap, the other processes' use taken out, for VMA: without it VMA took
                80% of a heap's size as its budget, blind to what the desktop and other programs hold */
             if (!strcmp(e[i].extensionName, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) has_budget = 1;
@@ -463,10 +460,6 @@ static int create_device(void) {
                                                          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CLOCK_FEATURES_KHR};
     VkPhysicalDeviceShaderMaximalReconvergenceFeaturesKHR qreconv = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MAXIMAL_RECONVERGENCE_FEATURES_KHR};
-    VkPhysicalDevicePipelineRobustnessFeaturesEXT qpipeline = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_FEATURES_EXT};
-    VkPhysicalDeviceRobustness2FeaturesEXT qrobust = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
     VkPhysicalDeviceVulkan12Features q12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
     VkPhysicalDeviceVulkan11Features q11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
                                             .pNext = &q12};
@@ -524,12 +517,6 @@ static int create_device(void) {
         *tail = &qreconv;
         tail = &qreconv.pNext;
     }
-    if (has_pipeline_robustness && has_robustness2) {
-        *tail = &qpipeline;
-        tail = &qpipeline.pNext;
-        *tail = &qrobust;
-        tail = &qrobust.pNext;
-    }
     VkPhysicalDevicePresentIdFeaturesKHR qpid = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR};
     VkPhysicalDevicePresentWaitFeaturesKHR qpwait = {.sType =
                                                          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR};
@@ -553,7 +540,6 @@ static int create_device(void) {
     }
     if (has_shader_clock) *tail = &qclock;
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &f2);
-    g_vk.has_vertex_robustness2 = qpipeline.pipelineRobustness && qrobust.robustBufferAccess2;
     g_vk.has_present_wait = has_present_id && has_present_wait && qpid.presentId && qpwait.presentWait;
     g_vk.has_present_timing = g_vk.has_present_wait && has_present_v2 && qpid2.presentId2 && qpwait2.presentWait2 &&
                               qtiming.presentTiming && qtiming.presentAtAbsoluteTime;
@@ -693,15 +679,6 @@ static int create_device(void) {
     if (g_vk.has_provoking_last) {
         chain = &fprov;
         ext[next++] = VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME;
-    }
-    VkPhysicalDevicePipelineRobustnessFeaturesEXT fpipeline = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_FEATURES_EXT,
-        .pNext = chain,
-        .pipelineRobustness = VK_TRUE};
-    if (g_vk.has_vertex_robustness2) {
-        chain = &fpipeline;
-        ext[next++] = VK_EXT_PIPELINE_ROBUSTNESS_EXTENSION_NAME;
-        ext[next++] = VK_EXT_ROBUSTNESS_2_EXTENSION_NAME;
     }
     /* when each present is displayed (display.c), which the game's pace goes by */
     VkPhysicalDevicePresentIdFeaturesKHR fpid = {

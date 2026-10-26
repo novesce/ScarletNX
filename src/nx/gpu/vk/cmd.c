@@ -446,7 +446,7 @@ u8* vk_stage_back(u64 size, VkBuffer* buf, u64* off, VmaAllocation* mem) {
 }
 
 /* the frame's commands submitted, waiting for xw and signaling xs besides the graphics timeline (one each at most) */
-static void submit(const VkSemaphoreSubmitInfo* xw, const VkSemaphoreSubmitInfo* xs, int land) {
+static void submit(const VkSemaphoreSubmitInfo* xw, const VkSemaphoreSubmitInfo* xs) {
     SNX_ZONE(z_submit, "vk submit");
     vk_render_end();
     Frame* f = &g_fr[g_cur];
@@ -487,8 +487,7 @@ static void submit(const VkSemaphoreSubmitInfo* xw, const VkSemaphoreSubmitInfo*
     f->last = g_gval;
     /* results of submissions the GPU has finished land now, so a later release doesn't find them pending */
     u64 done = 0;
-    if (land && VK_OK(vkGetSemaphoreCounterValue(g_vk.dev, g_gsem, &done)))
-        land_through(done < g_gval ? done : g_gval);
+    if (VK_OK(vkGetSemaphoreCounterValue(g_vk.dev, g_gsem, &done))) land_through(done < g_gval ? done : g_gval);
     SNX_ZONE_END(z_submit);
 }
 
@@ -497,14 +496,7 @@ void vk_submit(VkSemaphore wait, VkPipelineStageFlags2 wait_stage, VkSemaphore s
                                .stageMask = wait_stage};
     VkSemaphoreSubmitInfo s = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = signal,
                                .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT};
-    submit(wait ? &w : NULL, signal ? &s : NULL, 1);
-}
-/* Ownership readback runs while its ranges are marked landing. Flush only an
-   open command buffer: starting/recycling a frame or landing completed results
-   here could acquire those same ranges and wait for this thread itself. */
-void vk_submit_for_readback(void) {
-    if (g_fr[g_cur].recording) submit(NULL, NULL, 0);
-    vk_rec_sync(); /* the immediate copy must follow the recorder's queue calls */
+    submit(wait ? &w : NULL, signal ? &s : NULL);
 }
 void vk_submit_after(VkSemaphore sem, u64 wait, u64 signal) {
     g_after[0] = (VkSemaphoreSubmitInfo){.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = sem,
@@ -547,7 +539,7 @@ void vk_frame_check(void) {
     if (f->icb >= 128 || f->ipool >= 32 || vk_rec_frame_sets(g_cur) >= 32 * 1024)
         vk_frame_next();
     else if (f->recording && plat_ns() - g_sub_ns >= SUBMIT_EVERY_NS)
-        submit(NULL, NULL, 1);
+        submit(NULL, NULL);
 }
 
 u64 vk_submit_number(void) { return g_gval + 1; }

@@ -8,9 +8,7 @@
    SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
    SPDX-FileCopyrightText: 2022 yuzu Emulator Project
    SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
-   SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
-   Compute-inline safe reads follow Citron's dma_pusher.cpp, commit
-   acfb1dcc1ad9adf25b960c4f8f25c5bf78849406 (Zephyron's Peach fix). */
+   SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project */
 /* The GPU's host side: guest memory as the GPU sees it, the channels, the pushbuffer and its puller methods, the
    inline-to-memory engine, and the queue of GPFIFO submissions the GPU thread runs.
 
@@ -685,21 +683,8 @@ static u32* job_off(const GpuItem* j) { return (u32*)(void*)(job_ent(j) + j->n);
 static u32* job_prefetched(const GpuItem* j) { return job_off(j) + j->n; }
 static u32 entry_words(u64 e) { return gpfifo_size(e); }
 static u64 entry_addr(u64 e) { return gpfifo_addr(e); }
-static u32* job_words(GpuItem* j, u32 e) {
+static const u32* job_words(const GpuItem* j, u32 e) {
     return (e < j->pf ? job_prefetched(j) : j->late) + job_off(j)[e];
-}
-/* Citron's Peach fix requires safe reads for KeplerCompute's inline data:
-   an earlier GPU command may have produced the payload since submission.
-   Resolve that result on the GPU thread, in stream order. Only payload words
-   are refreshed; command headers and other methods keep their snapshots.
-   A non-increasing batch is read once, rather than landing each word. */
-static u32 fetch_compute_inline(GpuItem* j, GpuChannel* ch, u32 e, u32* words) {
-    u32 n = ch->pb.mode == PB_MODE_NON_INCREASING ? ch->pb.method_count : 1;
-    u32 left = entry_words(job_ent(j)[e]) - j->word;
-    if (n > left) n = left;
-    gmem_read(entry_addr(job_ent(j)[e]) + (u64)j->word * 4, words + j->word, (u64)n * 4);
-    snx_le32_array(words + j->word, n);
-    return j->word + n;
 }
 /* the entry e the GPU thread reached was not fetched at submission: it and those after it up to the next SYNC entry
    are fetched now, before any of their methods can hand memory back to the CPU */
@@ -782,8 +767,7 @@ static int run_job(GpuItem* j) {
     }
     while (j->entry < j->n) {
         u32 e = j->entry, len = entry_words(job_ent(j)[e]);
-        u32* w;
-        u32 inline_end = 0;
+        const u32* w;
         if (e >= j->pf && (e < j->late_first || e >= j->late_end)) {
             __atomic_store_n(&g_run_at, GPU_AT_FETCH, __ATOMIC_RELAXED);
             int got = fetch_late(j, e);
@@ -794,9 +778,6 @@ static int run_job(GpuItem* j) {
         while (j->word < len) {
             u32 sub, m, v;
             int last;
-            if (j->word >= inline_end && ch->pb.method_count && ch->pb.method == KEPLER_COMPUTE_DATA_UPLOAD &&
-                engine_of(ch->sub_class[ch->pb.subchannel]) == ENG_COMPUTE)
-                inline_end = fetch_compute_inline(j, ch, e, w);
             if (pb_decode(&ch->pb, w[j->word++], &sub, &m, &v, &last)) {
                 __atomic_store_n(&g_run_sub, sub, __ATOMIC_RELAXED);
                 __atomic_store_n(&g_run_method, m, __ATOMIC_RELAXED);

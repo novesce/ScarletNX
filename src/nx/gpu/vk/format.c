@@ -8,27 +8,21 @@
 #include <string.h>
 
 /* whether optimal-tiling images of a format have these features, asked of the device once per format */
-static int has_features(VkFormat f, VkFormatFeatureFlags2 need) {
+static int has_features(VkFormat f, VkFormatFeatureFlags need) {
     static struct {
         VkFormat f;
-        VkFormatFeatureFlags2 have;
+        VkFormatFeatureFlags have;
     } seen[64];
     static int n;
     for (int i = 0; i < n; i++)
         if (seen[i].f == f) return (seen[i].have & need) == need;
-    VkFormatProperties3 features = {.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3};
-    VkFormatProperties2 p = {.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2, .pNext = &features};
-    vkGetPhysicalDeviceFormatProperties2(g_vk.phys, f, &p);
+    VkFormatProperties p;
+    vkGetPhysicalDeviceFormatProperties(g_vk.phys, f, &p);
     if (n < 64) {
         seen[n].f = f;
-        seen[n++].have = features.optimalTilingFeatures;
+        seen[n++].have = p.optimalTilingFeatures;
     }
-    return (features.optimalTilingFeatures & need) == need;
-}
-
-int vk_format_storage_write(VkFormat f) {
-    return g_vk.feat.shaderStorageImageWriteWithoutFormat &&
-           has_features(f, VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
+    return (p.optimalTilingFeatures & need) == need;
 }
 
 /* a format the tables don't have: 1 the first time it is seen (the first few formats), to say so once */

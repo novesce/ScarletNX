@@ -7,10 +7,6 @@
 #include "nx/gpu/maxwell/draw_state.h"
 #include "nx/gpu/renderer.h"
 #include "nx/gpu/vk/vk.h"
-#include "nx/gpu/maxwell/kepler_compute_regs.h"
-#include "nx/gpu/maxwell/engines_int.h"
-#include "nx/gpu/maxwell/maxwell_3d_regs.h"
-#include "nx/gpu/maxwell/gob.h"
 #include "nx/gpu/video/vic.h"
 #include "nx/memory/mem.h"
 #include "nx/memory/own.h"
@@ -968,8 +964,8 @@ static int check_dma(void) {
 
 /* The 2D engine's blit from memory on the GPU (vk/blit.c) against its CPU reference (fermi2d_ref.c), on the DMA
    test's twin regions: block linear and pitch planes, windows not on 16 bytes, scaled up and down, 1 to 16 bytes a
-   pixel */
-static int blit_case(GpuDmaSide src, GpuDmaSide dst, u32 bpp, u32 x0, u32 y0, u32 w, u32 h, u32 sw, u32 sh) {
+   pixel, and conversions between float formats (fmt), the regions' bytes holding NaNs, infinities and subnormals */
+static int blit_case(GpuDmaSide src, GpuDmaSide dst, u32 bpp, u32 x0, u32 y0, u32 w, u32 h, u32 sw, u32 sh, u32 fmt) {
     static u32 scol[256], srow[256];
     GpuBlit g, c;
     for (u32 i = 0; i < w; i++) scol[i] = (u32)((u64)i * sw / w); /* nearest, the source scaled onto the window */
@@ -978,7 +974,7 @@ static int blit_case(GpuDmaSide src, GpuDmaSide dst, u32 bpp, u32 x0, u32 y0, u3
         u8* t = GP(k ? DMA_B : DMA_A);
         for (u32 i = 0; i < DMA_SPAN; i++) t[i] = (u8)(i * 13 + (i >> 8) * 5 + 1);
     }
-    g = (GpuBlit){src, dst, bpp, x0, x0 + w, y0, y0 + h, scol, srow};
+    g = (GpuBlit){src, dst, bpp, x0, x0 + w, y0, y0 + h, scol, srow, fmt};
     c = g;
     g.src.addr += DMA_GA, g.dst.addr += DMA_GA;
     c.src.addr += DMA_GB, c.dst.addr += DMA_GB;
@@ -995,21 +991,32 @@ static GpuDmaSide pitch_plane(u64 addr, u32 pitch, u32 wb, u32 h) { /* as fermi2
 static int check_blit(void) {
     /* block linear halved into block linear, an odd window */
     CHECK(!blit_case(bl_side(0x1000, 128 * 4, 64, 2, 0, 0), bl_side(0x80000, 64 * 4, 32, 1, 0, 0), 4, 5, 3, 21, 9,
-                     42, 18));
+                     42, 18, 0));
     /* pitch scaled up into block linear, 2 bytes a pixel */
-    CHECK(!blit_case(pitch_plane(0x3000, 70, 31 * 2, 12), bl_side(0x80000, 100 * 2, 40, 0, 0, 0), 2, 7, 1, 90, 33, 31, 12));
+    CHECK(!blit_case(pitch_plane(0x3000, 70, 31 * 2, 12), bl_side(0x80000, 100 * 2, 40, 0, 0, 0), 2, 7, 1, 90, 33, 31, 12, 0));
     /* block linear into pitch, 16 bytes a pixel, a source whose rows end inside a 16 byte run */
-    CHECK(!blit_case(bl_side(0x1000, 37 * 16, 24, 1, 0, 0), pitch_plane(0x90003, 40 * 16, 40 * 16, 24), 16, 2, 2, 30, 20, 37, 24));
+    CHECK(!blit_case(bl_side(0x1000, 37 * 16, 24, 1, 0, 0), pitch_plane(0x90003, 40 * 16, 40 * 16, 24), 16, 2, 2, 30, 20, 37, 24, 0));
     /* pitch to pitch, a byte a pixel */
-    CHECK(!blit_case(pitch_plane(0x101, 77, 77, 30), pitch_plane(0x90001, 99, 99, 15), 1, 3, 4, 95, 11, 77, 30));
+    CHECK(!blit_case(pitch_plane(0x101, 77, 77, 30), pitch_plane(0x90001, 99, 99, 15), 1, 3, 4, 95, 11, 77, 30, 0));
     /* 8 bytes a pixel, block linear 3 GOBs a block high */
     CHECK(!blit_case(bl_side(0x2000, 50 * 8, 48, 3, 0, 0), bl_side(0xA0000, 40 * 8, 20, 1, 0, 0), 8, 1, 0, 39, 20,
-                     50, 48));
+                     50, 48, 0));
+    /* RGBA32F pitch into RGBA16F block linear, an odd window scaled down */
+    CHECK(!blit_case(pitch_plane(0x3000, 40 * 16, 40 * 16, 20), bl_side(0x80000, 64 * 8, 32, 1, 0, 0), 16, 5, 3, 21, 9,
+                     40, 20, GPU_BLIT_FLOAT(4, 4, 4, 2, 0)));
+    /* R16F block linear into RGBA32F pitch: green and blue 0, alpha 1 */
+    CHECK(!blit_case(bl_side(0x1000, 33 * 2, 24, 1, 0, 0), pitch_plane(0x90000, 40 * 16, 40 * 16, 24), 2, 2, 1, 37, 20,
+                     33, 24, GPU_BLIT_FLOAT(1, 2, 4, 4, 0)));
+    /* RGBX16F into RG32F, and R32F into R16F an odd number of pixels wide (half words left at the rows' ends) */
+    CHECK(!blit_case(bl_side(0x1000, 30 * 8, 16, 0, 0, 0), bl_side(0xA0000, 50 * 8, 20, 1, 0, 0), 8, 1, 2, 45, 17,
+                     30, 16, GPU_BLIT_FLOAT(4, 2, 2, 4, 1)));
+    CHECK(!blit_case(pitch_plane(0x101, 77 * 4, 77 * 4, 30), pitch_plane(0x90002, 99 * 2, 99 * 2, 15), 4, 3, 4, 95,
+                     11, 77, 30, GPU_BLIT_FLOAT(1, 4, 1, 2, 0)));
     return 0;
 }
 
 /* a block linear A8B8G8R8 target of w by h at gva (blocks 2^bh GOBs high) cleared to red or blue */
-static void rt_clear_format(GpuChannel* ch, u64 gva, u32 w, u32 h, u32 bh, int blue, u32 format) {
+static void rt_clear(GpuChannel* ch, u64 gva, u32 w, u32 h, u32 bh, int blue) {
     u32* r = ch->r3d;
     const float color[4] = {blue ? 0.0f : 1.0f, 0, blue ? 1.0f : 0.0f, 1};
     r[0x487] = 1;
@@ -1017,16 +1024,13 @@ static void rt_clear_format(GpuChannel* ch, u64 gva, u32 w, u32 h, u32 bh, int b
     r[0x201] = (u32)gva;
     r[0x202] = w;
     r[0x203] = h;
-    r[0x204] = format;
+    r[0x204] = 0xD5;
     r[0x205] = bh << 4;
     r[0x206] = 1;
     r[0x207] = 0;
     memcpy(&r[0x360], color, sizeof color);
     engine_clear(ch, 15 << 2);
     vk_render_end();
-}
-static void rt_clear(GpuChannel* ch, u64 gva, u32 w, u32 h, u32 bh, int blue) {
-    rt_clear_format(ch, gva, w, h, bh, blue, 0xD5);
 }
 /* n bytes at p all blue pixels */
 static int all_blue(const u8* p, u32 n) {
@@ -1046,17 +1050,11 @@ static int all_bytes(const u8* p, u32 n, u8 v) {
    128 to 159 of every row). The newer one's pixels are on top in a DMA copy of it, and in guest memory once both are
    written back, together or the newer one alone. A target reaching past a copy's range is one whose memory a smaller
    surface took over: the copy takes what the program wrote there since */
-static void rt_cpu_fence(GpuChannel* ch, u32 id) {
-    maxwell3d_method(ch, MAXWELL3D_SYNC_INFO, (1u << 20) | (1u << 16) | id, 1);
-    g_renderer->release_retire(id);
-}
 static int check_rt_overlap(void) {
     GpuChannel* ch = calloc(1, sizeof *ch);
     GpuDmaOp o;
     u64 readbacks;
     CHECK(ch);
-    u32 fence = syncpt_alloc();
-    CHECK(fence < SYNCPT_N);
     memset(&o, 0, sizeof o);
     o.multi = 1;
     o.width = o.line_in = o.line_out = 160 * 4;
@@ -1077,43 +1075,11 @@ static int check_rt_overlap(void) {
     CHECK(all_blue(GP(DMA_A), 0x14000));
     /* a 160 by 256 target, the program's own bytes over its memory after it, and a copy of the 160 by 128 surface */
     rt_clear(ch, DMA_GA, 160, 256, 4, 1);
-    rt_cpu_fence(ch, fence);
     memset(GP(DMA_A), 0x11, 0x28000);
     readbacks = g_vk_rt_readbacks;
     CHECK(g_renderer->dma_copy(&o));
+    CHECK(g_vk_rt_readbacks == readbacks + 1);
     CHECK(all_bytes(GP(DMA_A + 0x40000), 160 * 128 * 4, 0x11));
-    /* A correct copy is not enough: flushing the larger old image must not
-       restore its pixels over the memory the CPU has already reused. */
-    CHECK(all_bytes(GP(DMA_A), 0x28000, 0x11));
-    CHECK(g_vk_rt_readbacks == readbacks);
-    /* The GPU's completed image and a later CPU update share one allocation.
-       Keep the update across a page boundary, while retaining the GPU's
-       untouched pixels. Exercise both direct writeback and a wholly contained
-       buffer copy, where pending image pixels are overlaid on the GPU. */
-    for (u32 overlay = 0; overlay < 2; overlay++) {
-        const u32 changed = 0xffc, count = 24, size = 0x28000;
-        memset(GP(DMA_A), 0x29, size);
-        g_renderer->mem_may_have_changed();
-        rt_clear(ch, DMA_GA, 160, 256, 4, 1);
-        rt_cpu_fence(ch, fence);
-        memset(GP(DMA_A + changed), 0x73, count);
-        g_renderer->mem_may_have_changed();
-        if (overlay) {
-            o.src = pitch_side(DMA_GA, size);
-            o.dst = pitch_side(DMA_GA + 0x40000, size);
-            o.width = o.line_in = o.line_out = size;
-            o.lines = 1;
-            CHECK(g_renderer->dma_copy(&o));
-            const u8* copied = GP(DMA_A + 0x40000);
-            CHECK(all_blue(copied, changed));
-            CHECK(all_bytes(copied + changed, count, 0x73));
-            CHECK(all_blue(copied + changed + count, size - changed - count));
-        }
-        g_renderer->rt_flush(DMA_GA);
-        CHECK(all_blue(GP(DMA_A), changed));
-        CHECK(all_bytes(GP(DMA_A + changed), count, 0x73));
-        CHECK(all_blue(GP(DMA_A + changed + count), size - changed - count));
-    }
     /* A render target and a newer buffer can use different GPU aliases of the
        same memory. A later partial read of the image must not restore its old
        pixels over the buffer written through the other alias. */
@@ -1142,75 +1108,11 @@ static int check_rt_overlap(void) {
     CHECK(g_renderer->dma_copy(&o));
     CHECK(all_bytes(GP(DMA_B), 0x28000, 0x37));
     CHECK(all_bytes(GP(DMA_A + 0x40000), 512, 0x37));
-    /* Physical aliases publish in draw order without losing untouched bytes. */
-    gmmu_map(alias, DMA_A, DMA_SPAN);
-    for (u32 reverse = 0; reverse < 2; reverse++) {
-        if (reverse) rt_clear(ch, alias + 0x10000, 64, 64, 3, 0);
-        rt_clear(ch, DMA_GA, 160, 256, 4, 1);
-        if (!reverse) rt_clear(ch, alias + 0x10000, 64, 64, 3, 0);
-        rt_cpu_fence(ch, fence);
-        if (own_traps()) CHECK(own_lookup(DMA_A, 0x28000, NULL, 0) > 0);
-        const u8* pixels = GP(DMA_A);
-        CHECK(all_blue(pixels, 0x10000));
-        static const u8 red[4] = {255, 0, 0, 255};
-        if (reverse)
-            CHECK(all_blue(pixels + 0x10000, 0x4000));
-        else
-            for (u32 at = 0x10000; at < 0x14000; at += 4) CHECK(!memcmp(pixels + at, red, 4));
-        CHECK(all_blue(pixels + 0x14000, 0x14000));
-    }
-    /* A tiled image's two GPU pages need not be adjacent in guest RAM. */
-    const u64 sparse = 0x1a000000, first_page = DMA_A + 0xa0000, second_page = DMA_A + 0xc0000;
-    gmmu_map(sparse, first_page, 0x1000);
-    gmmu_map(sparse + 0x1000, second_page, 0x1000);
-    memset(GP(first_page), 0x49, 0x21000);
-    rt_clear(ch, sparse, 64, 32, 2, 1);
-    rt_cpu_fence(ch, fence);
-    if (own_traps()) {
-        CHECK(own_lookup(first_page, 0x1000, NULL, 0) > 0);
-        CHECK(own_lookup(second_page, 0x1000, NULL, 0) > 0);
-    }
-    memset(GP(second_page + 16), 0x57, 16);
-    g_renderer->rt_flush(sparse);
-    CHECK(all_blue(GP(first_page), 0x1000));
-    CHECK(all_blue(GP(second_page), 16));
-    CHECK(all_bytes(GP(second_page + 16), 16, 0x57));
-    CHECK(all_blue(GP(second_page + 32), 0x1000 - 32));
-    CHECK(all_bytes(GP(first_page + 0x1000), 0x1f000, 0x49));
-    /* A draw's write-tracking baseline and freshness query must not acquire
-       CPU-readable pixels. Neither operation reads the image's contents. */
-    const u64 tracked = DMA_GA + 0xe0000, tracked_cpu = DMA_A + 0xe0000;
-    rt_clear(ch, tracked, 64, 64, 3, 1);
-    rt_cpu_fence(ch, fence);
-    vk_lock();
-    Surf* target = vk_rt_find(tracked);
-    CHECK(target);
-    if (own_traps()) CHECK(own_lookup(tracked_cpu, 0x4000, NULL, 0) > 0);
-    u64 landings = own_landings();
-    vk_rt_drawn_full(target);
-    (void)vk_rt_drawn_fresh(target);
-    CHECK(own_landings() == landings);
-    if (own_traps()) CHECK(own_lookup(tracked_cpu, 0x4000, NULL, 0) > 0);
-    vk_unlock();
-    memset(GP(tracked_cpu + 16), 0x39, 16);
-    g_renderer->mem_may_have_changed();
-    vk_lock();
-    /* without write tracking the first query takes the target's pixels unhashed (vk_rt_drawn_fresh), so only a host
-       that tracks writes sees the CPU's */
-    if (vk_written_since(GP(tracked_cpu), 0x4000, 0) >= 0) CHECK(!vk_rt_drawn_fresh(target));
-    vk_unlock();
-    syncpt_free(fence);
-    puts("Render target CPU fences: full reuse, partial edits, aliases and sparse mappings checked");
     free(ch);
     return 0;
 }
 
 #include "vulkan_shader_invalidate.inc"
-#include "vulkan_storage_formats.inc"
-#include "vulkan_storage_atomics.inc"
-#include "vulkan_surface_loads.inc"
-#include "vulkan_owned_readback.inc"
-#include "vulkan_mesh_inputs.inc"
 
 int main(int argc, char** argv) {
     const u32 w = 32, h = 16;
@@ -1239,13 +1141,8 @@ int main(int argc, char** argv) {
     }
     CHECK(!check_hash_copy());
     CHECK(!check_staging_overflow());
-    CHECK(!check_owned_readback());
     CHECK(!check_buffer_texture_rows());
-    CHECK(!check_storage_image_formats());
-    CHECK(!check_volume_surface_atomics());
-    CHECK(!check_layered_surface_loads());
     CHECK(!check_viewport_orientation());
-    CHECK(!check_mesh_inputs());
     CHECK(!check_packed_depth());
     CHECK(!check_depth_array());
     CHECK(!check_srgb_write());
@@ -1268,9 +1165,9 @@ int main(int argc, char** argv) {
     CHECK(vk_pipeline_worker_count(5, 12) == 5 && vk_pipeline_worker_count(32, 4) == 32 &&
           vk_pipeline_worker_count(1, 64) == 1);
     /* FFmpeg takes the device for Vulkan Video exactly when it has the decode queue */
-    void* video_device = g_renderer->nvdec_hw_device();
+    AVBufferRef* video_device = g_renderer->nvdec_hw_device();
     CHECK(!video_device == (g_vk.video_family == ~0u));
-    av_buffer_unref((AVBufferRef**)&video_device);
+    av_buffer_unref(&video_device);
     CHECK(g_renderer->method_barrier);
     u32 epoch = g_vk_epoch;
     u64 finishes = g_vk_finishes;

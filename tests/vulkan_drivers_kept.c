@@ -16,6 +16,9 @@ int dlclose(void* handle) {
         const char* name = strrchr(map->l_name, '/');
         if (!strncmp(name ? name + 1 : map->l_name, "libvulkan_", 10)) return 0;
     }
-    if (!next) *(void**)&next = dlsym(RTLD_NEXT, "dlclose");
+    if (!next) {
+        void* sym = dlsym(RTLD_NEXT, "dlclose");
+        memcpy(&next, &sym, sizeof next); /* a function pointer isn't a void*'s object to store through */
+    }
     return next(handle);
 }

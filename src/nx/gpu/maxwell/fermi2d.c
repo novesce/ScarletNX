@@ -59,18 +59,32 @@ static GpuDmaSide f2d_plane(const Surf2D* s, u32 blk, u32 bpp) {
 }
 /* the source pixel a destination pixel's center falls on, clamped to the surface's n pixels */
 static u32 f2d_sample(double at, u32 n) { return at <= 0 ? 0 : at >= (double)n ? n - 1 : (u32)at; }
+
+/* a float format's components: their count, and 4 or 2 bytes each. 0 when it isn't one. The X formats' fourth
+   component is padding */
+static int f2d_float_format(u32 f, u32* n, u32* size) {
+    *n = f == 0xC0 || f == 0xC3 || f == 0xCA || f == 0xCE ? 4
+         : f == 0xCB || f == 0xDE                         ? 2
+         : f == 0xE5 || f == 0xF2                         ? 1
+                                                          : 0;
+    *size = f == 0xC0 || f == 0xC3 || f == 0xCB || f == 0xE5 ? 4 : 2;
+    return *n != 0;
+}
+
 /* The blit from memory, which the renderer does on the GPU (its destination kept there): which source column and row
-   each destination column and row takes, nearest sampled, worked out here. Only the same bytes per pixel copy (the
-   bytes as they are when the formats differ) */
+   each destination column and row takes, nearest sampled, worked out here. Between two float formats each component is
+   converted, as Eden's software blitter does (one game converts the RGBA32F tables its CPU fills into the RGBA16F
+   texture its lighting reads, at each scene's start). Other formats of the same bytes per pixel copy their bytes */
 static void f2d_blit_memory(const u32* r, const Surf2D* s, const Surf2D* d, const F2dConfig* c) {
-    u32 bs = gpu_color_bpp(s->format), bd = gpu_color_bpp(d->format), n, i, y0, y1, x0, x1;
+    u32 bs = gpu_color_bpp(s->format), bd = gpu_color_bpp(d->format), n, i, y0, y1, x0, x1, sn, ss, dn, ds, fmt = 0;
     GpuBlit b;
     u32* tab;
-    if (bs != bd) {
+    if (s->format != d->format && f2d_float_format(s->format, &sn, &ss) && f2d_float_format(d->format, &dn, &ds))
+        fmt = GPU_BLIT_FLOAT(sn, ss, dn, ds, s->format == 0xC3 || s->format == 0xCE);
+    else if (bs != bd) {
         WARN_LIMIT(4, "gpu: a 2D blit from format %x to %x isn't done\n", s->format, d->format);
         return;
-    }
-    if (s->format != d->format)
+    } else if (s->format != d->format)
         LOG_LIMIT(4, "gpu: a 2D blit from format %x to %x copies the bytes\n", s->format, d->format);
     if (!s->width || !s->height) return;
     /* the destination rectangle clipped to the destination surface */
@@ -95,6 +109,7 @@ static void f2d_blit_memory(const u32* r, const Surf2D* s, const Surf2D* d, cons
     b.x0 = x0, b.x1 = x1, b.y0 = y0, b.y1 = y1;
     b.scol = tab;
     b.srow = tab + n;
+    b.fmt = fmt;
     if (!g_renderer_up || !g_renderer->blit_mem)
         WARN_LIMIT(4, "gpu: a 2D blit before the renderer started, skipped\n");
     else if (!g_renderer->blit_mem(&b))

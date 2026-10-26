@@ -56,5 +56,9 @@
 #define TC_BC6H_UF 30u
 #define TC_BC6H_SF 31u
 #define TC_BC7 32u
+/* TC_BLIT between float formats (gpu.h's GPU_BLIT_FLOAT, in remap): the source pixel's components as floats, 0 where it
+   has none and its alpha 1, each into the destination's, rounded to the nearest half (ties to even) for a half. An
+   invocation owns an output word (line_out bytes a row, the last word's bytes past it left) */
+#define TC_BLIT_FLOAT 33u
 
 #endif

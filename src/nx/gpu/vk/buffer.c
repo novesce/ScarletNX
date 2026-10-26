@@ -1163,13 +1163,97 @@ static int ww_scan_leaves(u64 lo, u64 hi, u32 seen, WwStage* st) {
     }
     return r < 0 ? -1 : 0;
 }
+/* Pages a landing wrote (own.c, docs/GPU_OWNERSHIP.md), with their bytes as it left them. The ownership lets go of
+   them after, which watches them for writes again, and a page just watched reads as written: the next scan reports
+   all of them, whatever happened to them. The landing is the GPU's write, counted when its result was published
+   (vk_own_publish's gpu_mem_written_cpu) and older than anything drawn over those bytes since. Taken for a CPU write,
+   newer than every baseline, it had targets drawn there after the publish give their pixels up for memory's older
+   bytes: one game's reflection array, drawn whole over the memory of the previous one, kept seven layers of it, NaN
+   included. So a report of such a page counts only when its bytes are not the landing's any more. They are read
+   through the pool's mirror, which no trap covers, and the entry goes with the report: the scan protected the page */
+typedef struct {
+    u64 page, hash;  /* the 4K page's number, and its bytes' vk_hash after the landing */
+    const u8* bytes; /* its place in the mirror */
+    u32 seq;         /* the newest of a page's entries wins */
+} WwLanded;
+#define WW_LANDED_MAX (1u << 18) /* pages (1 GB): past it the reports count as they are */
+static WwLanded* g_wland;
+static u32 g_wland_n, g_wland_cap, g_wland_seq;
+static int g_wland_sorted = 1;
+static PMutex g_wland_lk = PMUTEX_INIT; /* after g_wres_lk */
+void vk_ww_landed(u64 cpu, u64 size, const u8* bytes) {
+    if (!bytes || cpu >= AS_SIZE || size > AS_SIZE - cpu) return;
+    pm_lock(&g_wland_lk);
+    for (u64 o = 0; o + 4096 <= size; o += 4096) {
+        if (g_wland_n == g_wland_cap) {
+            u32 cap = g_wland_cap ? g_wland_cap * 2 : 1024;
+            WwLanded* n = cap <= WW_LANDED_MAX ? (WwLanded*)realloc(g_wland, (size_t)cap * sizeof *n) : NULL;
+            if (!n) break; /* those pages' reports count */
+            g_wland = n;
+            g_wland_cap = cap;
+        }
+        g_wland[g_wland_n++] = (WwLanded){(cpu + o) >> 12, vk_hash(bytes + o, 4096), bytes + o, g_wland_seq++};
+        g_wland_sorted = 0;
+    }
+    pm_unlock(&g_wland_lk);
+}
+static int landed_order(const void* a, const void* b) {
+    const WwLanded *x = (const WwLanded*)a, *y = (const WwLanded*)b;
+    if (x->page != y->page) return x->page < y->page ? -1 : 1;
+    return x->seq < y->seq ? -1 : x->seq > y->seq;
+}
+/* g_wland by page, a page's newest entry alone */
+static void landed_sort(void) {
+    u32 n = 0;
+    if (g_wland_sorted) return;
+    qsort(g_wland, g_wland_n, sizeof *g_wland, landed_order);
+    for (u32 i = 0; i < g_wland_n; i++) {
+        if (n && g_wland[n - 1].page == g_wland[i].page) n--;
+        g_wland[n++] = g_wland[i];
+    }
+    g_wland_n = n;
+    g_wland_sorted = 1;
+}
+/* what a scan found written, [o, e), marked but for the landed pages on it that still hold the landing's bytes. Every
+   entry on it goes (no bytes until ww_take_scanned drops them) */
+static void ww_mark_scanned(u64 o, u64 e) {
+    u32 lo = 0, hi = g_wland_n;
+    u64 at = o;
+    while (lo < hi) {
+        u32 mid = lo + (hi - lo) / 2;
+        if (g_wland[mid].page < o >> 12)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    for (u32 i = lo; i < g_wland_n && g_wland[i].page << 12 < e; i++) {
+        u64 a = g_wland[i].page << 12;
+        if (!g_wland[i].bytes) continue;
+        if (a + 4096 <= e && vk_hash(g_wland[i].bytes, 4096) == g_wland[i].hash) {
+            if (a > at) ww_mark_range(at, a);
+            at = a + 4096;
+        }
+        g_wland[i].bytes = NULL;
+    }
+    if (at < e) ww_mark_range(at, e);
+}
 /* marks what scans found written, newer than every baseline taken before: those were taken before the scans
    re-protected the pages, and their caches may have read memory before the writes */
 static void ww_take_scanned(void) {
     if (!__atomic_load_n(&g_wres_n, __ATOMIC_ACQUIRE)) return;
     pm_lock(&g_wres_lk);
     if (g_wres_n) g_wclock++;
-    for (int i = 0; i < g_wres_n; i++) ww_mark_range(g_wres[i].a, g_wres[i].e);
+    pm_lock(&g_wland_lk);
+    if (g_wland_n) {
+        u32 n = 0;
+        landed_sort();
+        for (int i = 0; i < g_wres_n; i++) ww_mark_scanned(g_wres[i].a, g_wres[i].e);
+        for (u32 i = 0; i < g_wland_n; i++)
+            if (g_wland[i].bytes) g_wland[n++] = g_wland[i];
+        g_wland_n = n;
+    } else
+        for (int i = 0; i < g_wres_n; i++) ww_mark_range(g_wres[i].a, g_wres[i].e);
+    pm_unlock(&g_wland_lk);
     __atomic_store_n(&g_wres_n, 0, __ATOMIC_RELAXED);
     pm_unlock(&g_wres_lk);
 }

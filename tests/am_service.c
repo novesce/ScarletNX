@@ -597,6 +597,20 @@ static void test_self_settings(void) {
     CHECK(nn_am_service_ISelfController_IsAutoSleepDisabled(NULL, &disabled) == 0 && disabled == 0);
 }
 
+/* the values these AM commands answer, rather than the zeros an unimplemented command leaves */
+static void test_am_command_replies(void) {
+    i32 hdcp = 0;
+    i64 normal = 0, journal = 0, required = -1;
+    u32 media = 0;
+    u8 running = 0;
+    CHECK(nn_am_service_ICommonStateGetter_GetHdcpAuthenticationState(NULL, &hdcp) == 0 && hdcp == 1);
+    CHECK(nn_am_service_IApplicationFunctions_GetSaveDataSizeMax(NULL, &normal, &journal) == 0);
+    CHECK(normal == 0xFFFFFFF && journal == 0xFFFFFFF);
+    CHECK(nn_am_service_IApplicationFunctions_CreateCacheStorage(NULL, 0, 0, 0, &media, &required) == 0);
+    CHECK(media == 1 && required == 0);
+    CHECK(nn_am_service_IApplicationFunctions_NotifyRunning(NULL, &running) == 0 && running == 1);
+}
+
 int main(void) {
     g_settings.tv_mode = 0; /* handheld, as the test was written for */
     hle_init();
@@ -613,6 +627,7 @@ int main(void) {
     test_swkbd();
     test_lock_event();
     test_cpu_boost();
+    test_am_command_replies();
     test_applets();
     CHECK(test_objects == 0 && test_kobjs == 0);
     test_messages();

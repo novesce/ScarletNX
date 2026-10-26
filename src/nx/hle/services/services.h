@@ -15,6 +15,8 @@ void svc_vi_init(void);
 void svc_pl_init(void);
 /* the game's display version from its control.nacp ("1.0.0" without one), terminated, for the log's header */
 void am_display_version(char version[16]);
+/* whether the game's control.nacp sets user_account_switch_lock, which acc answers for the SDK (0 without one) */
+int am_user_account_switch_lock(void);
 /* the ID the running game's add-on content is numbered from: AddOnContentBaseId in its control.nacp, which a game
    whose DLCs are numbered otherwise than its own ID sets, else the SDK's default for its ID (snx_nacp_aoc_base) */
 u64 am_aoc_base_id(void);

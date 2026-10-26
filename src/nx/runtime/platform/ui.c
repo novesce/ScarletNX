@@ -7,6 +7,7 @@
 #include "common/utilities/endian.h"
 #include "common/utilities/font.h"
 #include "common/utilities/users.h"
+#include "gui/icons.h"
 #include "gui/splash.h"
 #include "gui_theme_colors.h"
 #include <stdlib.h>
@@ -19,6 +20,7 @@ static u8 g_image[SNX_UI_IMAGE_W * SNX_UI_IMAGE_H * 4];
 static int g_image_set;
 static u32 g_image_version;
 #define UI_PICTURE_Y SNX_CONTROLS_ATLAS_HEIGHT /* the picture's first row, under the sprites' */
+_Static_assert(SNX_UI_ICONS_X + 16 * GUI_ICON_COUNT <= SNX_CONTROLS_ATLAS_WIDTH, "the icons fit beside the picture");
 /* the menu's look's shape for it, GuiPicture's: 0 none, 1 square, 2 round */
 #ifndef SNX_GUI_THEME_YORHA_PICTURE
 #error "the YoRHa theme names no [head] picture"
@@ -87,6 +89,12 @@ float ui_text(SnxUiList* l, float x, float y, int scale, const char* s, u32 rgba
     }
     return x - x0;
 }
+float ui_icon(SnxUiList* l, float x, float y, int scale, unsigned icon, u32 rgba) {
+    if (icon < GUI_ICON_FIRST || icon >= GUI_ICON_END) return 0;
+    quad(l, x, y, 16.0f * (float)scale, 16.0f * (float)scale, SNX_UI_ICONS_X + 16 * (int)(icon - GUI_ICON_FIRST),
+         UI_PICTURE_Y, 16, 16, rgba, 0, UI_SHARP);
+    return 16.0f * (float)scale;
+}
 int ui_image(SnxUiList* l, float x, float y, float w, float h) {
     if (!g_image_set) return 0;
     quad(l, x, y, w, h, 0, 0, SNX_UI_IMAGE_W, SNX_UI_IMAGE_H, 0xFFFFFFFFu, 0, UI_IMAGE);
@@ -120,6 +128,11 @@ void ui_atlas_set(const u32* sprites, int w, int h) {
                     gui_vga_font[c * 16 + y] & (0x80 >> x) ? 0xFFFFFFFFu : 0;
     for (y = 0; y < 4; ++y)
         for (x = 0; x < 4; ++x) a[(SNX_CONTROLS_WHITE_Y + y) * w + SNX_CONTROLS_WHITE_X + x] = 0xFFFFFFFFu;
+    for (c = 0; c < GUI_ICON_COUNT; ++c) /* each icon's two halves side by side */
+        for (y = 0; y < 16; ++y)
+            for (x = 0; x < 16; ++x)
+                a[(UI_PICTURE_Y + y) * w + SNX_UI_ICONS_X + c * 16 + x] =
+                    gui_icon_font[(c * 2 + x / 8) * 16 + y] & (0x80 >> x % 8) ? 0xFFFFFFFFu : 0;
     user_picture(a, w);
     snx_le32_array(a, (size_t)w * (size_t)(h + SNX_UI_PICTURE)); /* the texels' bytes R G B A, as the GPU reads them */
     ui_lock();

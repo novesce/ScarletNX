@@ -6,8 +6,8 @@
 // four texels an invocation owns, and random ETC2 and EAC blocks of every kind (with the T, H and planar modes made
 // often) against tests/support/etc2.c and random BC1 to BC7 blocks of every kind (every BC6H and BC7 mode
 // made often) against tests/support/bcn.c, in images whose sides aren't multiples of 4, and vi's pixel formats
-// against present.c's former CPU conversion. tests/astc_vulkan.c runs the
-// SPIR-V build of the same file on a Vulkan device.
+// against present.c's former CPU conversion, and the 2D blit's half floats against tests/support/half.c.
+// tests/astc_vulkan.c runs the SPIR-V build of the same file on a Vulkan device.
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -21,6 +21,9 @@ extern "C" uint32_t etc2_pixel_bytes(int kind);
 extern "C" void bcn_decode_image(const uint8_t* src, uint32_t w, uint32_t h, int kind, uint8_t* dst);
 extern "C" uint32_t bcn_block_bytes(int kind);
 extern "C" uint32_t bcn_pixel_bytes(int kind);
+// tests/support/half.h's
+extern "C" float half_to_float(uint16_t h);
+extern "C" uint16_t float_to_half(float f);
 
 namespace texconv_shader {
 using namespace glsl;
@@ -275,6 +278,34 @@ static void depth_float() {
     }
 }
 
+// the 2D blit's half floats (TC_BLIT_FLOAT) against half.c: every half to a float, and to a half every float near
+// one, the ties between neighbors and a step off them, and random words
+static uint32_t float_bits(float f) {
+    uint32_t x;
+    std::memcpy(&x, &f, 4);
+    return x;
+}
+static void half_check(Conv& c, uint32_t x) {
+    float f;
+    std::memcpy(&f, &x, 4);
+    CHECK(c.tc_float_half(x) == float_to_half(f), "float %08x: half %04x, not %04x", x, c.tc_float_half(x),
+          float_to_half(f));
+}
+static void halves() {
+    Conv c;
+    for (uint32_t h = 0; h < 0x10000; h++) {
+        uint32_t x = float_bits(half_to_float((uint16_t)h));
+        CHECK(c.tc_half_float(h) == x, "half %04x: %08x, not %08x", h, c.tc_half_float(h), x);
+        for (uint32_t d = 0; d < 5; d++) half_check(c, x + d - 2);
+        if ((h & 0x7FFF) < 0x7C00 && (h & 0x7FFF) != 0x7BFF) { // finite, with a finite neighbor away from zero
+            uint32_t tie = float_bits((half_to_float((uint16_t)h) + half_to_float((uint16_t)(h + 1))) / 2);
+            for (uint32_t d = 0; d < 3; d++) half_check(c, tie + d - 1);
+        }
+    }
+    half_check(c, 0x477FF000u); // 65520, the tie past the largest half: infinity
+    for (int i = 0; i < 1 << 20; i++) half_check(c, random_word());
+}
+
 static void rgb32f() {
     uint32_t w = 7, rows = 5, pitch = 96; // 84 bytes a row, padded to 48
     std::vector<glsl::leuint> in(pitch / 4 * rows);
@@ -400,6 +431,7 @@ int main() {
     nv12_uv();
     dma_remaps();
     depth_float();
+    halves();
     rgb32f();
     depth_stencil();
     for (int i = 0; i < 200; i++) etc2_kinds();

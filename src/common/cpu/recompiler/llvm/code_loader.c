@@ -698,7 +698,10 @@ int snx_code_publish(const SnxCodeLoader* loader, uint64_t start, uint64_t end, 
 void snx_code_writable(int writable) {
 #if defined(APPLE_JIT) && TARGET_OS_SIMULATOR
     static void (*protect)(int);
-    if (!protect) *(void**)&protect = dlsym(RTLD_DEFAULT, "pthread_jit_write_protect_np");
+    if (!protect) {
+        void* sym = dlsym(RTLD_DEFAULT, "pthread_jit_write_protect_np");
+        memcpy(&protect, &sym, sizeof protect); /* a function pointer isn't a void*'s object to store through */
+    }
     if (protect) protect(!writable);
 #elif defined(APPLE_JIT)
     pthread_jit_write_protect_np(!writable);

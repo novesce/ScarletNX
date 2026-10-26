@@ -118,6 +118,7 @@ void mx_draw_dynamic(const u32* r, DsDynamic* d) {
     d->window_origin = (u8)(r[0x4EB] & (DS_ORIGIN_LOWER_LEFT | DS_ORIGIN_FLIP_Y));
     d->sprite_origin = (r[0x581] >> 2) & 1;
     d->depth_mode = r[0x35F] & 1;
+    d->point_nudge = !r[0x597] && !r[0x649]; /* the OpenGL point center (0x597) and half-integer pixel centers (0x649) */
     /* GL order in the registers: fail, depth fail, pass; then the function, reference, function mask and write mask
        (the back's 0x3D5 reference, 0x3D6 write mask, 0x3D7 function mask) */
     int two = r[0x565] != 0;
