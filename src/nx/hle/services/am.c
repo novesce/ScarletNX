@@ -17,6 +17,7 @@
 #include "nx/hle/hle.h"
 #include "nx/hle/services/hid.h"
 #include "nx/hle/filesystem/fs.h"
+#include "nx/runtime/platform/unattended.h"
 
 #include "hle/services/am.swipc.inc"
 
@@ -1006,8 +1007,15 @@ static u32 am_utf8_to_16(const char* in, u16* out, u32 max) {
     return n;
 }
 
-/* the software keyboard as a whole applet: the host's text dialog with the game's initial text, or the text of
-   swkbd_text (--swkbd_text=, for scripted runs). KeyboardConfig (SwkbdConfigCommon, the second storage) gives the
+/* The text the software keyboard answers without the host's dialog: swkbd_text, else in a run nobody is at (seconds or
+   frames given) the game's own initial text, as a player accepting it would. A dialog there would wait for nobody and
+   outlive the run, holding whatever the run's parent left open. NULL: ask the dialog */
+static const char* kb_preset(const char* initial) {
+    if (g_settings.keyboard_text[0]) return g_settings.keyboard_text;
+    return unattended_active() ? initial : NULL;
+}
+
+/* the software keyboard as a whole applet: the host's text dialog with the game's initial text, or kb_preset's. KeyboardConfig (SwkbdConfigCommon, the second storage) gives the
    length limits, whether the answer is UTF-8, and where the initial text is in the work buffer (the third). The
    dialog is asked again until the text is long enough, or cancelled */
 #define AM_SWKBD_OUT   0x7d8                       /* SwkbdResult and the 0x7d4 byte string buffer */
@@ -1017,7 +1025,6 @@ static SvcObj* am_swkbd(LibApplet* a) {
     u16 wide[AM_SWKBD_UNITS + 1];
     u32 max = AM_SWKBD_UNITS, min = 0, off = 0, len = 0, n = 0, v;
     int utf8 = 0, r;
-    const char* env = g_settings.keyboard_text[0] ? g_settings.keyboard_text : NULL;
     SvcObj* out;
     u8* d;
     initial[0] = 0;
@@ -1047,8 +1054,9 @@ static SvcObj* am_swkbd(LibApplet* a) {
             am_utf16_to_8(wide, len, initial, sizeof initial);
         }
     }
-    if (env) {
-        n = am_utf8_to_16(env, wide, max);
+    const char* preset = kb_preset(initial);
+    if (preset) {
+        n = am_utf8_to_16(preset, wide, max);
         r = n < min; /* too short: cancelled, as a player can't send it */
     } else
         for (;;) {
@@ -1124,7 +1132,12 @@ static void kb_appear(LibApplet* a) {
     int r;
     kb_show(a, SWKBD_SHOWN);
     am_utf16_to_8(a->kb_text, a->kb_len, initial, sizeof initial);
-    r = plat_text_input(text, sizeof text, initial);
+    const char* preset = kb_preset(initial);
+    if (preset) {
+        snprintf(text, sizeof text, "%s", preset);
+        r = 0;
+    } else
+        r = plat_text_input(text, sizeof text, initial);
     if (r < 0) {
         LOG("am: no text dialog on this host, the inline keyboard answers \"%s\"\n", initial);
         memcpy(text, initial, sizeof text);

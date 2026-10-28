@@ -4,6 +4,7 @@
    users.c has it without users.ini */
 #include "nx/hle/filesystem/fs.h"
 #include "nx/hle/services/services_int.h"
+#include "nx/runtime/platform/unattended.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -21,6 +22,10 @@ void apm_set_configuration(u32 mode, u32 config) {
     (void)config;
 }
 void apm_cpu_boost(u32 boost) { g_test_apm_boost = boost; }
+/* a run given seconds or frames, when set */
+extern int g_test_unattended;
+int g_test_unattended;
+int unattended_active(void) { return g_test_unattended; }
 
 /* the game's HtmlDocument content: a page that loads its script beside it, whose A button goes to a callback URL
    (its B button, assigned first, to another), and a page that assigns no A button */
