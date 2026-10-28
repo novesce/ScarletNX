@@ -150,16 +150,16 @@ through `CPU.disp` (relaxed loads: slots go from NULL to a function while thread
 goes to `RtAPI.miss`. `CPU.rt` supplies `RtAPI` callbacks: SVC (and NX's table of SVCs by number), UNDEF, BRK, hints, CNTVCT, FPCR, SEV/WFE, poll,
 miss, and the 16-byte compare-and-swap of STXP on RISC-V and LoongArch hosts; no named runtime imports. NX's miss (`src/nx/runtime/rtapi.c`) runs the runtime JIT's code
 (`src/nx/runtime/guest_jit.c` over `src/common/cpu/recompiler/llvm/jit_service.c`). There is no interpreter: a pc
-without code yet is queued at the front and its thread waits for the compile off its guest core, and a pc the JIT
-can't compile (or a host where it can't start: Windows before 10 1803) ends the game with the reason. Compile
+without code yet is queued in the live misses' queue and its thread waits for the compile off its guest core, and a pc
+the JIT can't compile (or a host where it can't start: Windows before 10 1803) ends the game with the reason. Compile
 threads (host threads, not guest threads) take the queued pcs in batches: the functions at them and their callees
 found by `snx_codegen_discover`, emitted by the LLVM backend into one module, loaded into a code arena with a copy of
 `rtlib.c` (`code_loader.c`, packed into shared memory mapped once executable and once writable) and published into
 `CPU.disp`. At start the hints of earlier runs are queued behind every miss. The pc is recorded as a hint either way,
 so the next recompile has it. Each unit compiled is appended to `<game>.jitcache` in the cache folder, and a later run
 loads it instead of compiling when the guest code it came from is the same byte for byte and the file was written with
-the same ABI, LLVM, runtime library, host CPU and settings. Its calls into the AOT module go through `snx_aot_<pc>`
-symbols that the loader resolves at each load, so the object holds no host address.
+the same ABI, IR object version, target triple, LLVM, runtime library, host CPU and settings. Its calls into the AOT
+module go through `snx_aot_<pc>` symbols that the loader resolves at each load, so the object holds no host address.
 `cpu_helpers.c` + `helpers/`: SIMD, crypto, FP.
 
 GNU supplies an optional fetch callback that checks execute permissions and
@@ -206,6 +206,7 @@ function's arguments, or a field added into a struct's tail padding: for those t
 | 12 | `RtAPI.cas128`, and `snx_cas128` takes the CPU |
 | 13 | the AOT module's `snx_variants()` table, read as optional |
 | 14 | `RtAPI.code_changed` for IC IVAU, and `SnxModule`'s function table with the byte each AOT function checks first |
+| 15 | `stx`'s result for a store-exclusive whose range the armed monitor covers |
 
 #### Code the game patches
 

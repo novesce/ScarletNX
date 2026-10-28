@@ -11,14 +11,13 @@ static const int ORDER[SNX_PAD_CONTROLS] = {
 #define SIDE (SNX_PAD_CONTROLS / 2)
 
 void snx_pad_screen_start(SnxPadScreen* s) {
-    memset(s, 0, sizeof *s);
+    *s = (SnxPadScreen){0};
     snx_pad_map_unset(&s->own);
     s->focus = ORDER[0];
 }
 /* the pad's labels, NULL for none known: an Xbox pad's */
 static const int* labels_of(const SnxPadScreen* s) {
-    int c;
-    for (c = 0; c < 4; ++c)
+    for (int c = 0; c < 4; ++c)
         if (s->labels[c] != SNX_PAD_LABEL_NONE) return s->labels;
     return NULL;
 }
@@ -85,9 +84,8 @@ int snx_pad_screen_tap(SnxPadScreen* s, int id) {
 
 /* ---- the layout ---- */
 static SnxPadShape* add(SnxPadDrawing* d, int kind, int style, int id, float x, float y, float w, float h) {
-    SnxPadShape* p;
     if (d->n == SNX_PAD_SHAPES) return NULL;
-    p = &d->shape[d->n++];
+    SnxPadShape* p = &d->shape[d->n++];
     p->kind = (unsigned char)kind;
     p->style = (unsigned char)style;
     p->id = (short)id;
@@ -142,7 +140,6 @@ static void pad(SnxPadDrawing* d, const SnxPadScreen* s, float x, float y, float
     float lsx = s->symmetric ? 0.38f : 0.24f, lsy = s->symmetric ? 0.80f : 0.45f;
     float dx = (s->symmetric ? 0.24f : 0.38f) * w, dy = (s->symmetric ? 0.45f : 0.80f) * h;
     float fx = 0.76f * w, fy = 0.48f * h; /* the top one clear of RB */
-    int c;
     part(d, s, SNX_PAD_SHAPE_BAR, SNX_PAD_LT, x + 0.10f * w, y, 0.20f * w, 0.12f * h, cw, ch, "LT");
     part(d, s, SNX_PAD_SHAPE_BAR, SNX_PAD_RT, x + 0.70f * w, y, 0.20f * w, 0.12f * h, cw, ch, "RT");
     part(d, s, SNX_PAD_SHAPE_BAR, SNX_PAD_LB, x + 0.10f * w, y + 0.14f * h, 0.20f * w, 0.08f * h, cw, ch, "LB");
@@ -159,7 +156,7 @@ static void pad(SnxPadDrawing* d, const SnxPadScreen* s, float x, float y, float
     part(d, s, SNX_PAD_SHAPE_BAR, SNX_PAD_DOWN, x + dx - thick / 2, y + dy + thick / 2, thick, arm, cw, ch, NULL);
     part(d, s, SNX_PAD_SHAPE_BAR, SNX_PAD_LEFT, x + dx - thick / 2 - arm, y + dy - thick / 2, arm, thick, cw, ch, NULL);
     part(d, s, SNX_PAD_SHAPE_BAR, SNX_PAD_RIGHT, x + dx + thick / 2, y + dy - thick / 2, arm, thick, cw, ch, NULL);
-    for (c = SNX_PAD_SOUTH; c <= SNX_PAD_NORTH; ++c) {
+    for (int c = SNX_PAD_SOUTH; c <= SNX_PAD_NORTH; ++c) {
         float ox = c == SNX_PAD_WEST ? -apart : c == SNX_PAD_EAST ? apart : 0;
         float oy = c == SNX_PAD_NORTH ? -apart : c == SNX_PAD_SOUTH ? apart : 0;
         part(d, s, SNX_PAD_SHAPE_DISC, c, x + fx + ox - face, y + fy + oy - face, 2 * face, 2 * face, cw, ch,
@@ -195,16 +192,15 @@ static int line_of(const char* s, int cols) {
 static void no_pad(SnxPadDrawing* d, const SnxPadScreen* s, float x, float y, float w, float h, float cw, float ch) {
     static const char TITLE[] = "No controller";
     const char *body = s->note[0] ? s->note : "Plug one in: what it presses lights up here", *p;
-    int cols = (int)(w / cw), lines = 0, n;
-    float ly;
+    int cols = (int)(w / cw), lines = 0;
     if (cols < 8 || h < ch) return;
     for (p = body; *p; ++lines) {
         p += line_of(p, cols);
         while (*p == ' ') ++p;
     }
-    ly = y + (h - (float)(lines + 2) * ch) / 2;
+    float ly = y + (h - (float)(lines + 2) * ch) / 2;
     if (ly < y) ly = y;
-    n = (int)sizeof TITLE - 1 < cols ? (int)sizeof TITLE - 1 : cols;
+    int n = (int)sizeof TITLE - 1 < cols ? (int)sizeof TITLE - 1 : cols;
     text(d, SNX_PAD_STYLE_SOFT, x + (w - (float)n * cw) / 2, ly, cw, ch, TITLE, n);
     for (p = body, ly += 2 * ch; *p && ly + ch <= y + h; ly += ch) {
         int len = line_of(p, cols), shown = len;
@@ -231,9 +227,9 @@ static void say(const SnxPadScreen* s, char* out, size_t size, const char** keys
 void snx_pad_screen_lay(const SnxPadScreen* s, float x, float y, float w, float h, float cw, float ch,
                         SnxPadDrawing* d) {
     enum { MARGIN = 1, GAP = 2, BOX = 16, PAD_MIN = 18 };
-    int wide = w >= cw * (2 * MARGIN + BOX * 2 + GAP * 2 + PAD_MIN), i, c;
+    int wide = w >= cw * (2 * MARGIN + BOX * 2 + GAP * 2 + PAD_MIN), c;
     float left = x + MARGIN * cw, right = x + w - MARGIN * cw, top = y + ch / 2, bottom = y + h - 2.25f * ch;
-    float bw = BOX * cw, step, bh, rows_x[2], rows_y, region_x, region_y, region_w, region_h, size;
+    float bw = BOX * cw, rows_x[2];
     char bar[160];
     const char* keys;
     SnxPadMap map;
@@ -252,14 +248,14 @@ void snx_pad_screen_lay(const SnxPadScreen* s, float x, float y, float w, float 
     if (!wide) bw = (right - left - GAP * cw) / 2;
     rows_x[0] = left;
     rows_x[1] = right - bw;
-    rows_y = top;
-    step = (bottom - rows_y) / SIDE;
+    float rows_y = top;
+    float step = (bottom - rows_y) / SIDE;
     if (!wide) step = step / 2 > 1.75f * ch ? 1.75f * ch : step / 2; /* the pad takes the rest above them */
     if (step > 2 * ch) step = 2 * ch;
     if (step < ch + 2) step = ch + 2;
-    bh = step >= 1.75f * ch ? 1.5f * ch : step - 2;
+    float bh = step >= 1.75f * ch ? 1.5f * ch : step - 2;
     if (!wide) rows_y = bottom - step * SIDE;
-    for (i = 0; i < SNX_PAD_CONTROLS; ++i) {
+    for (int i = 0; i < SNX_PAD_CONTROLS; ++i) {
         float by = rows_y + (float)(i % SIDE) * step;
         c = ORDER[i];
         if (by < top || by + bh > bottom) continue; /* no room: left out */
@@ -267,10 +263,10 @@ void snx_pad_screen_lay(const SnxPadScreen* s, float x, float y, float w, float 
                     snx_pad_button_name(map.bit[c]));
     }
     /* between the columns, or over them: the pad named above it, or why there is none */
-    region_x = wide ? rows_x[0] + bw + GAP * cw : left;
-    region_w = wide ? rows_x[1] - GAP * cw - region_x : right - left;
-    region_y = top;
-    region_h = (wide ? bottom : rows_y - ch / 2) - region_y;
+    float region_x = wide ? rows_x[0] + bw + GAP * cw : left;
+    float region_w = wide ? rows_x[1] - GAP * cw - region_x : right - left;
+    float region_y = top;
+    float region_h = (wide ? bottom : rows_y - ch / 2) - region_y;
     if (!s->pad[0]) {
         no_pad(d, s, region_x, region_y, region_w, region_h, cw, ch);
         return;
@@ -281,13 +277,12 @@ void snx_pad_screen_lay(const SnxPadScreen* s, float x, float y, float w, float 
         region_y += 1.5f * ch;
         region_h -= 1.5f * ch;
     }
-    size = region_w < region_h / 0.62f ? region_w : region_h / 0.62f;
+    float size = region_w < region_h / 0.62f ? region_w : region_h / 0.62f;
     if (size >= PAD_MIN * cw / 2 && region_h >= ch)
         pad(d, s, region_x + (region_w - size) / 2, region_y + (region_h - size * 0.62f) / 2, size, cw, ch);
 }
 int snx_pad_screen_hit(const SnxPadDrawing* d, float x, float y) {
-    int i;
-    for (i = d->n - 1; i >= 0; --i) {
+    for (int i = d->n - 1; i >= 0; --i) {
         const SnxPadShape* p = &d->shape[i];
         if (p->id >= 0 && x >= p->x && y >= p->y && x < p->x + p->w && y < p->y + p->h) return p->id;
     }

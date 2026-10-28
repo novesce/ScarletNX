@@ -2,10 +2,11 @@
    Copyright 2026 the ScarletNX contributors */
 #ifndef SNX_VITA_VK_H
 #define SNX_VITA_VK_H
-#include <SDL3/SDL.h>
+#include "common/gpu/vk/ring.h"
+#include "common/gpu/vk/swapchain.h"
+#include "common/gpu/vk/window.h"
 #include <stdbool.h>
 #include <stdint.h>
-#include <volk.h>
 
 /* The Vita's Vulkan device (vk.c), which the renderer and the presenter share, as the 3DS driver's (3ds/gpu/vk): the
    guest's memory the GPU uses is imported as buffers (VK_EXT_external_memory_host), so surfaces, vertices, textures and
@@ -13,7 +14,7 @@
    recorded into a command buffer until it is submitted, a few submissions in flight, each with a serial */
 #define VITA_VK_SLOTS 3
 typedef struct {
-    VkInstance instance;
+    SnxVkWindow host; /* the window (none headless), the instance and the surface */
     VkPhysicalDevice phys;
     VkDevice device;
     VkQueue queue;
@@ -27,24 +28,10 @@ typedef struct {
     /* the color attachment read as an input attachment while rendered to (VK_KHR_dynamic_rendering_local_read), in
        primitive order within a draw (VK_EXT_rasterization_order_attachment_access) */
     bool local_read, raster_order;
-    SDL_Window* window;
-    VkSurfaceKHR surface;
-    VkSwapchainKHR swapchain;
-    VkFormat swap_format;
-    VkExtent2D swap_extent;
-    VkImage swap_images[8];
-    uint32_t swap_count;
-    VkSemaphore acquired[VITA_VK_SLOTS], rendered[8];
-    VkCommandPool pool;
-    struct {
-        VkCommandBuffer cb;
-        VkFence fence;
-        VkDescriptorPool descriptors;
-        uint64_t serial; /* 0: never submitted */
-    } slots[VITA_VK_SLOTS];
-    unsigned slot;
-    bool recording;
-    uint64_t submitted, completed;
+    SnxVkSwapchain swap;
+    /* a submission slot's acquired image, a swapchain image's rendering done */
+    VkSemaphore acquired[VITA_VK_SLOTS], rendered[SNX_VK_SWAP_IMAGES];
+    SnxVkRing ring; /* the submissions in flight, VITA_VK_SLOTS of them */
 } VitaVk;
 
 /* the device and the window (none headless, or without a display): false with the reason when the host has no
@@ -64,7 +51,7 @@ unsigned vita_vk_slot(void);
 VkDescriptorSet vita_vk_set(VkDescriptorSetLayout layout);
 uint32_t vita_vk_memory_type(uint32_t bits, VkMemoryPropertyFlags properties);
 /* the renderer's per-submission resources, freed when the slot's submission is done */
-void vita_vk_on_retire(void (*retire)(unsigned slot));
+void vita_vk_on_retire(void (*retire)(unsigned slot, uint64_t serial));
 /* Shows the framebuffer: width by height pixels, pitch pixels a row, R8G8B8A8 bytes at offset in buffer, scaled into
    the window. Nothing without a window */
 void vita_vk_present(VkBuffer buffer, VkDeviceSize offset, uint32_t pitch, uint32_t width, uint32_t height);

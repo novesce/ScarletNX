@@ -23,15 +23,26 @@
 
 /* the core a thread would run on, kept within the cores the runtime has */
 static int core_of(const KThread* t) { return t->core >= 0 && t->core < NCORES ? t->core : 0; }
+/* the lowest core of t's mask that nobody holds, or -1 */
+static int core_idle_nl(const KThread* t) {
+    int j;
+    for (j = 0; j < NCORES; j++)
+        if (((t->affinity >> j) & 1) && !g_hle.thread.core_owner[j]) return j;
+    return -1;
+}
 /* the holder of core k is asked to let go (CPU.poll, read by generated code) when a waiter would preempt it, and while
-   the game is paused, so that it reaches a hold point */
+   the game is paused, so that it reaches a hold point. Also when its core has a waiter and its mask an idle core: it
+   moves there, as the console's scheduler does at any priority */
 /* stored only when it changes: the holder's code reads poll at each backward branch, and a store of the same value
    still takes its cache line away from the holder's core */
 static void core_flag_nl(int k) {
     KThread* o = kt_at(g_hle.thread.core_owner[k]);
     u32 v;
     if (!o) return;
-    v = __atomic_load_n(&g_hle.thread.hold, __ATOMIC_RELAXED) || g_hle.thread.core_best[k] < o->prio ? 1u : 0u;
+    v = __atomic_load_n(&g_hle.thread.hold, __ATOMIC_RELAXED) || g_hle.thread.core_best[k] < o->prio ||
+                (g_hle.thread.core_wait[k] && core_idle_nl(o) >= 0)
+            ? 1u
+            : 0u;
     if (__atomic_load_n(&o->cpu.poll, __ATOMIC_RELAXED) != v) __atomic_store_n(&o->cpu.poll, v, __ATOMIC_RELAXED);
 }
 static void core_rebest_nl(int k) {
@@ -88,17 +99,14 @@ static void core_handoff_nl(int k) {
                     from = j;
                 }
         }
-    if (!best) return;
+    if (!best) { /* a holder with a waiter elsewhere may move here */
+        for (j = 0; j < NCORES; j++)
+            if (j != k && g_hle.thread.core_wait[j]) core_flag_nl(j);
+        return;
+    }
     core_unlink_nl(from, best);
     if (from != k) core_flag_nl(from);
     core_give_nl(k, best);
-}
-/* the lowest core of t's mask that nobody holds, or -1 */
-static int core_idle_nl(const KThread* t) {
-    int j;
-    for (j = 0; j < NCORES; j++)
-        if (((t->affinity >> j) & 1) && !g_hle.thread.core_owner[j]) return j;
-    return -1;
 }
 /* t waits on core k's list until a holder hands the core over (it may be another core by then) */
 static void core_wait_nl(KThread* t, int k) {
@@ -173,7 +181,7 @@ void core_leave(KThread* t) {
 /* every waiter that would preempt t has flagged it, so an unflagged holder has nothing to do here: that is the path of
    every SVC */
 void core_preempt(KThread* t) {
-    int k;
+    int k, j;
     if (!t || !__atomic_load_n(&t->cpu.poll, __ATOMIC_RELAXED)) return;
     pm_lock(&g_host.thread.core_lk);
     if (!g_settings.emulated_cores) { /* only a game pause sets poll: kernel_hold, under core_lk */
@@ -186,6 +194,9 @@ void core_preempt(KThread* t) {
     if (k >= 0 && g_hle.thread.core_best[k] < t->prio) {
         core_release_nl(t);
         core_take_nl(t);
+    } else if (k >= 0 && g_hle.thread.core_wait[k] && (j = core_idle_nl(t)) >= 0) {
+        core_release_nl(t); /* the waiter takes k, t the idle core */
+        core_give_nl(j, t);
     } else
         __atomic_store_n(&t->cpu.poll, 0u, __ATOMIC_RELAXED);
     pm_unlock(&g_host.thread.core_lk);

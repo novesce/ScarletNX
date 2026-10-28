@@ -73,6 +73,7 @@ static int pad_player; /* the player the gamepads' page shows: 0 every player's,
 #define SOFT                     SNX_OVERLAY_RGBA(SNX_GUI_THEME_YORHA_SOFT, 0xFFu)
 #define LIGHT                    SNX_OVERLAY_RGBA(SNX_GUI_THEME_YORHA_PAGE, 0xFFu)
 #define FAILURE                  SNX_OVERLAY_RGBA(SNX_GUI_THEME_YORHA_FAILURE, 0xFFu)
+#define PANEL                    SNX_OVERLAY_RGBA(SNX_GUI_THEME_YORHA_SOFT, 0x40u) /* the page a little darker */
 
 /* a slot's page's items: the auto slot has no Save */
 static int slot_item(int i) { return slot_at ? i : i + 1; }
@@ -235,7 +236,7 @@ static void disc(SnxUiList* l, float x, float y, float w, float h, u32 rgba) {
 }
 static void user_draw(SnxUiList* l, float left, float right, float y, int s);
 static void map_draw(SnxUiList* l, int sw, int sh) {
-    const u32 box = SNX_OVERLAY_RGBA(SNX_GUI_THEME_YORHA_SOFT, 0x40u); /* a panel: the page a little darker */
+    const u32 box = PANEL;
     int px, py, s, i;
     float cw, ch, x, y, w, h;
     overlay_place(sw, sh, &px, &py, &s);
@@ -411,7 +412,10 @@ typedef struct {
     int link; /* underlined: its rows are a target (DialogDrawn's link) */
     int on;   /* right under the paragraph before it, no blank row between */
     int cut;  /* on a short picture the lowest gives up its rows first; 0 never does */
+    /* a line typed into: cut as it is, its last DIALOG_FIELD_ROWS rows, on a panel (DialogDrawn's field) */
+    int field;
 } DialogPara;
+enum { DIALOG_FIELD_ROWS = 4 };
 typedef struct {
     const char* title;
     int user; /* the user playing at the head's right, by their nickname: the menu's pages */
@@ -426,6 +430,7 @@ typedef struct {
 typedef struct {
     SnxOverlayRect box, link, item[VISIBLE];
     SnxOverlayRect aside; /* the picture's room: empty when there was none */
+    SnxOverlayRect field; /* the field paragraph's panel, empty without one */
     int cols, scale;
 } DialogDrawn;
 /* the user playing on the head's band, against right, past left: a box framed as the launcher's are, in the band's
@@ -451,6 +456,17 @@ static void user_draw(SnxUiList* l, float left, float right, float y, int s) {
 }
 /* the rows paragraphs wrap into: each thread that lays a dialog out has its own */
 typedef char DialogRows[DIALOG_PARAS][DIALOG_LINES][FATAL_ROW];
+/* the keyboard's box's answer */
+enum { KB_WAITING, KB_GIVEN, KB_CANCELLED };
+/* The keyboard's box: what the game asked, the line as typed (kb.text) and its UTF-16 units, whether it shows (the
+   renderer and the backend read it), Enter pressed short of the least (said until the line changes), and the answer
+   until it is taken. The event thread's rows, for its taps and the line's place */
+static struct {
+    OverlayKeyboard kb;
+    u32 units;
+    int kb_shown, refused, answer;
+    DialogRows event_rows;
+} g_overlay;
 /* d on a picture sw x sh, into l (NULL: only where it all goes, in out): the head, each paragraph after a blank row,
    a blank row, the items and a blank row; overlay_cols wide, in the middle */
 static void dialog_draw(SnxUiList* l, int sw, int sh, const Dialog* d, DialogRows rows_of, DialogDrawn* out) {
@@ -471,7 +487,12 @@ static void dialog_draw(SnxUiList* l, int sw, int sh, const Dialog* d, DialogRow
     }
     w = cw * (float)cols;
     for (k = 0; k < d->paras; ++k) {
-        n[k] = d->para[k].text ? fatal_wrap(d->para[k].text, cols - 2, rows_of[k], DIALOG_LINES) : 0;
+        if (!d->para[k].text)
+            n[k] = 0;
+        else if (d->para[k].field) /* where the player types: its end */
+            n[k] = fatal_cut(d->para[k].text, cols - 2, rows_of[k], DIALOG_FIELD_ROWS);
+        else
+            n[k] = fatal_wrap(d->para[k].text, cols - 2, rows_of[k], DIALOG_LINES);
         if (n[k] > DIALOG_LINES) n[k] = DIALOG_LINES;
     }
     room = sh / (int)ch;
@@ -512,6 +533,13 @@ static void dialog_draw(SnxUiList* l, int sw, int sh, const Dialog* d, DialogRow
         if (!n[k]) continue;
         if (last >= 0 && !(d->para[k].on && last == k - 1)) ++row;
         last = k;
+        if (d->para[k].field) { /* half a column wider than its letters at each side */
+            out->field.x = x + cw / 2;
+            out->field.y = y + ch * (float)row;
+            out->field.w = w - cw;
+            out->field.h = ch * (float)n[k];
+            if (l) ui_fill(l, out->field.x, out->field.y, out->field.w, out->field.h, PANEL);
+        }
         for (i = 0; i < n[k]; ++i, ++row) {
             float width, at = y + ch * (float)row;
             fatal_cp437(rows_of[k][i], line, sizeof line);
@@ -552,6 +580,164 @@ static void dialog_draw(SnxUiList* l, int sw, int sh, const Dialog* d, DialogRow
     if (l && d->shown && d->top + d->shown < d->items)
         ui_text(l, x + cw * (float)(cols - 1), out->item[d->shown - 1].y, s, "\x19", SOFT);
 }
+
+/* ---- the software keyboard's box ---- */
+/* the bytes of the UTF-8 character at s: a lead byte's continuations, three at most; any other byte alone */
+static size_t kb_step(const char* s) {
+    size_t n = 1;
+    if ((unsigned char)s[0] >= 0xC0)
+        while (n < 4 && s[n] && ((unsigned char)s[n] & 0xC0) == 0x80) ++n;
+    return n;
+}
+/* text added to the line: its characters while the line's most has room for each (two units for one past U+FFFF,
+   which UTF-16 makes a pair of), controls left out */
+static void kb_add(const char* text) {
+    size_t at = strlen(g_overlay.kb.text);
+    while (*text) {
+        size_t n = kb_step(text);
+        u32 units = n == 4 ? 2 : 1;
+        if ((unsigned char)*text >= 0x20 && *text != 0x7f) {
+            if (g_overlay.units + units > g_overlay.kb.max || at + n >= sizeof g_overlay.kb.text) break;
+            memcpy(g_overlay.kb.text + at, text, n);
+            at += n;
+            g_overlay.units += units;
+        }
+        text += n;
+    }
+    g_overlay.kb.text[at] = 0;
+}
+void overlay_keyboard_show(const OverlayKeyboard* k) {
+    g_overlay.kb = *k;
+    if (!g_overlay.kb.max || g_overlay.kb.max > OVERLAY_KB_UNITS) g_overlay.kb.max = OVERLAY_KB_UNITS;
+    if (g_overlay.kb.min > g_overlay.kb.max) g_overlay.kb.min = g_overlay.kb.max;
+    g_overlay.kb.text[0] = 0;
+    g_overlay.units = 0;
+    kb_add(k->text);
+    g_overlay.refused = 0;
+    g_overlay.answer = KB_WAITING;
+    __atomic_store_n(&g_overlay.kb_shown, 1, __ATOMIC_RELEASE);
+}
+void overlay_keyboard_hide(u32 ticket) {
+    if (g_overlay.kb.ticket == ticket) __atomic_store_n(&g_overlay.kb_shown, 0, __ATOMIC_RELEASE);
+}
+int overlay_keyboard_shown(void) { return __atomic_load_n(&g_overlay.kb_shown, __ATOMIC_ACQUIRE); }
+void overlay_keyboard_type(const char* text) {
+    if (!g_overlay.kb_shown) return;
+    kb_add(text);
+    g_overlay.refused = 0;
+}
+static int kb_answer(int answer) {
+    g_overlay.answer = answer;
+    __atomic_store_n(&g_overlay.kb_shown, 0, __ATOMIC_RELEASE);
+    return OVERLAY_KEYBOARD;
+}
+int overlay_keyboard_key(int key) {
+    size_t end, at;
+    if (!g_overlay.kb_shown) return OVERLAY_NONE;
+    if (key == OVERLAY_KEY_CANCEL) return kb_answer(KB_CANCELLED);
+    if (key == OVERLAY_KEY_ENTER) {
+        if (g_overlay.units >= g_overlay.kb.min) return kb_answer(KB_GIVEN);
+        g_overlay.refused = 1;
+        return OVERLAY_NONE;
+    }
+    end = strlen(g_overlay.kb.text); /* Backspace: the last character, from the byte that leads it */
+    if (end) {
+        for (at = end - 1; at && ((unsigned char)g_overlay.kb.text[at] & 0xC0) == 0x80; --at) {}
+        g_overlay.units -= end - at == 4 ? 2 : 1;
+        g_overlay.kb.text[at] = 0;
+    }
+    g_overlay.refused = 0;
+    return OVERLAY_NONE;
+}
+int overlay_keyboard_take(u32* ticket, char* out, size_t size) {
+    int answer = g_overlay.answer;
+    if (answer == KB_WAITING) return -1;
+    g_overlay.answer = KB_WAITING;
+    *ticket = g_overlay.kb.ticket;
+    if (answer == KB_CANCELLED) return 1;
+    snprintf(out, size, "%s", g_overlay.kb.text);
+    return 0;
+}
+/* the texts the box's dialog points at */
+typedef struct {
+    char line[OVERLAY_KB_TEXT + 3]; /* the line and its cursor */
+    char count[96], ok[sizeof g_overlay.kb.ok], hint[sizeof g_overlay.kb.ok + 40];
+} KbTexts;
+/* the box as a dialog: the game's header, sub and guide texts, the line with its cursor at the end (each character an
+   asterisk for a password), how many characters it holds against the game's limits, what the keys do, and the game's
+   OK, in focus as Enter and A give it, and Cancel */
+static void kb_dialog(Dialog* d, KbTexts* t) {
+    const OverlayKeyboard* k = &g_overlay.kb;
+    const char* ok = k->ok[0] ? k->ok : "OK";
+    size_t n = 0;
+    const char* c;
+    memset(d, 0, sizeof *d);
+    d->title = "SCARLETNX  /  KEYBOARD";
+    d->user = 1;
+    if (k->password)
+        for (c = k->text; *c && n < OVERLAY_KB_UNITS; c += kb_step(c)) t->line[n++] = '*';
+    else
+        for (; k->text[n]; ++n) t->line[n] = k->text[n];
+    memcpy(t->line + n, "\xE2\x96\x8C", 4); /* the cursor, the font's left half block */
+    if (g_overlay.refused) {
+        u32 more = k->min - g_overlay.units; /* Enter was short of the least */
+        snprintf(t->count, sizeof t->count, "%u more character%s needed, %u at least.", (unsigned)more,
+                 more == 1 ? "" : "s", (unsigned)k->min);
+    } else if (k->min)
+        snprintf(t->count, sizeof t->count, "%u of %u characters, %u at least.", (unsigned)g_overlay.units,
+                 (unsigned)k->max, (unsigned)k->min);
+    else
+        snprintf(t->count, sizeof t->count, "%u of %u characters.", (unsigned)g_overlay.units, (unsigned)k->max);
+    snprintf(t->hint, sizeof t->hint, "Enter or A: %s. Esc or B: Cancel.", ok);
+    fatal_cp437(ok, t->ok, sizeof t->ok); /* the items are drawn in the font's bytes */
+    {
+        /* on a short picture the hint gives up its rows first, then the guide, the sub and the header text; never the
+           line or its count */
+        const DialogPara para[DIALOG_PARAS] = {{k->header, INK, 0, 0, 4, 0},
+                                               {k->sub, SOFT, 0, 1, 3, 0},
+                                               {k->guide, SOFT, 0, 0, 2, 0},
+                                               {t->line, INK, 0, 0, 0, 1},
+                                               {t->count, g_overlay.refused ? FAILURE : SOFT, 0, 1, 0, 0},
+                                               {t->hint, SOFT, 0, 0, 1, 0}};
+        memcpy(d->para, para, sizeof para);
+    }
+    d->paras = DIALOG_PARAS;
+    d->label[0] = t->ok;
+    d->label[1] = "Cancel";
+    d->items = d->shown = 2;
+}
+/* a tap on the box: OK and Cancel do as Enter and Esc, the line asks for the system's keyboard again */
+static int kb_tap(float x, float y, int sw, int sh) {
+    KbTexts t;
+    Dialog d;
+    DialogDrawn at;
+    kb_dialog(&d, &t);
+    dialog_draw(NULL, sw, sh, &d, g_overlay.event_rows, &at);
+    if (overlay_error_hit(&at.field, x, y)) return OVERLAY_TYPE;
+    if (overlay_error_hit(&at.item[0], x, y)) return overlay_keyboard_key(OVERLAY_KEY_ENTER);
+    if (overlay_error_hit(&at.item[1], x, y)) return overlay_keyboard_key(OVERLAY_KEY_CANCEL);
+    return OVERLAY_NONE;
+}
+/* a button pressed on the box (one HidNpadButton bit): A gives the line, B cancels */
+static int kb_pad(u64 button) {
+    if (button == 1ull << 0) return overlay_keyboard_key(OVERLAY_KEY_ENTER);
+    if (button == 1ull << 1) return overlay_keyboard_key(OVERLAY_KEY_CANCEL);
+    return OVERLAY_NONE;
+}
+int overlay_keyboard_typing(int sw, int sh, OverlayTyping* t) {
+    KbTexts texts;
+    Dialog d;
+    DialogDrawn at;
+    if (!g_overlay.kb_shown) return 0;
+    kb_dialog(&d, &texts);
+    dialog_draw(NULL, sw, sh, &d, g_overlay.event_rows, &at);
+    t->ticket = g_overlay.kb.ticket;
+    t->password = g_overlay.kb.password;
+    t->numbers = g_overlay.kb.numbers;
+    t->line = at.field;
+    return 1;
+}
+
 int overlay_select(void) { return page == PAGE_MAP ? map_key(SNX_PAD_KEY_SELECT) : act(focus, 0); }
 void overlay_move(int rows) {
     int n = items();
@@ -597,7 +783,7 @@ int overlay_controls(u64 buttons, const i32 sticks[4], u64 ms) {
     const u64 dirs = 0xFF000ull; /* the D-pad's and the left stick's: bits 12 to 19 */
     u64 now = buttons | (sticks[0] < -16384 ? 1ull << 16 : 0) | (sticks[1] > 16384 ? 1ull << 17 : 0) |
               (sticks[0] > 16384 ? 1ull << 18 : 0) | (sticks[1] < -16384 ? 1ull << 19 : 0),
-        pressed = shown ? now & ~seen : 0;
+        pressed = shown || g_overlay.kb_shown ? now & ~seen : 0;
     int bit, did = OVERLAY_NONE;
     if (map_swallow) { /* the press the button map page took */
         map_swallow = 0;
@@ -612,7 +798,7 @@ int overlay_controls(u64 buttons, const i32 sticks[4], u64 ms) {
     }
     seen = now;
     for (bit = 0; bit < 20 && did == OVERLAY_NONE; ++bit)
-        if (pressed >> bit & 1) did = overlay_pad(1ull << bit);
+        if (pressed >> bit & 1) did = shown ? overlay_pad(1ull << bit) : kb_pad(1ull << bit);
     return did;
 }
 int overlay_back(void) {
@@ -694,14 +880,14 @@ static void menu_dialog(Dialog* d, char (*text)[OVERLAY_COLS_MAX + 1], char (*va
     }
 }
 int overlay_tap(float x, float y, int sw, int sh) {
-    static DialogRows rows_of; /* the event thread's */
     char text[VISIBLE][OVERLAY_COLS_MAX + 1], value[VISIBLE][OVERLAY_COLS_MAX + 1], pads[2 * OVERLAY_COLS_MAX + 64];
     Dialog d;
     DialogDrawn at;
     int r, col;
+    if (!shown && g_overlay.kb_shown) return kb_tap(x, y, sw, sh);
     if (page == PAGE_MAP) return map_did(snx_pad_screen_tap(&map, snx_pad_screen_hit(&map_drawing, x, y)));
     menu_dialog(&d, text, value, pads, sizeof pads);
-    dialog_draw(NULL, sw, sh, &d, rows_of, &at);
+    dialog_draw(NULL, sw, sh, &d, g_overlay.event_rows, &at);
     if (!overlay_error_hit(&at.box, x, y)) return OVERLAY_CLOSE;
     for (r = 0; r < d.shown && !overlay_error_hit(&at.item[r], x, y); ++r) {}
     if (r == d.shown) return OVERLAY_NONE;
@@ -775,7 +961,12 @@ void overlay_draw(SnxUiList* l, int sw, int sh, u64 now_ns) {
     char text[VISIBLE][OVERLAY_COLS_MAX + 1], value[VISIBLE][OVERLAY_COLS_MAX + 1], pads[2 * OVERLAY_COLS_MAX + 64];
     Dialog d;
     DialogDrawn at;
-    if (!shown) {
+    if (!shown) { /* the keyboard's box, which the menu goes over */
+        if (g_overlay.kb_shown) {
+            KbTexts t;
+            kb_dialog(&d, &t);
+            dialog_draw(l, sw, sh, &d, rows_of, &at);
+        }
         if (overlay_toasting(now_ns)) toast_draw(l, sw, sh);
         return;
     }
@@ -796,8 +987,9 @@ void overlay_error_draw(SnxUiList* l, int sw, int sh, SnxOverlayError* e) {
     static const char* const labels[SNX_OVERLAY_ERROR_ITEMS] = {"Share Log", "Copy path", "Close"};
     /* on a short picture the log's label gives up rows first, then the hint, the log and the error; never the game's
        name or what Share Log or Copy path did. The log goes right under its label */
-    const DialogPara para[] = {{e->name, SOFT, 0, 0, 0}, {e->msg, FAILURE, 0, 0, 4}, {fatal_hint(e->msg), INK, 0, 0, 2},
-                               {e->how, SOFT, 0, 0, 1},  {e->log, INK, 1, 1, 3},     {e->said, SOFT, 0, 0, 0}};
+    const DialogPara para[] = {
+        {e->name, SOFT, 0, 0, 0, 0}, {e->msg, FAILURE, 0, 0, 4, 0}, {fatal_hint(e->msg), INK, 0, 0, 2, 0},
+        {e->how, SOFT, 0, 0, 1, 0},  {e->log, INK, 1, 1, 3, 0},     {e->said, SOFT, 0, 0, 0, 0}};
     Dialog d;
     DialogDrawn at;
     int i;

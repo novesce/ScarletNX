@@ -3,6 +3,7 @@
    APT GetLockHandle facts: Azahar service/apt/{apt,applet_manager}.cpp,
    GPL-2.0-or-later, revision recorded in docs/3DS.md. */
 #include "3ds/runtime/internal.h"
+#include "common/utilities/endian.h"
 #include "3ds/services/apt.h"
 #include "services/apt.swipc.inc"
 static uint32_t snx_ctr_apt_wire_GetLockHandle(SnxCtrIpc* c, uint32_t attributes, uint32_t* corrected, uint32_t* state,
@@ -79,9 +80,6 @@ static uint32_t snx_ctr_apt_wire_IsNew3DS(SnxCtrIpc* c, uint32_t* is_new) {
     *is_new = snx_ctr_memory_profile(c->process->memory)->model == SNX_CTR_NEW;
     return 0;
 }
-static uint32_t le32(const unsigned char* b) {
-    return (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24;
-}
 static void receive_parameter(SnxCtrIpc* c) {
     if (!snx_ctr_ipc_expect(c, 2, 0)) return;
     SnxCtrProcess* p = c->process;
@@ -99,7 +97,7 @@ static void receive_parameter(SnxCtrIpc* c) {
         c->transport_result = 0xe0e01bf5u;
         return;
     }
-    uint32_t d = le32(descriptor), address = le32(descriptor + 4), size = c->in[2];
+    uint32_t d = snx_ld_le32(descriptor), address = snx_ld_le32(descriptor + 4), size = c->in[2];
     if ((d & 0x3fff) != 2 || (d >> 14) < size) {
         snx_ctr_ipc_bad(c);
         return;
@@ -143,7 +141,7 @@ static void applet_utility(SnxCtrIpc* c) {
         c->transport_result = 0xe0e01bf5u;
         return;
     }
-    uint32_t d = le32(descriptor), address = le32(descriptor + 4);
+    uint32_t d = snx_ld_le32(descriptor), address = snx_ld_le32(descriptor + 4);
     if ((d & 0x3fff) != 2 || (d >> 14) < output_size) {
         snx_ctr_ipc_bad(c);
         return;
@@ -158,7 +156,7 @@ static void applet_utility(SnxCtrIpc* c) {
         c->transport_result = 0xe0e01bf5u;
         return;
     }
-    if (command == 7 && input_size == 4 && le32(input) == 0x10 && p->apt_phase == 3) p->apt_phase = 4;
+    if (command == 7 && input_size == 4 && snx_ld_le32(input) == 0x10 && p->apt_phase == 3) p->apt_phase = 4;
     c->out[0] = 0x004b0082;
     c->out[2] = 0; /* the utility's own result */
     c->out[3] = (output_size << 14) | 2;

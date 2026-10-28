@@ -239,6 +239,9 @@ static void run(void* arg) {
             break;
         }
     }
+    /* the stream stops here, as gpu.c's job_end: the renderer holds a stream's releases (its increments and writes)
+       until then (release.c), and the game may now look at them */
+    if (g_renderer->stream_end) g_renderer->stream_end();
     free(j);
 }
 

@@ -35,6 +35,7 @@
 #include "nx/runtime/platform/backend.h"
 #include "nx/runtime/platform/hud.h"
 #include "nx/runtime/platform/log.h"
+#include "nx/runtime/platform/overlay.h"
 #include "nx/runtime/platform/prepare_screen.h"
 #include "nx/runtime/platform/plat.h"
 #include "nx/runtime/platform/tracy.h"
@@ -429,6 +430,25 @@ static void say_old_layout(void) {
 
 static u32 rd32le(const u8* p) { return (u32)p[0] | (u32)p[1] << 8 | (u32)p[2] << 16 | (u32)p[3] << 24; }
 
+/* exefs/main.npdm's MMU flags (its byte at 0x0C): the address space type, which decides the layout mem_init sizes
+   its blocks in and the loader places the code at. The npdm is read through the fs, which fs_init has just brought
+   up. A 64-bit program of type 1 is the console's pre-2.0 36-bit one, and mem_layout36's comment says what the
+   layout has to guarantee for it: what its SDK marshals into an IPC buffer descriptor drops every address bit above
+   36, and the 39-bit layout's stack and heap, above 64 GiB, came back as addresses with no memory behind them */
+static void npdm_layout(void) {
+    u64 size = 0;
+    unsigned char* d = fs_read_file("exefs/main.npdm", &size);
+    if (!d) return;
+    if (size >= 0x80 && size <= 0x4000 && !memcmp(d, "META", 4)) {
+        unsigned flags = d[0x0c];
+        if ((flags & 1) && ((flags >> 1) & 7) == 1) {
+            mem_layout36();
+            LOG("npdm: a 36-bit address space: 64 GiB, the code region at a fixed 128 MiB\n");
+        }
+    }
+    free(d);
+}
+
 /* exefs/main.npdm: the system resource size (newer SDKs set up their memory allocator only with one) and the cores
    and priorities its kernel capabilities allow, from the first ThreadInfo one (svcGetInfo 0 and 1, svcCreateThread's
    checks) */
@@ -576,7 +596,8 @@ static void frontend_loop(void) {
             }
 #endif
         }
-        if (shown != frames || paused) { /* a paused game shows nothing new, and isn't stalled */
+        /* a paused game shows nothing new, and isn't stalled; nor is one that waits for the keyboard's box */
+        if (shown != frames || paused || overlay_keyboard_shown()) {
             frames = shown;
             changed = now;
         } else if (now - changed >= STALL_NS && stalls < 4) {
@@ -914,6 +935,7 @@ int snx_main(int argc, char** argv) {
     snx_ir_volatile_memory(g_settings.volatile_load_stores);
 
     fs_init(keys, title_keys); /* the npdm is read through it, and mem_init's layout comes before */
+    npdm_layout(); /* the address space type's layout, before mem_init sizes its blocks in it */
     free(keys);
     free(title_keys);
     keys = title_keys = NULL;

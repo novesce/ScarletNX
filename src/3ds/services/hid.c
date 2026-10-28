@@ -10,6 +10,7 @@
 #include "3ds/input/input.h"
 #include "3ds/runtime/internal.h"
 #include "common/utilities/common.h"
+#include "common/utilities/endian.h"
 #include "services/hid.swipc.inc"
 #include <math.h>
 #include <string.h>
@@ -41,17 +42,19 @@ static void put(SnxCtrProcess* p, uint32_t offset, const void* bytes, size_t siz
     (void)snx_ctr_phys_write(p->memory, shared_physical(p) + offset, bytes, size);
 }
 static void put16(SnxCtrProcess* p, uint32_t offset, uint16_t v) {
-    unsigned char b[2] = {(unsigned char)v, (unsigned char)(v >> 8)};
+    unsigned char b[2];
+    snx_st_le16(b, v);
     put(p, offset, b, 2);
 }
 static void put32(SnxCtrProcess* p, uint32_t offset, uint32_t v) {
-    unsigned char b[4] = {(unsigned char)v, (unsigned char)(v >> 8), (unsigned char)(v >> 16), (unsigned char)(v >> 24)};
+    unsigned char b[4];
+    snx_st_le32(b, v);
     put(p, offset, b, 4);
 }
 static uint32_t get32(SnxCtrProcess* p, uint32_t offset) {
     unsigned char b[4] = {0};
     (void)snx_ctr_phys_read(p->memory, shared_physical(p) + offset, b, 4);
-    return (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24;
+    return snx_ld_le32(b);
 }
 /* the system tick, as svcGetSystemTick counts it */
 static uint64_t ticks(const SnxCtrProcess* p) {

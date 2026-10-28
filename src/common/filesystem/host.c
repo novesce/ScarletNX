@@ -55,10 +55,10 @@ void pm_wait_note(const void* m, const void* at, int cond) {
     __atomic_store_n(&g_pm_wait[i].m, m, __ATOMIC_RELEASE);
 }
 int pm_waits(PmWait* out, int max) {
-    unsigned n = __atomic_load_n(&g_pm_nwait, __ATOMIC_RELAXED), i;
+    unsigned n = __atomic_load_n(&g_pm_nwait, __ATOMIC_RELAXED);
     int k = 0;
     if (n > PM_WAITS) n = PM_WAITS;
-    for (i = 0; i < n && k < max; i++) {
+    for (unsigned i = 0; i < n && k < max; i++) {
         const void* m = __atomic_load_n(&g_pm_wait[i].m, __ATOMIC_ACQUIRE);
         if (!m) continue;
         out[k].tid = __atomic_load_n(&g_pm_wait[i].tid, __ATOMIC_RELAXED);
@@ -126,10 +126,9 @@ static void pm_named_attach(PMutex* m, const char* name, const PmTracy* t) {
     __atomic_store_n(&m->tracy, c, __ATOMIC_RELEASE);
 }
 void pm_tracy_register(const PmTracy* t) {
-    unsigned n, i;
     __atomic_store_n(&g_pm_tracy, t, __ATOMIC_RELEASE);
-    n = __atomic_load_n(&g_pm_npending, __ATOMIC_ACQUIRE);
-    for (i = 0; i < n && i < PM_PENDING; i++)
+    unsigned n = __atomic_load_n(&g_pm_npending, __ATOMIC_ACQUIRE);
+    for (unsigned i = 0; i < n && i < PM_PENDING; i++)
         pm_named_attach(g_pm_pending[i].m, g_pm_pending[i].name, t);
     __atomic_store_n(&g_pm_npending, 0, __ATOMIC_RELEASE);
     /* last, so a pm_lock that finds the flag open sees a reporter and every lock already attached */
@@ -175,12 +174,11 @@ static uint64_t pm_tid(void) { return GetCurrentThreadId(); }
    while a lock is being taken is read again after it is held, so the release never finds no obtain to pair
    with. */
 void pm_lock(PMutex* m) {
-    PmNamed* c;
     if (!__atomic_load_n(&g_pm_tracy_on, __ATOMIC_RELAXED)) {
         AcquireSRWLockExclusive(&m->l);
         return;
     }
-    c = pm_named(m);
+    PmNamed* c = pm_named(m);
     if (TryAcquireSRWLockExclusive(&m->l)) {
         if (!c) c = pm_named(m);
         if (c && pm_named_admit(c)) g_pm_tracy->try_lock(c->l, 1); /* the count the release balances */
@@ -230,21 +228,19 @@ int plat_mkdir(const char* path) {
 /* the CRT has room for 8192 descriptors, handed out lowest first */
 #define CRT_DESCRIPTORS 8192
 int plat_file_share(const char* path, uint64_t size, int* fd, const uint8_t** data) {
-    wchar_t* wide;
     HANDLE file, section;
     void* view = NULL;
-    int d;
     *fd = -1;
     *data = NULL;
     if ((uint64_t)(size_t)size != size || size > (uint64_t)INT64_MAX) return -1;
-    wide = snx_host_wpath(path);
+    wchar_t* wide = snx_host_wpath(path);
     if (!wide) return -1;
     /* others may read it, and delete or rename it as on POSIX: the view stays valid */
     file = CreateFileW(wide, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
                        FILE_ATTRIBUTE_NORMAL, NULL);
     free(wide);
     if (file == INVALID_HANDLE_VALUE) return -1;
-    d = _open_osfhandle((intptr_t)file, _O_RDONLY | _O_BINARY);
+    int d = _open_osfhandle((intptr_t)file, _O_RDONLY | _O_BINARY);
     if (d < 0) {
         CloseHandle(file);
         return -1;
@@ -301,12 +297,11 @@ static uint64_t pm_tid(void) {
 #endif
 }
 void pm_lock(PMutex* m) {
-    PmNamed* c;
     if (!__atomic_load_n(&g_pm_tracy_on, __ATOMIC_RELAXED)) {
         pthread_mutex_lock(&m->l);
         return;
     }
-    c = pm_named(m);
+    PmNamed* c = pm_named(m);
     if (pthread_mutex_trylock(&m->l) == 0) {
         if (!c) c = pm_named(m);
         if (c && pm_named_admit(c)) g_pm_tracy->try_lock(c->l, 1); /* the count the release balances */
@@ -356,20 +351,18 @@ static void raise_descriptor_limit(void) {
 /* whether keeping descriptor fd leaves the reserve free (descriptors are handed out lowest first) */
 static int descriptor_fits(int fd) {
     struct rlimit rl;
-    rlim_t limit;
     if (getrlimit(RLIMIT_NOFILE, &rl)) return 1;
-    limit = descriptor_limit(&rl);
+    rlim_t limit = descriptor_limit(&rl);
     if (limit == RLIM_INFINITY) return 1;
     return (rlim_t)fd + 1 + SHARE_RESERVE <= limit;
 }
 int plat_file_share(const char* path, uint64_t size, int* fd, const uint8_t** data) {
     void* view = NULL;
-    int d;
     *fd = -1;
     *data = NULL;
     if ((uint64_t)(size_t)size != size || size > (uint64_t)INT64_MAX) return -1;
     raise_descriptor_limit();
-    d = open(path, O_RDONLY | O_CLOEXEC);
+    int d = open(path, O_RDONLY | O_CLOEXEC);
     if (d < 0) return -1;
     if (!descriptor_fits(d)) {
         close(d);

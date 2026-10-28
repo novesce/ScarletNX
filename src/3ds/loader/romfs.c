@@ -19,10 +19,10 @@ static bool utf8_name(const unsigned char* p, size_t bytes, char name[1024]) {
     if (!bytes || bytes > 510 || (bytes & 1)) return false;
     size_t used = 0;
     for (size_t i = 0; i < bytes; i += 2) {
-        uint32_t cp = ctr_le16(p + i);
+        uint32_t cp = snx_ld_le16(p + i);
         if (cp >= 0xd800 && cp <= 0xdbff) {
             if (i + 2 >= bytes) return false;
-            uint32_t lo = ctr_le16(p + i + 2);
+            uint32_t lo = snx_ld_le16(p + i + 2);
             if (lo < 0xdc00 || lo > 0xdfff) return false;
             cp = 0x10000 + ((cp - 0xd800) << 10) + lo - 0xdc00;
             i += 2;
@@ -55,7 +55,7 @@ static bool table_scan(RomFs* fs, bool directory) {
     for (size_t at = 0; at < size;) {
         if (!ctr_fits(size, at, base))
             return ctr_fail(fs->r, SNX_CTR_EXTRACT_FORMAT, "truncated RomFS metadata record");
-        size_t length = ctr_le32(bytes + at + base - 4);
+        size_t length = snx_ld_le32(bytes + at + base - 4);
         if ((length & 1) || length > 510 || !ctr_fits(size, at + base, (length + 3) & ~(size_t)3))
             return ctr_fail(fs->r, SNX_CTR_EXTRACT_FORMAT, "invalid RomFS metadata name length");
         marks[at / 4] = 1;
@@ -98,11 +98,11 @@ static bool walk(RomFs* fs, uint32_t offset, uint32_t parent, const char* path, 
         return ctr_fail(fs->r, SNX_CTR_EXTRACT_LIMIT, "RomFS exceeds depth/path limit");
     unsigned char* dir = entry(fs, offset, true);
     if (!dir) return false;
-    uint32_t parent_offset = ctr_le32(dir), child = ctr_le32(dir + 8), file = ctr_le32(dir + 12);
+    uint32_t parent_offset = snx_ld_le32(dir), child = snx_ld_le32(dir + 8), file = snx_ld_le32(dir + 12);
     if ((offset && parent_offset != parent) || (!offset && parent_offset != 0 && parent_offset != NONE))
         return ctr_fail(fs->r, SNX_CTR_EXTRACT_FORMAT, "RomFS parent link mismatch");
-    *next = ctr_le32(dir + 4);
-    if (!offset && (ctr_le32(dir + 20) || *next != NONE))
+    *next = snx_ld_le32(dir + 4);
+    if (!offset && (snx_ld_le32(dir + 20) || *next != NONE))
         return ctr_fail(fs->r, SNX_CTR_EXTRACT_FORMAT, "invalid RomFS root");
     /* a check that writes nothing refuses two entries of a folder by one name, as creating the second would */
     char** names = NULL;
@@ -115,11 +115,11 @@ static bool walk(RomFs* fs, uint32_t offset, uint32_t parent, const char* path, 
             ok = false;
             break;
         }
-        if (ctr_le32(f) != offset || !utf8_name(f + 32, ctr_le32(f + 28), name)) {
+        if (snx_ld_le32(f) != offset || !utf8_name(f + 32, snx_ld_le32(f + 28), name)) {
             ok = ctr_fail(fs->r, SNX_CTR_EXTRACT_FORMAT, "invalid RomFS file parent/name");
             break;
         }
-        uint64_t at = ctr_le64(f + 8), size = ctr_le64(f + 16);
+        uint64_t at = snx_ld_le64(f + 8), size = snx_ld_le64(f + 16);
         if (!ctr_fits(fs->data.size, at, size)) {
             ok = ctr_fail(fs->r, SNX_CTR_EXTRACT_FORMAT, "RomFS file data exceeds section");
             break;
@@ -128,7 +128,7 @@ static bool walk(RomFs* fs, uint32_t offset, uint32_t parent, const char* path, 
         ok = fs->write ? ctr_copy(fs->r, (CtrSpan){fs->data.offset + at, size}, destination, NULL)
                        : unique(fs, &names, &count, name);
         free(destination);
-        file = ctr_le32(f + 4);
+        file = snx_ld_le32(f + 4);
     }
     while (ok && child != NONE) {
         if ((child & 3) || child >= fs->dir_size || fs->dir_marks[child / 4] != 1) {
@@ -137,7 +137,7 @@ static bool walk(RomFs* fs, uint32_t offset, uint32_t parent, const char* path, 
         }
         unsigned char* c = fs->dirs + child;
         char name[1024];
-        if (!utf8_name(c + 24, ctr_le32(c + 20), name)) {
+        if (!utf8_name(c + 24, snx_ld_le32(c + 20), name)) {
             ok = ctr_fail(fs->r, SNX_CTR_EXTRACT_FORMAT, "unsafe RomFS directory name");
             break;
         }
@@ -154,25 +154,26 @@ static bool extract(RomFs* fs, CtrSpan rom, const char* stage, CtrSpan* found) {
     CtrReader* r = fs->r;
     unsigned char ivfc[0x60], header[0x28];
     if (!ctr_read(r, rom, 0, ivfc, sizeof ivfc)) return false;
-    if (memcmp(ivfc, "IVFC", 4) || ctr_le32(ivfc + 4) != 0x10000)
+    if (memcmp(ivfc, "IVFC", 4) || snx_ld_le32(ivfc + 4) != 0x10000)
         return ctr_fail(r, SNX_CTR_EXTRACT_UNSUPPORTED, "unsupported RomFS IVFC format");
-    uint32_t master = ctr_le32(ivfc + 8), shift = ctr_le32(ivfc + 0x4c);
+    uint32_t master = snx_ld_le32(ivfc + 8), shift = snx_ld_le32(ivfc + 0x4c);
     if (!master || (master & 31) || master > CTR_METADATA_LIMIT || shift < 9 || shift > 20)
         return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "invalid RomFS IVFC geometry");
     uint64_t block = 1ull << shift;
     uint64_t start = (0x60 + (uint64_t)master + block - 1) & ~(block - 1);
-    uint64_t size = ctr_le64(ivfc + 0x44);
+    uint64_t size = snx_ld_le64(ivfc + 0x44);
     if (!size || !ctr_fits(rom.size, start, size))
         return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "RomFS level 3 exceeds section");
     CtrSpan level3 = {rom.offset + start, size};
     if (!ctr_read(r, level3, 0, header, sizeof header)) return false;
-    if (ctr_le32(header) != sizeof header) return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "invalid RomFS level 3 header");
-    uint32_t data = ctr_le32(header + 0x24);
+    if (snx_ld_le32(header) != sizeof header)
+        return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "invalid RomFS level 3 header");
+    uint32_t data = snx_ld_le32(header + 0x24);
     if (data < sizeof header || data > level3.size)
         return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "invalid RomFS data offset");
     CtrSpan tables[4];
     for (size_t i = 0; i < 4; ++i) {
-        tables[i] = (CtrSpan){ctr_le32(header + 4 + i * 8), ctr_le32(header + 8 + i * 8)};
+        tables[i] = (CtrSpan){snx_ld_le32(header + 4 + i * 8), snx_ld_le32(header + 8 + i * 8)};
         if ((tables[i].offset & 3) || (tables[i].size & 3) || (tables[i].size && tables[i].offset < sizeof header) ||
             !ctr_fits(data, tables[i].offset, tables[i].size))
             return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "invalid RomFS metadata table range");

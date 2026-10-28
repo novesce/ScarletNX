@@ -112,6 +112,24 @@ int fatal_wrap(const char* text, int cols, char (*rows)[FATAL_ROW], int max) {
     return count;
 }
 
+int fatal_cut(const char* text, int cols, char (*rows)[FATAL_ROW], int max) {
+    const char *s, *end;
+    int total = 0, skip, row, k;
+    if (cols < 1) cols = 1;
+    for (s = text; *s; ++total)
+        for (k = 0; *s && k < cols; ++k) s += step(s);
+    skip = total > max ? total - max : 0;
+    for (s = text, row = 0; *s; ++row, s = end) {
+        size_t n;
+        for (end = s, k = 0; *end && k < cols; ++k) end += step(end);
+        if (row < skip) continue;
+        n = (size_t)(end - s) < FATAL_ROW ? (size_t)(end - s) : FATAL_ROW - 1;
+        memcpy(rows[row - skip], s, n);
+        rows[row - skip][n] = 0;
+    }
+    return total - skip;
+}
+
 void fatal_cp437(const char* text, char* out, size_t size) {
     size_t n = 0;
     while (*text && n + 1 < size) {

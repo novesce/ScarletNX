@@ -766,6 +766,21 @@ static u32 attr_bytes(u32 size) {
     }
     return 4; /* 0x0A, 0x0F, 0x12, 0x30, 0x31 */
 }
+/* the bytes of a component of a vertex attribute of that size, which Vulkan fetches it only from multiples of: a packed
+   format's word as one */
+static u32 attr_component_bytes(u32 size) {
+    switch (size) {
+        case 0x03:
+        case 0x05:
+        case 0x0F:
+        case 0x1B: return 2;
+        case 0x0A:
+        case 0x13:
+        case 0x18:
+        case 0x1D: return 1;
+    }
+    return 4;
+}
 
 /* ------------------------------------------------------------ resources of a draw */
 /* the word at byte off of stage's constant buffer bank, as ds binds it: an inline block's, or guest memory's (0 for
@@ -1638,16 +1653,17 @@ static VkDescriptorSet desc_set_cached(VkDescriptorSetLayout layout, DescWrites*
     return set;
 }
 static VkDescriptorSet stage_set_(const DsState* ds, int stage, VkSh* s, Surf** rt, Surf* zt, u32 n, int* zt_ro,
-                                  u32* fb, TexRes* res, const VkDrawStorage* draw, DrawImages* images);
+                                  u32* fb, u64* scaled, TexRes* res, const VkDrawStorage* draw, DrawImages* images);
+/* scaled: a bit for each texture slot bound to a scaled render target (scaled_coords in spirv_translate.c) */
 static VkDescriptorSet stage_set(const DsState* ds, int stage, VkSh* s, Surf** rt, Surf* zt, u32 n, int* zt_ro, u32* fb,
-                                 TexRes* res, const VkDrawStorage* draw, DrawImages* images) {
+                                 u64* scaled, TexRes* res, const VkDrawStorage* draw, DrawImages* images) {
     SNX_ZONE(z, "stage set");
-    VkDescriptorSet set = stage_set_(ds, stage, s, rt, zt, n, zt_ro, fb, res, draw, images);
+    VkDescriptorSet set = stage_set_(ds, stage, s, rt, zt, n, zt_ro, fb, scaled, res, draw, images);
     SNX_ZONE_END(z);
     return set;
 }
 static VkDescriptorSet stage_set_(const DsState* ds, int stage, VkSh* s, Surf** rt, Surf* zt, u32 n, int* zt_ro,
-                                  u32* fb, TexRes* res, const VkDrawStorage* draw, DrawImages* images) {
+                                  u32* fb, u64* scaled, TexRes* res, const VkDrawStorage* draw, DrawImages* images) {
     VkDescriptorSetLayout layout = g_vk_dslayout[s->indexed][shader_vk_set(stage)];
     VkDescriptorSet set = VK_NULL_HANDLE; /* the writes take it once their contents are known (desc_set_cached) */
     DescWrites d;
@@ -1758,6 +1774,8 @@ static VkDescriptorSet stage_set_(const DsState* ds, int stage, VkSh* s, Surf** 
         } else
             view = vk_tex_bind_view(t, want, x->tic, x->tsc, num);
         const Surf* sampled = view ? t : NULL; /* the texture whose own view is bound, for the sampler */
+        if (scaled && sampled && (sampled->sw != sampled->w || sampled->sh != sampled->h))
+            *scaled |= 1ull << i;
         if (view && depth_ro) {
             *zt_ro = 1; /* render_begin moves it to the read-only layout */
             layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
@@ -1971,9 +1989,11 @@ typedef struct {
 } DrawShaders;
 /* the vertex bindings a pipeline key describes, for finding their buffers each draw: binding b reads guest stream
    key[b] & 31 from its base offset key[b] >> 5 on, with pad bytes past its last stride when still inside the stream's
-   limit, or the constants of the attributes without data when key[b] is ~0u */
+   limit, or the constants of the attributes without data when key[b] is ~0u. When the guest's stride isn't a multiple
+   of its attributes' components (guest_stride[b], else 0), the binding reads a copy with the vertices stride[b] apart,
+   rounded up to one (copy_restrided) */
 typedef struct {
-    u32 key[33], pad[33];
+    u32 key[33], pad[33], guest_stride[33];
     VkDeviceSize stride[33];
     u32 used;  /* the streams whose limits the bindings were planned with */
     u32 empty; /* attributes whose relative offsets are outside their guest bindings */
@@ -2206,6 +2226,7 @@ static int draw_key(const DsState* ds, const DrawShaders* sh, const VkSh* fs, Su
         return 0;
     }
     int cbind = -1, zbind = -1, over = 0;
+    u32 align[33] = {0}; /* each binding's largest attribute component */
     pl->empty = attributes_empty(vb, vf, vs->si.in_mask);
     for (u32 i = 0; i < nloc && !over; i++) {
         if (!(vs->si.in_mask & (1u << i))) continue;
@@ -2281,10 +2302,20 @@ static int draw_key(const DsState* ds, const DrawShaders* sh, const VkSh* fs, Su
         k->attr[k->nattr].format = fmt;
         k->attr[k->nattr].offset = off - base;
         k->nattr++;
+        if (attr_component_bytes(size) > align[b]) align[b] = attr_component_bytes(size);
     }
     if (over) {
         LOG_LIMIT(1, "vulkan: a draw needs more vertex bindings than the %u this GPU has (draw skipped)\n", maxbind);
         return 0;
+    }
+    /* Maxwell reads an attribute at any byte, Vulkan only at a multiple of its components' size, which a stride like
+       one game's 69 for 4-byte floats breaks every other vertex: RADV's fetches hung the GPU on them */
+    for (u32 b = 0; b < k->nbind; b++) {
+        u32 st = (u32)pl->stride[b], a = align[b];
+        if (!st || a < 2 || !(st % a)) continue;
+        pl->guest_stride[b] = st;
+        pl->stride[b] = (st + a - 1) / a * a;
+        if (!g_vk.has_dynamic_stride) k->bind[b].stride = (u32)pl->stride[b];
     }
 
     /* attachments and blending */
@@ -2328,6 +2359,28 @@ static void draw_indices_prefetch(const DsIndex* ix, int indexed, u32 first, u32
     if (indexed != 1 && indexed != 2) return;
     if (!step) __builtin_prefetch(&g_top_memo[top_memo_slot(a)]);
     vk_buf_prefetch(a, (u64)count * isz, step);
+}
+/* the len bytes of a vertex stream at gva, its vertices gstride apart, copied to staging with them stride apart
+   instead: each vertex's stride bytes, so an attribute reaching past the guest's stride still reads the next vertex's
+   first bytes. The stream lands first if the GPU wrote it */
+static int copy_restrided(u64 gva, u64 len, u32 gstride, u32 stride, VkBuffer* buf, VkDeviceSize* off,
+                          VkDeviceSize* size) {
+    u64 nv = (len + gstride - 1) / gstride;
+    u8* src = malloc((size_t)len);
+    u8* dst = src ? vk_stage_upload(nv * stride, vk_stage_align(), buf, off) : NULL;
+    if (!dst) {
+        free(src);
+        return 0;
+    }
+    gmem_read(gva, src, len);
+    for (u64 i = 0; i < nv; i++) {
+        u64 at = i * gstride, n = len - at < stride ? len - at : stride;
+        memcpy(dst + i * stride, src + at, (size_t)n);
+        if (n < stride) memset(dst + i * stride + n, 0, (size_t)(stride - n));
+    }
+    free(src);
+    *size = nv * stride;
+    return 1;
 }
 /* The last vertex a draw reads, for its streams' ranges, or ~0 when that isn't known: indices outside contiguous guest
    memory, or under results the GPU hasn't landed. A stream's limit is often the end of a ring the game streams
@@ -2735,8 +2788,9 @@ retry:
            that end at different vertices then share a few ranges, not one each */
         u64 limit = stream_len(&ds->vbuf, sbuf), len = limit;
         u64 last = k->bind[v].divisor ? last_instance : last_vertex;
-        if (pl->stride[v] && last < len / pl->stride[v]) {
-            u64 need = (last + 1) * pl->stride[v], up = 4096;
+        u64 gstride = pl->guest_stride[v] ? pl->guest_stride[v] : pl->stride[v];
+        if (gstride && last < len / gstride) {
+            u64 need = (last + 1) * gstride, up = 4096;
             while (up < need) up <<= 1;
             if (up < len) len = up;
         }
@@ -2763,6 +2817,15 @@ retry:
     for (u32 q = 0; q < nvq; q++) vk_buf_prefetch(vq[q].gva, vq[q].len, 0);
     for (u32 q = 0; q < nvq; q++) vk_buf_prefetch(vq[q].gva, vq[q].len, 1);
     for (u32 q = 0; q < nvq; q++) {
+        u32 b = vq[q].b;
+        if (pl->guest_stride[b]) {
+            if (!copy_restrided(vq[q].gva + vq[q].base, vq[q].len - vq[q].base, pl->guest_stride[b], (u32)pl->stride[b],
+                                &vbuf[b], &voff[b], &vsize[b])) {
+                g_vk_skipped++;
+                return;
+            }
+            continue;
+        }
         /* vertex formats have components of up to 4 bytes, which each attribute's address must be a multiple of */
         if (!vk_buf_get_input(vq[q].gva, vq[q].len, 4, &vbuf[vq[q].b], &voff[vq[q].b])) {
             g_vk_skipped++;
@@ -2798,9 +2861,11 @@ retry:
     }
     int zt_ro = 0;
     u32 fb = 0;
+    u64 scaled = 0;
     DrawImages images = {0};
-    VkDescriptorSet vset = stage_set(ds, 0, vs, rt, zt, n, &zt_ro, NULL, NULL, &storage, &images);
-    VkDescriptorSet fset = fs ? stage_set(ds, 4, fs, rt, zt, n, &zt_ro, &fb, fres, &storage, &images) : VK_NULL_HANDLE;
+    VkDescriptorSet vset = stage_set(ds, 0, vs, rt, zt, n, &zt_ro, NULL, NULL, NULL, &storage, &images);
+    VkDescriptorSet fset =
+        fs ? stage_set(ds, 4, fs, rt, zt, n, &zt_ro, &fb, &scaled, fres, &storage, &images) : VK_NULL_HANDLE;
     /* the sets of the stages between, at their stage's index (shader_vk_set) */
     between[0] = tcs;
     between[1] = tes;
@@ -2814,7 +2879,7 @@ retry:
             bset_ok = 0;
             break;
         }
-        bset[b] = stage_set(ds, b + 1, between[b], rt, zt, n, &zt_ro, NULL, NULL, &storage, NULL);
+        bset[b] = stage_set(ds, b + 1, between[b], rt, zt, n, &zt_ro, NULL, NULL, NULL, &storage, NULL);
         if (!bset[b]) bset_ok = 0;
     }
     if (!vset || (fs && !fset) || !bset_ok) {
@@ -3123,9 +3188,11 @@ retry:
         DYN(front, front, rec_CmdSetFrontFace(cb, front));
         DYN(topo, topo, rec_CmdSetPrimitiveTopology(cb, topo));
         DYN(restart, prim_restart, rec_CmdSetPrimitiveRestartEnable(cb, prim_restart));
-        /* RASTERIZE_ENABLE (0xDF) off discards the primitives once captured: only a capture draws without them here,
-           as the register's reset value isn't known to be on (1 off, 2 on: 0 is a new command buffer's) */
-        u32 discard = xfb_on && ds->dyn.discard ? 2 : 1;
+        /* RASTERIZE_ENABLE (0xDF) off discards the primitives, after a capture or the vertex program's stores. One game
+           draws points whose vertex program only stores to memory and writes no position: rasterized, they all lit
+           the pixel in the middle of the screen. A channel starts with it on (reset_3d, as Eden's register defaults)
+           (1 off, 2 on: 0 is a new command buffer's) */
+        u32 discard = ds->dyn.discard ? 2 : 1;
         DYN(discard, discard, rec_CmdSetRasterizerDiscardEnable(cb, discard == 2));
     }
     {
@@ -3178,8 +3245,9 @@ retry:
     }
     /* push constants: the depth mode (snx_vp.y) for the vertex stage, the alpha test (on, function, reference) and
        the point sprite's T flip for the fragment stage. PointCoord's T is 0 at row 0, which is a lower-left window's
-       bottom: it flips when the sprite's origin (1 the top) is the other side */
-    float pc[8] = {0, ds->dyn.depth_mode ? 0.0f : 1.0f, 0, 0};
+       bottom: it flips when the sprite's origin (1 the top) is the other side. Then the fragment stage's scaled
+       textures (stage_set) */
+    float pc[12] = {0, ds->dyn.depth_mode ? 0.0f : 1.0f, 0, 0};
     /* the instance ID: InstanceIndex less the base instance pushed (depth_word, the 3D engine's base instance), or
        with draw parameters less BaseInstance plus what the draw's first instance adds to the base instance: the
        3D engine's instanced draws continue from an earlier draw's instances, and an indirect draw's base instance is
@@ -3192,7 +3260,9 @@ retry:
     pc[5] = (float)ds->dyn.alpha_func;
     memcpy(&pc[6], &ds->dyn.alpha_ref, 4);
     pc[7] = ds->dyn.sprite_origin == ((ds->dyn.window_origin & DS_ORIGIN_LOWER_LEFT) != 0) ? 1.0f : 0.0f;
-    rec_CmdPushConstants(cb, g_vk_playout, VK_PUSH_STAGES, 0, 32, pc);
+    u32 scaled_words[2] = {(u32)scaled, (u32)(scaled >> 32)};
+    memcpy(&pc[8], scaled_words, sizeof scaled_words);
+    rec_CmdPushConstants(cb, g_vk_playout, VK_PUSH_STAGES, 0, sizeof pc, pc);
 
     vk_query_draw(cb, ds->owner, ds->dyn.msaa_mode); /* counted by the channel's samples-passed counter when it runs */
     VkBuffer counters[4] = {g_xfb.buf, g_xfb.buf, g_xfb.buf, g_xfb.buf};

@@ -292,6 +292,23 @@ int main(void) {
                                      "0 Japanese, 1 English", 0, 0, 0, 0, NULL}};
         gui_editor_form(&e, form, 2, &values, NULL);
         assert(gui_editor_rows(&e) == 2 && gui_editor_key_of(&e, 0) == &form[0] && !gui_editor_key_of(&e, 2));
+        { /* a whole number's range as its digits, however large, in what its dialog says it takes and in a refusal */
+            char said[160], big[16] = "";
+            const GuiThemeKey limit[] = {
+                {"Performance", "map_limit_mb", GUI_KEY_TEXT, 0, sizeof big, NULL, 0, "", 1, 1, 0, 1048576, "0"}};
+            GuiEditor m = {0};
+            gui_editor_form(&m, limit, 1, big, NULL);
+            gui_editor_takes(&m, said, sizeof said);
+            assert(!strcmp(said, "A whole number from 0 to 1048576; empty, the default 0"));
+            assert(gui_editor_key(&m, GUI_SELECT) == GUI_EDITOR_STAY && m.typing);
+            gui_editor_type(&m, "2000000");
+            gui_editor_key(&m, GUI_SELECT);
+            assert(m.typing && !big[0] && !strcmp(m.note, "2000000 is not a whole number from 0 to 1048576"));
+            gui_editor_key(&m, GUI_CANCEL);
+            gui_editor_key(&m, GUI_RIGHT);
+            assert(!strcmp(m.note, "Select to type it: a whole number from 0 to 1048576"));
+            gui_editor_stop(&m);
+        }
         gui_editor_label(&e, 0, label, sizeof label);
         assert(!strncmp(label, "Display", 7) && strstr(label, "fullscreen"));
         gui_editor_label(&e, 1, label, sizeof label);

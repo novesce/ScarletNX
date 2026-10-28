@@ -5,14 +5,11 @@
 #if !defined(_WIN32)
 #define _POSIX_C_SOURCE 200809L /* snprintf */
 #include "common/cpu/recompiler/llvm/elf_object.h"
+#include "common/cpu/recompiler/llvm/link_internal.h"
+#include "common/utilities/bits.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-static int fail(char* error, size_t error_size, const char* format, const char* a, const char* b) {
-    snprintf(error, error_size, format, a, b);
-    return -1;
-}
 
 const char* snx_elf_symbol_name(const SnxElfObject* o, const Elf64_Sym* s) {
     if (ELF64_ST_TYPE(s->st_info) == STT_SECTION) return "<section>";
@@ -34,9 +31,7 @@ unsigned char snx_elf_host_data(void) {
 
 int snx_elf_parse(SnxElfObject* o, const SnxLinkInput* input, unsigned* machine, unsigned* abi, char* error,
                   size_t error_size) {
-    size_t i;
-    unsigned object_abi;
-    memset(o, 0, sizeof(*o));
+    *o = (SnxElfObject){0};
     o->input = input;
     o->eh = (const Elf64_Ehdr*)input->data;
     if (input->size < sizeof(Elf64_Ehdr) || memcmp(o->eh->e_ident, ELFMAG, SELFMAG) ||
@@ -46,43 +41,48 @@ int snx_elf_parse(SnxElfObject* o, const SnxLinkInput* input, unsigned* machine,
          o->eh->e_machine != EM_RISCV && o->eh->e_machine != EM_LOONGARCH) ||
         o->eh->e_shentsize != sizeof(Elf64_Shdr) ||
         o->eh->e_shoff + (uint64_t)o->eh->e_shnum * sizeof(Elf64_Shdr) > input->size)
-        return fail(error, error_size,
-                    "%s: not an x86-64, AArch64, PowerPC64, RISC-V or LoongArch ELF relocatable object in this host's "
-                    "byte order%s",
-                    input->name, "");
-    object_abi = o->eh->e_machine == EM_PPC64                                       ? snx_elf_ppc_abi(o->eh->e_flags)
-                 : o->eh->e_machine == EM_RISCV || o->eh->e_machine == EM_LOONGARCH ? o->eh->e_flags
-                                                                                    : 0;
+        return snx_link_fail(
+            error, error_size,
+            "%s: not an x86-64, AArch64, PowerPC64, RISC-V or LoongArch ELF relocatable object in this host's "
+            "byte order%s",
+            input->name, "");
+    unsigned object_abi = o->eh->e_machine == EM_PPC64 ? snx_elf_ppc_abi(o->eh->e_flags)
+                          : o->eh->e_machine == EM_RISCV || o->eh->e_machine == EM_LOONGARCH
+                              ? o->eh->e_flags
+                              : 0;
     if (!*machine) {
         *machine = o->eh->e_machine;
         *abi = object_abi;
     }
-    if (o->eh->e_machine != *machine) return fail(error, error_size, "%s: another machine's object%s", input->name, "");
+    if (o->eh->e_machine != *machine)
+        return snx_link_fail(error, error_size, "%s: another machine's object%s", input->name, "");
     if (object_abi != *abi)
-        return fail(error, error_size, "%s: another ABI's object (%s)", input->name,
-                    *machine == EM_PPC64 ? "ELFv1 and ELFv2" : "e_flags differ: the float ABI, or compressed code");
+        return snx_link_fail(error, error_size, "%s: another ABI's object (%s)", input->name,
+                             *machine == EM_PPC64 ? "ELFv1 and ELFv2"
+                                                  : "e_flags differ: the float ABI, or compressed code");
     o->sh = (const Elf64_Shdr*)(input->data + o->eh->e_shoff);
     /* one block, the 8-byte arrays first */
     o->address = (uint64_t*)calloc(o->eh->e_shnum, 2 * sizeof(uint64_t) + sizeof(int));
-    if (!o->address) return fail(error, error_size, "out of memory%s%s", "", "");
+    if (!o->address) return snx_link_fail(error, error_size, "out of memory%s%s", "", "");
     o->position = o->address + o->eh->e_shnum;
     o->kind = (int*)(o->position + o->eh->e_shnum);
-    for (i = 0; i < o->eh->e_shnum; ++i) {
+    for (size_t i = 0; i < o->eh->e_shnum; ++i) {
         const Elf64_Shdr* s = &o->sh[i];
         o->kind[i] = -1;
         if (s->sh_type != SHT_NOBITS && s->sh_offset + s->sh_size > input->size)
-            return fail(error, error_size, "%s: truncated section%s", input->name, "");
+            return snx_link_fail(error, error_size, "%s: truncated section%s", input->name, "");
         if (s->sh_type == SHT_SYMTAB) {
             o->syms = (const Elf64_Sym*)(input->data + s->sh_offset);
             o->nsyms = s->sh_size / sizeof(Elf64_Sym);
-            if (s->sh_link >= o->eh->e_shnum) return fail(error, error_size, "%s: bad symbol table%s", input->name, "");
+            if (s->sh_link >= o->eh->e_shnum)
+                return snx_link_fail(error, error_size, "%s: bad symbol table%s", input->name, "");
             o->strtab = (const char*)input->data + o->sh[s->sh_link].sh_offset;
         }
         if (!(s->sh_flags & SHF_ALLOC)) continue;
         if (s->sh_flags & SHF_TLS)
-            return fail(error, error_size, "%s: thread-local data is not supported%s", input->name, "");
+            return snx_link_fail(error, error_size, "%s: thread-local data is not supported%s", input->name, "");
         if (s->sh_type == SHT_INIT_ARRAY || s->sh_type == SHT_FINI_ARRAY || s->sh_type == SHT_PREINIT_ARRAY)
-            return fail(error, error_size, "%s: constructors are not supported%s", input->name, "");
+            return snx_link_fail(error, error_size, "%s: constructors are not supported%s", input->name, "");
         if (s->sh_type == SHT_NOBITS)
             o->kind[i] = SNX_ELF_BSS;
         else if (s->sh_type == SHT_PROGBITS || s->sh_type == SHT_X86_64_UNWIND)
@@ -92,9 +92,9 @@ int snx_elf_parse(SnxElfObject* o, const SnxLinkInput* input, unsigned* machine,
         else if (s->sh_type == SHT_NOTE || s->sh_type == SHT_GROUP)
             continue;
         else
-            return fail(error, error_size, "%s: unsupported allocated section type%s", input->name, "");
+            return snx_link_fail(error, error_size, "%s: unsupported allocated section type%s", input->name, "");
     }
-    if (!o->syms) return fail(error, error_size, "%s: no symbol table%s", input->name, "");
+    if (!o->syms) return snx_link_fail(error, error_size, "%s: no symbol table%s", input->name, "");
     return 0;
 }
 
@@ -106,26 +106,26 @@ void snx_elf_free(SnxElfObject* o) {
 
 int snx_elf_collect_globals(const SnxElfObject* objs, size_t count, const SnxLinkNames* loaded, SnxLinkNames* globals,
                             char* error, size_t error_size) {
-    size_t i, j, found;
-    for (i = 0; i < count; ++i) {
+    size_t found;
+    for (size_t i = 0; i < count; ++i) {
         const SnxElfObject* o = &objs[i];
-        for (j = 1; j < o->nsyms; ++j) {
+        for (size_t j = 1; j < o->nsyms; ++j) {
             const Elf64_Sym* s = &o->syms[j];
             int bind = ELF64_ST_BIND(s->st_info);
-            const char* name;
             if ((bind != STB_GLOBAL && bind != STB_WEAK) || s->st_shndx == SHN_UNDEF) continue;
-            name = snx_elf_symbol_name(o, s);
-            if (s->st_shndx == SHN_COMMON) return fail(error, error_size, "%s: common symbol %s", o->input->name, name);
+            const char* name = snx_elf_symbol_name(o, s);
+            if (s->st_shndx == SHN_COMMON)
+                return snx_link_fail(error, error_size, "%s: common symbol %s", o->input->name, name);
             if (loaded && snx_link_find(loaded, name, &found)) {
                 if (bind == STB_WEAK) continue;
-                return fail(error, error_size, "duplicate symbol %s (%s defines one already loaded)", name,
-                            o->input->name);
+                return snx_link_fail(error, error_size, "duplicate symbol %s (%s defines one already loaded)", name,
+                                     o->input->name);
             }
             if (snx_link_find(globals, name, &found)) {
                 const SnxElfObject* other = &objs[found >> 32];
                 if (bind == STB_WEAK) continue;
                 if (ELF64_ST_BIND(other->syms[found & 0xFFFFFFFFu].st_info) != STB_WEAK)
-                    return fail(error, error_size, "duplicate symbol %s (%s)", name, o->input->name);
+                    return snx_link_fail(error, error_size, "duplicate symbol %s (%s)", name, o->input->name);
             }
             snx_link_insert(globals, name, (i << 32) | j);
         }
@@ -136,10 +136,9 @@ int snx_elf_collect_globals(const SnxElfObject* objs, size_t count, const SnxLin
 int snx_elf_definition(const SnxElfObject* objs, const SnxLinkNames* globals, size_t object, size_t index,
                        size_t* def_object, size_t* def_index, char* error, size_t error_size) {
     const SnxElfObject* o = &objs[object];
-    const Elf64_Sym* s;
     size_t found;
-    if (index >= o->nsyms) return fail(error, error_size, "%s: bad symbol index%s", o->input->name, "");
-    s = &o->syms[index];
+    if (index >= o->nsyms) return snx_link_fail(error, error_size, "%s: bad symbol index%s", o->input->name, "");
+    const Elf64_Sym* s = &o->syms[index];
     if (s->st_shndx != SHN_UNDEF) {
         *def_object = object;
         *def_index = index;
@@ -199,8 +198,7 @@ int snx_elf_riscv_lo12(unsigned machine, unsigned type) {
 }
 
 long snx_elf_riscv_hi20(const Elf64_Rela* rela, size_t n, uint64_t offset) {
-    size_t k;
-    for (k = 0; k < n; ++k) {
+    for (size_t k = 0; k < n; ++k) {
         unsigned type = ELF64_R_TYPE(rela[k].r_info);
         if (rela[k].r_offset == offset && (type == SNX_RV_PCREL_HI20 || type == SNX_RV_GOT_HI20)) return (long)k;
     }
@@ -208,18 +206,17 @@ long snx_elf_riscv_hi20(const Elf64_Rela* rela, size_t n, uint64_t offset) {
 }
 
 void snx_elf_layout(SnxElfObject* objs, size_t count, uint64_t* kind_size, uint64_t* kind_align) {
-    size_t i, j, k;
-    for (k = 0; k < SNX_ELF_KINDS; ++k) {
+    for (size_t k = 0; k < SNX_ELF_KINDS; ++k) {
         kind_size[k] = 0;
         kind_align[k] = 1;
     }
-    for (k = 0; k < SNX_ELF_KINDS; ++k)
-        for (i = 0; i < count; ++i) {
+    for (size_t k = 0; k < SNX_ELF_KINDS; ++k)
+        for (size_t i = 0; i < count; ++i) {
             SnxElfObject* o = &objs[i];
-            for (j = 0; j < o->eh->e_shnum; ++j) {
+            for (size_t j = 0; j < o->eh->e_shnum; ++j) {
                 uint64_t align = o->sh[j].sh_addralign ? o->sh[j].sh_addralign : 1;
                 if (o->kind[j] != (int)k) continue;
-                kind_size[k] = (kind_size[k] + align - 1) / align * align;
+                kind_size[k] = snx_align_up(kind_size[k], align);
                 o->position[j] = kind_size[k];
                 kind_size[k] += o->sh[j].sh_size;
                 if (align > kind_align[k]) kind_align[k] = align;
@@ -234,9 +231,8 @@ void snx_elf_layout(SnxElfObject* objs, size_t count, uint64_t* kind_size, uint6
 
 uint64_t snx_elf_text_size(const SnxElfObject* objs, size_t count) {
     uint64_t size = 0;
-    size_t i, j;
-    for (i = 0; i < count; ++i)
-        for (j = 0; j < objs[i].eh->e_shnum; ++j)
+    for (size_t i = 0; i < count; ++i)
+        for (size_t j = 0; j < objs[i].eh->e_shnum; ++j)
             if (objs[i].kind[j] == SNX_ELF_TEXT) size += objs[i].sh[j].sh_size + objs[i].sh[j].sh_addralign;
     return size;
 }
@@ -244,35 +240,21 @@ uint64_t snx_elf_text_size(const SnxElfObject* objs, size_t count) {
 /* ---- AArch64 instruction fields. Everything in uint64_t: a negative displacement is its two's complement, which
    the masks cut to the field as the instruction wants it, with no signed shift or overflow on the way ---- */
 
-static uint32_t get32(const unsigned char* p) {
-    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
-}
-/* the instruction at p with value in its bits from shift, width wide */
-static void field(unsigned char* p, uint64_t value, unsigned shift, unsigned width) {
-    uint32_t mask = (uint32_t)((((uint64_t)1 << width) - 1) << shift);
-    snx_link_put32(p, (get32(p) & ~mask) | ((uint32_t)(value << shift) & mask));
-}
-/* ADR and ADRP's 21-bit immediate: its low two bits at 29, the rest at 5 */
-static void adr_field(unsigned char* p, uint64_t value) {
-    field(p, value & 3, 29, 2);
-    field(p, value >> 2, 5, 19);
-}
-static uint64_t page_of(uint64_t address) { return address & ~(uint64_t)0xFFF; }
 /* whether value, read as signed, fits a signed field of bits: [-2^(bits-1), 2^(bits-1)) moved up by 2^(bits-1) is
    [0, 2^bits) */
 static int fits(uint64_t value, unsigned bits) { return (value + ((uint64_t)1 << (bits - 1))) >> bits == 0; }
 /* ADRP's displacement from the page of P to the page of target, in pages: its 21 bits reach 4 GiB either way */
 static int adrp(unsigned char* p, uint64_t target, uint64_t P) {
-    uint64_t pages = page_of(target) - page_of(P);
+    uint64_t pages = snx_link_page_of(target) - snx_link_page_of(P);
     if (!fits(pages, 33)) return SNX_LINK_RANGE;
-    adr_field(p, pages >> 12);
+    snx_link_adr_field(p, pages >> 12);
     return 0;
 }
 /* a PC-relative branch's displacement, in instructions, into its field */
 static int branch(unsigned char* p, uint64_t displacement, unsigned bits, unsigned shift) {
     if (!fits(displacement, bits + 2)) return SNX_LINK_RANGE;
     if (displacement & 3) return SNX_LINK_MISALIGNED;
-    field(p, displacement >> 2, shift, bits);
+    snx_link_field(p, displacement >> 2, shift, bits);
     return 0;
 }
 
@@ -356,16 +338,16 @@ static int relocate_x86(unsigned char* p, unsigned type, uint64_t S, int64_t A, 
                         uint64_t slot) {
     switch (type) {
         case R_X86_64_NONE: return 0;
-        case R_X86_64_64: snx_link_put64(p, S + (uint64_t)A); return 0;
+        case R_X86_64_64: snx_st_le64(p, S + (uint64_t)A); return 0;
         case R_X86_64_PC32:
         case R_X86_64_PLT32: return snx_link_rel32(p, S + (uint64_t)A, P);
-        case R_X86_64_PC64: snx_link_put64(p, S + (uint64_t)A - P); return 0;
+        case R_X86_64_PC64: snx_st_le64(p, S + (uint64_t)A - P); return 0;
         case R_X86_64_GOTPCREL:
         case R_X86_64_GOTPCRELX:
         case R_X86_64_REX_GOTPCRELX: return snx_link_rel32(p, slot + (uint64_t)A, P);
-        case R_X86_64_GOTOFF64: snx_link_put64(p, S + (uint64_t)A - got); return 0;
+        case R_X86_64_GOTOFF64: snx_st_le64(p, S + (uint64_t)A - got); return 0;
         case R_X86_64_GOTPC32: return snx_link_rel32(p, got + (uint64_t)A, P);
-        case R_X86_64_GOTPC64: snx_link_put64(p, got + (uint64_t)A - P); return 0;
+        case R_X86_64_GOTPC64: snx_st_le64(p, got + (uint64_t)A - P); return 0;
         default: return SNX_LINK_UNSUPPORTED;
     }
 }
@@ -376,16 +358,18 @@ static int relocate_a64(unsigned char* p, unsigned type, uint64_t S, int64_t A, 
     unsigned scale;
     switch (type) {
         case SNX_A64_NONE: return 0;
-        case SNX_A64_ABS64: snx_link_put64(p, target); return 0;
-        case SNX_A64_PREL64: snx_link_put64(p, target - P); return 0;
+        case SNX_A64_ABS64: snx_st_le64(p, target); return 0;
+        case SNX_A64_PREL64: snx_st_le64(p, target - P); return 0;
         case SNX_A64_PREL32: return snx_link_rel32(p, target, P);
         case SNX_A64_ADR_PREL_LO21:
             if (!fits(target - P, 21)) return SNX_LINK_RANGE;
-            adr_field(p, target - P);
+            snx_link_adr_field(p, target - P);
             return 0;
         case SNX_A64_ADR_PREL_PG_HI21: return adrp(p, target, P);
-        case SNX_A64_ADR_PREL_PG_HI21_NC: adr_field(p, (page_of(target) - page_of(P)) >> 12); return 0;
-        case SNX_A64_ADD_ABS_LO12_NC: field(p, target & 0xFFF, 10, 12); return 0;
+        case SNX_A64_ADR_PREL_PG_HI21_NC:
+            snx_link_adr_field(p, (snx_link_page_of(target) - snx_link_page_of(P)) >> 12);
+            return 0;
+        case SNX_A64_ADD_ABS_LO12_NC: snx_link_field(p, target & 0xFFF, 10, 12); return 0;
         case SNX_A64_LDST8_ABS_LO12_NC:
         case SNX_A64_LDST16_ABS_LO12_NC:
         case SNX_A64_LDST32_ABS_LO12_NC:
@@ -398,12 +382,12 @@ static int relocate_a64(unsigned char* p, unsigned type, uint64_t S, int64_t A, 
                     : type == SNX_A64_LDST64_ABS_LO12_NC ? 3
                                                          : 4;
             if (target & (((uint64_t)1 << scale) - 1)) return SNX_LINK_MISALIGNED;
-            field(p, (target & 0xFFF) >> scale, 10, 12);
+            snx_link_field(p, (target & 0xFFF) >> scale, 10, 12);
             return 0;
         case SNX_A64_ADR_GOT_PAGE: return adrp(p, slot + (uint64_t)A, P);
         case SNX_A64_LD64_GOT_LO12_NC: /* LDR Xt: the slot's offset in its page, in 8-byte units */
             if (slot & 7) return SNX_LINK_MISALIGNED;
-            field(p, (slot & 0xFFF) >> 3, 10, 12);
+            snx_link_field(p, (slot & 0xFFF) >> 3, 10, 12);
             return 0;
         case SNX_A64_CALL26:
         case SNX_A64_JUMP26: return branch(p, target - P, 26, 0);
@@ -503,13 +487,11 @@ static int relocate_ppc(unsigned char* p, unsigned type, uint64_t S, int64_t A, 
 
 static uint64_t get_le(const unsigned char* p, size_t bytes) {
     uint64_t v = 0;
-    size_t i;
-    for (i = 0; i < bytes; ++i) v |= (uint64_t)p[i] << (8 * i);
+    for (size_t i = 0; i < bytes; ++i) v |= (uint64_t)p[i] << (8 * i);
     return v;
 }
 static void put_le(unsigned char* p, size_t bytes, uint64_t v) {
-    size_t i;
-    for (i = 0; i < bytes; ++i) p[i] = (unsigned char)(v >> (8 * i));
+    for (size_t i = 0; i < bytes; ++i) p[i] = (unsigned char)(v >> (8 * i));
 }
 /* op 1 adds value, -1 takes it away, 0 writes it */
 static void word(unsigned char* p, size_t bytes, int op, uint64_t value) {
@@ -529,50 +511,45 @@ static void word6(unsigned char* p, int op, uint64_t value) {
 static uint64_t rv_hi20(uint64_t displacement) { return (displacement + 0x800) >> 12; }
 /* whether an AUIPC pair reaches displacement: 32 bits less the 0x800 the rounding takes */
 static int rv_pair_fits(uint64_t displacement) { return fits(displacement + 0x800, 32); }
-static void rv_u(unsigned char* p, uint64_t hi20) { field(p, hi20, 12, 20); }
-static void rv_i(unsigned char* p, uint64_t lo12) { field(p, lo12, 20, 12); }
+static void rv_u(unsigned char* p, uint64_t hi20) { snx_link_field(p, hi20, 12, 20); }
+static void rv_i(unsigned char* p, uint64_t lo12) { snx_link_field(p, lo12, 20, 12); }
 static void rv_s(unsigned char* p, uint64_t lo12) {
-    field(p, lo12 >> 5, 25, 7);
-    field(p, lo12, 7, 5);
+    snx_link_field(p, lo12 >> 5, 25, 7);
+    snx_link_field(p, lo12, 7, 5);
 }
 /* B-type, BEQ and the like: imm[12|10:5] at 25, imm[4:1|11] at 7, 4 KiB either way */
 static int rv_b(unsigned char* p, uint64_t d) {
     if (!fits(d, 13)) return SNX_LINK_RANGE;
     if (d & 1) return SNX_LINK_MISALIGNED;
-    field(p, (d >> 12 & 1) << 6 | (d >> 5 & 0x3F), 25, 7);
-    field(p, (d >> 1 & 0xF) << 1 | (d >> 11 & 1), 7, 5);
+    snx_link_field(p, (d >> 12 & 1) << 6 | (d >> 5 & 0x3F), 25, 7);
+    snx_link_field(p, (d >> 1 & 0xF) << 1 | (d >> 11 & 1), 7, 5);
     return 0;
 }
 /* J-type, JAL: imm[20|10:1|11|19:12] at 12, 1 MiB either way */
 static int rv_j(unsigned char* p, uint64_t d) {
     if (!fits(d, 21)) return SNX_LINK_RANGE;
     if (d & 1) return SNX_LINK_MISALIGNED;
-    field(p, (d >> 20 & 1) << 19 | (d >> 1 & 0x3FF) << 9 | (d >> 11 & 1) << 8 | (d >> 12 & 0xFF), 12, 20);
+    snx_link_field(p, (d >> 20 & 1) << 19 | (d >> 1 & 0x3FF) << 9 | (d >> 11 & 1) << 8 | (d >> 12 & 0xFF), 12, 20);
     return 0;
-}
-static uint16_t le16(const unsigned char* p) { return (uint16_t)(p[0] | p[1] << 8); }
-static void put16(unsigned char* p, uint16_t v) {
-    p[0] = (unsigned char)v;
-    p[1] = (unsigned char)(v >> 8);
 }
 /* CB-type, C.BEQZ and C.BNEZ: offset[8|4:3] at 10, [7:6|2:1|5] at 2, 256 bytes either way */
 static int rv_cb(unsigned char* p, uint64_t d) {
-    uint16_t insn = le16(p) & 0xE383u;
+    uint16_t insn = snx_ld_le16(p) & 0xE383u;
     if (!fits(d, 9)) return SNX_LINK_RANGE;
     if (d & 1) return SNX_LINK_MISALIGNED;
     insn |=
         (uint16_t)((d >> 8 & 1) << 12 | (d >> 3 & 3) << 10 | (d >> 6 & 3) << 5 | (d >> 1 & 3) << 3 | (d >> 5 & 1) << 2);
-    put16(p, insn);
+    snx_st_le16(p, insn);
     return 0;
 }
 /* CJ-type, C.J: offset[11|4|9:8|10|6|7|3:1|5] at 2, 2 KiB either way */
 static int rv_cj(unsigned char* p, uint64_t d) {
-    uint16_t insn = le16(p) & 0xE003u;
+    uint16_t insn = snx_ld_le16(p) & 0xE003u;
     if (!fits(d, 12)) return SNX_LINK_RANGE;
     if (d & 1) return SNX_LINK_MISALIGNED;
     insn |= (uint16_t)((d >> 11 & 1) << 12 | (d >> 4 & 1) << 11 | (d >> 8 & 3) << 9 | (d >> 10 & 1) << 8 |
                        (d >> 6 & 1) << 7 | (d >> 7 & 1) << 6 | (d >> 1 & 7) << 3 | (d >> 5 & 1) << 2);
-    put16(p, insn);
+    snx_st_le16(p, insn);
     return 0;
 }
 
@@ -642,19 +619,19 @@ static int relocate_rv(unsigned char* p, unsigned type, uint64_t S, int64_t A, u
 /* ---- LoongArch, little-endian: si20 at 5, si12 at 10, offs16 at 10 and the wider branch offsets split in two ---- */
 
 /* the pages from P's to that of target, rounded for the low 12 bits ADDI.D and LD.D sign-extend */
-static uint64_t la_pages(uint64_t target, uint64_t P) { return page_of(target + 0x800) - page_of(P); }
+static uint64_t la_pages(uint64_t target, uint64_t P) { return snx_link_page_of(target + 0x800) - snx_link_page_of(P); }
 static int la_hi20(unsigned char* p, uint64_t target, uint64_t P) {
     uint64_t pages = la_pages(target, P);
     if (!fits(pages, 32)) return SNX_LINK_RANGE;
-    field(p, pages >> 12, 5, 20);
+    snx_link_field(p, pages >> 12, 5, 20);
     return 0;
 }
 /* B16 (BEQ and the like), B21 (BEQZ, BNEZ) and B26 (B, BL), in instructions: offs[15:0] at 10, the rest at 0 */
 static int la_branch(unsigned char* p, uint64_t d, unsigned bits) {
     if (!fits(d, bits + 2)) return SNX_LINK_RANGE;
     if (d & 3) return SNX_LINK_MISALIGNED;
-    field(p, d >> 2, 10, 16);
-    if (bits > 16) field(p, d >> 18, 0, bits - 16);
+    snx_link_field(p, d >> 2, 10, 16);
+    if (bits > 16) snx_link_field(p, d >> 18, 0, bits - 16);
     return 0;
 }
 
@@ -681,19 +658,19 @@ static int relocate_la(unsigned char* p, unsigned type, uint64_t S, int64_t A, u
         case SNX_LA_B21: return la_branch(p, d, 21);
         case SNX_LA_B26: return la_branch(p, d, 26);
         case SNX_LA_PCALA_HI20: return la_hi20(p, target, P);
-        case SNX_LA_PCALA_LO12: field(p, target & 0xFFF, 10, 12); return 0;
+        case SNX_LA_PCALA_LO12: snx_link_field(p, target & 0xFFF, 10, 12); return 0;
         case SNX_LA_GOT_PC_HI20: return la_hi20(p, at, P);
-        case SNX_LA_GOT_PC_LO12: field(p, at & 0xFFF, 10, 12); return 0;
+        case SNX_LA_GOT_PC_LO12: snx_link_field(p, at & 0xFFF, 10, 12); return 0;
         case SNX_LA_PCREL20_S2: /* PCADDI */
             if (!fits(d, 22)) return SNX_LINK_RANGE;
             if (d & 3) return SNX_LINK_MISALIGNED;
-            field(p, d >> 2, 5, 20);
+            snx_link_field(p, d >> 2, 5, 20);
             return 0;
         case SNX_LA_CALL36: /* PCADDU18I then JIRL: 18 bits of the displacement in JIRL, sign-extended */
             if (!fits(d + 0x20000, 38)) return SNX_LINK_RANGE;
             if (d & 3) return SNX_LINK_MISALIGNED;
-            field(p, (d + 0x20000) >> 18, 5, 20);
-            field(p + 4, d >> 2, 10, 16);
+            snx_link_field(p, (d + 0x20000) >> 18, 5, 20);
+            snx_link_field(p + 4, d >> 2, 10, 16);
             return 0;
         case SNX_LA_ADD8: word(p, 1, 1, target); return 0;
         case SNX_LA_ADD16: word(p, 2, 1, target); return 0;
@@ -722,19 +699,18 @@ int snx_elf_relocate(unsigned machine, unsigned char* p, size_t room, unsigned t
 }
 
 int snx_elf_veneer(unsigned char* v, uint64_t at, uint64_t target, int indirect) {
-    int rc;
     if (indirect && (target & 7)) return SNX_LINK_MISALIGNED;
-    snx_link_put32(v, 0x90000010u); /* ADRP x16, target */
-    rc = adrp(v, target, at);
+    snx_st_le32(v, 0x90000010u); /* ADRP x16, target */
+    int rc = adrp(v, target, at);
     if (rc) return rc;
     if (indirect) {
-        snx_link_put32(v + 4, 0xF9400210u); /* LDR x16, [x16, :lo12:target], scaled by 8 */
-        field(v + 4, (target & 0xFFF) >> 3, 10, 12);
+        snx_st_le32(v + 4, 0xF9400210u); /* LDR x16, [x16, :lo12:target], scaled by 8 */
+        snx_link_field(v + 4, (target & 0xFFF) >> 3, 10, 12);
     } else {
-        snx_link_put32(v + 4, 0x91000210u); /* ADD x16, x16, :lo12:target */
-        field(v + 4, target & 0xFFF, 10, 12);
+        snx_st_le32(v + 4, 0x91000210u); /* ADD x16, x16, :lo12:target */
+        snx_link_field(v + 4, target & 0xFFF, 10, 12);
     }
-    snx_link_put32(v + 8, 0xD61F0200u); /* BR x16 */
+    snx_st_le32(v + 8, 0xD61F0200u); /* BR x16 */
     return 0;
 }
 
@@ -752,22 +728,23 @@ int snx_elf_ppc_entry(const SnxElfObject* objs, const SnxLinkNames* globals, uns
                       size_t error_size) {
     const SnxElfObject* o = &objs[def_object];
     const Elf64_Sym* sym = &o->syms[def_index];
-    size_t j, k, code_object, code_index;
+    size_t code_object, code_index;
     int absolute;
     *global = *local = S + (uint64_t)A;
     if (abi == SNX_ELF_PPC_ELFV2) {
         if (((sym->st_other >> 5) & 7) == 1)
-            return fail(error, error_size, "%s: a call to %s, which doesn't keep r2 (PC-relative code)", o->input->name,
+            return snx_link_fail(error, error_size, "%s: a call to %s, which doesn't keep r2 (PC-relative code)",
+                                 o->input->name,
                         snx_elf_symbol_name(o, sym));
         *local += ppc_local_entry(sym->st_other);
         return 0;
     }
     if (sym->st_shndx >= o->eh->e_shnum || strcmp(snx_elf_section_name(o, sym->st_shndx), ".opd")) return 0;
-    for (j = 0; j < o->eh->e_shnum; ++j) {
+    for (size_t j = 0; j < o->eh->e_shnum; ++j) {
         const Elf64_Rela* r = (const Elf64_Rela*)(o->input->data + o->sh[j].sh_offset);
         size_t n = o->sh[j].sh_size / sizeof(Elf64_Rela);
         if (o->sh[j].sh_type != SHT_RELA || o->sh[j].sh_info != sym->st_shndx) continue;
-        for (k = 0; k < n; ++k)
+        for (size_t k = 0; k < n; ++k)
             if (r[k].r_offset == sym->st_value + (uint64_t)A && ELF64_R_TYPE(r[k].r_info) == SNX_PPC_ADDR64) {
                 int where = snx_elf_definition(objs, globals, def_object, ELF64_R_SYM(r[k].r_info), &code_object,
                                                &code_index, error, error_size);
@@ -778,8 +755,8 @@ int snx_elf_ppc_entry(const SnxElfObject* objs, const SnxLinkNames* globals, uns
                 return 0;
             }
     }
-    return fail(error, error_size, "%s: .opd descriptor of %s without its code", o->input->name,
-                snx_elf_symbol_name(o, sym));
+    return snx_link_fail(error, error_size, "%s: .opd descriptor of %s without its code", o->input->name,
+                         snx_elf_symbol_name(o, sym));
 }
 
 int snx_elf_ppc_branch_veneer(unsigned char* p, uint64_t P, unsigned char* v, uint64_t at, uint64_t target,

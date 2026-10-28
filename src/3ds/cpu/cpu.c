@@ -39,7 +39,7 @@ static uint32_t access_memory(void* context, uint32_t op, uint32_t va, uint32_t 
 }
 bool snx_ctr_cpu_init(SnxCtrCpu* cpu, SnxCtrAddressSpace* space, uint32_t pc, uint32_t sp, bool thumb) {
     if (!cpu || !space || (pc & (thumb ? 1u : 3u)) || (sp & 7)) return false;
-    memset(cpu, 0, sizeof *cpu);
+    *cpu = (SnxCtrCpu){0};
     cpu->state.cpu.cpsr = 0x10u | (thumb ? SNX_ARM_T : 0);
     cpu->state.cpu.r[15] = pc;
     cpu->state.cpu.r[13] = sp;

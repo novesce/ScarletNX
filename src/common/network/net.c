@@ -383,7 +383,7 @@ static uint16_t poll_from_host(short h) {
 
 uint16_t snx_net_checksum(const void* data, size_t size, uint32_t sum) {
     const uint8_t* p = data;
-    for (size_t i = 0; i + 1 < size; i += 2) sum += (uint32_t)p[i] << 8 | p[i + 1];
+    for (size_t i = 0; i + 1 < size; i += 2) sum += snx_ld_be16(p + i);
     if (size & 1) sum += (uint32_t)p[size - 1] << 8;
     while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
     return (uint16_t)~sum;
@@ -433,11 +433,10 @@ int snx_net_addr_to_host(const SnxSockAddr* in, struct sockaddr_storage* out, sn
 int snx_net_addr_from_host(const struct sockaddr* in, snx_socklen size, SnxSockAddr* out) {
     /* read as bytes: in is whichever type the system wrote, a sockaddr_storage or the address's own */
     struct sockaddr head;
-    int family;
     memset(out, 0, sizeof *out);
     memset(&head, 0, sizeof head);
     if (size > 0) memcpy(&head, in, (size_t)size < sizeof head ? (size_t)size : sizeof head);
-    family = head.sa_family;
+    int family = head.sa_family;
     if (size >= (snx_socklen)sizeof(struct sockaddr_in) && family == AF_INET) {
         struct sockaddr_in a;
         memcpy(&a, in, sizeof a);
@@ -488,8 +487,7 @@ static int ms_left(int64_t deadline) {
 }
 int snx_net_wait_until(SnxHostFd fd, short events, int64_t deadline) {
     for (;;) {
-        HostPollFd f[2];
-        memset(f, 0, sizeof f);
+        HostPollFd f[2] = {0};
         f[0].fd = fd;
         f[0].events = events;
         size_t n = 1;
@@ -652,8 +650,7 @@ static int64_t host_recv_once(SnxSocket* s, char* p, size_t size, int hflags, Sn
     }
 #else
     struct iovec iov = {p, size};
-    struct msghdr m;
-    memset(&m, 0, sizeof m);
+    struct msghdr m = {0};
     m.msg_name = from ? &ss : NULL;
     m.msg_namelen = from ? sizeof ss : 0;
     m.msg_iov = &iov;
@@ -728,8 +725,7 @@ int snx_net_sockopt_kept(int level, int name) {
 /* An option's value between the guest's byte order (little-endian: both runtimes' guests) and a big-endian host's,
    its numbers swapped in place by its kind: the same both ways. Bytes (addresses, groups) stay as they are */
 static void swap_bytes(unsigned char* v, size_t n) {
-    size_t i;
-    for (i = 0; i < n / 2; ++i) {
+    for (size_t i = 0; i < n / 2; ++i) {
         unsigned char t = v[i];
         v[i] = v[n - 1 - i];
         v[n - 1 - i] = t;
@@ -1081,14 +1077,14 @@ int snx_net_poll(SnxPollEntry* e, size_t count, int timeout_ms) {
 #endif
         if (e[i].revents) ready = 1;
         if (fd == SNX_BADFD) continue;
-        memset(&f[n], 0, sizeof f[n]);
+        f[n] = (HostPollFd){0};
         f[n].fd = fd;
         f[n].events = hev;
         idx[n++] = i;
     }
     size_t cancel = n;
     if (g_cancel[0] != SNX_BADFD) {
-        memset(&f[n], 0, sizeof f[n]);
+        f[n] = (HostPollFd){0};
         f[n].fd = g_cancel[0];
         f[n++].events = POLLIN;
     }

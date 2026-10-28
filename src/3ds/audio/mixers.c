@@ -10,7 +10,6 @@
 
 #define MAX_DELAY_SAMPLES (4u * SNX_CTR_DSP_RATE)
 
-static int16_t clamp16(int32_t v) { return (int16_t)(v < -32768 ? -32768 : v > 32767 ? 32767 : v); }
 /* a float into int32 without the undefined conversion of a value out of range */
 static int32_t to32(float v) { return v <= -2147483648.0f ? INT32_MIN : v >= 2147483520.0f ? 2147483520 : (int32_t)v; }
 

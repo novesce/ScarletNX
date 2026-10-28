@@ -70,9 +70,8 @@ static void dma_transfer(AgbBoard* board, int index, int fifo) {
 
 void agb_dma_write(AgbBoard* board, uint32_t offset, uint16_t value) {
     int part, index = channel_of(offset, &part);
-    AgbDmaChannel* channel;
     if (index < 0 || index > 3) return;
-    channel = &board->dma[index];
+    AgbDmaChannel* channel = &board->dma[index];
     switch (part) {
         case 0x0: channel->source = (channel->source & 0xFFFF0000) | value; return;
         case 0x2: channel->source = (channel->source & 0x0000FFFF) | (uint32_t)value << 16; return;
@@ -96,9 +95,8 @@ void agb_dma_write(AgbBoard* board, uint32_t offset, uint16_t value) {
 
 uint16_t agb_dma_written(AgbBoard* board, uint32_t offset) {
     int part, index = channel_of(offset, &part);
-    const AgbDmaChannel* channel;
     if (index < 0 || index > 3) return 0;
-    channel = &board->dma[index];
+    const AgbDmaChannel* channel = &board->dma[index];
     switch (part) {
         case 0x0: return (uint16_t)channel->source;
         case 0x2: return (uint16_t)(channel->source >> 16);
@@ -110,9 +108,8 @@ uint16_t agb_dma_written(AgbBoard* board, uint32_t offset) {
 
 uint16_t agb_dma_read(AgbBoard* board, uint32_t offset) {
     int part, index = channel_of(offset, &part);
-    AgbDmaChannel* channel;
     if (index < 0 || index > 3) return 0;
-    channel = &board->dma[index];
+    AgbDmaChannel* channel = &board->dma[index];
     if (part == 0xA) return channel->control;
     if (part == 0x8) return channel->count;
     return 0;

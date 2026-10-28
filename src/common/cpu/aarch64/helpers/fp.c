@@ -131,10 +131,10 @@ static u64 fp_invalid(CPU* c, int width) {
    - A conversion's half with FPCR.AHP has no infinities: past its largest exponent it raises IOC alone and gives
      0x7FFF. */
 static u64 fp_round_pack_as(CPU* c, int sign, int exp, u64 frac, int width, int rm, int cv) {
-    int fb = fp_fbits(width), bias = fp_bias(width), emax = (1 << fp_ebits(width)) - 1, shift, biased, up, to_inf;
+    int fb = fp_fbits(width), bias = fp_bias(width), emax = (1 << fp_ebits(width)) - 1, up, to_inf;
     int inexact, half_cmp, ahp = width == 16 && cv && (c->fpcr & FPCR_AHP);
     int flush = width == 16 ? !cv && (c->fpcr & FPCR_FZ16) : (c->fpcr & FPCR_FZ) != 0;
-    u64 mant, encoded;
+    u64 mant;
     if (frac >> 63) {
         frac = (frac >> 1) | (frac & 1);
         ++exp;
@@ -147,8 +147,8 @@ static u64 fp_round_pack_as(CPU* c, int sign, int exp, u64 frac, int width, int 
         c->fpsr |= FPSR_UFC;
         return fp_zero(sign, width);
     }
-    biased = exp + bias;
-    shift = 62 - fb;
+    int biased = exp + bias;
+    int shift = 62 - fb;
     if (biased < 1) {
         shift += 1 - biased;
         biased = 0;
@@ -195,7 +195,7 @@ static u64 fp_round_pack_as(CPU* c, int sign, int exp, u64 frac, int width, int 
     mant += (u64)up;
     /* a normal mant holds the implicit bit, so a carry out of the fraction lands in the exponent, and a denormal
        that rounds up to 1 << fb becomes the smallest normal */
-    encoded = biased ? ((u64)(biased - 1) << fb) + mant : mant;
+    u64 encoded = biased ? ((u64)(biased - 1) << fb) + mant : mant;
     if (ahp) {
         if ((encoded >> fb) > (u64)emax) {
             c->fpsr |= FPSR_IOC;
@@ -238,20 +238,18 @@ static int fp_order(FpValue a, FpValue b) {
    (FCMPE, and the ordered vector compares) */
 u32 snx_fp_compare(CPU* c, u64 a, u64 b, int width, int signal) {
     FpValue x = fp_unpack(c, a, width), y = fp_unpack(c, b, width);
-    int order;
     if (x.kind >= FPV_QNAN || y.kind >= FPV_QNAN) {
         if (signal || x.kind == FPV_SNAN || y.kind == FPV_SNAN) c->fpsr |= FPSR_IOC;
         return 3;
     }
-    order = fp_order(x, y);
+    int order = fp_order(x, y);
     return order < 0 ? 8 : order == 0 ? 6 : 2;
 }
 
 /* FPMax, FPMin, and FPMaxNum, FPMinNum (numeric): the numeric forms replace a lone quiet NaN by the infinity that
    loses, so the number wins; any other NaN goes through NaN processing. Zeros of both signs: max is +0, min -0 */
 u64 snx_fp_minmax(CPU* c, u64 a, u64 b, int width, int minimum, int numeric) {
-    FpValue x = fp_unpack(c, a, width), y = fp_unpack(c, b, width), r;
-    int order;
+    FpValue x = fp_unpack(c, a, width), y = fp_unpack(c, b, width);
     if (numeric) {
         if (x.kind == FPV_QNAN && y.kind != FPV_QNAN) {
             x.kind = FPV_INF;
@@ -263,8 +261,8 @@ u64 snx_fp_minmax(CPU* c, u64 a, u64 b, int width, int minimum, int numeric) {
     }
     if (x.kind >= FPV_QNAN || y.kind >= FPV_QNAN) return fp_nan(c, fp_nan2(x, y), width);
     if (x.kind == FPV_ZERO && y.kind == FPV_ZERO) return fp_zero(minimum ? x.sign | y.sign : x.sign & y.sign, width);
-    order = fp_order(x, y);
-    r = (minimum ? order < 0 : order > 0) ? x : y;
+    int order = fp_order(x, y);
+    FpValue r = (minimum ? order < 0 : order > 0) ? x : y;
     return fp_repack(c, r, width);
 }
 
@@ -323,11 +321,10 @@ static FpValue fp_from_magnitude(int sign, u64 mag, int scale) {
 u64 snx_fp_round(CPU* c, u64 bits, int width, int rm, int exact) {
     FpValue v = fp_unpack(c, bits, width);
     int inexact, huge;
-    u64 mag;
     if (v.kind >= FPV_QNAN) return fp_nan(c, v, width);
     if (v.kind != FPV_FINITE) return fp_repack(c, v, width);
     if (v.exp >= fp_fbits(width)) return bits; /* integral already */
-    mag = fp_round_magnitude(v, 0, rm, &inexact, &huge);
+    u64 mag = fp_round_magnitude(v, 0, rm, &inexact, &huge);
     if (exact && inexact) c->fpsr |= FPSR_IXC;
     if (!mag) return fp_zero(v.sign, width);
     return fp_repack(c, fp_from_magnitude(v.sign, mag, 0), width);

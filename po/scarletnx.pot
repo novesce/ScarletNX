@@ -164,7 +164,7 @@ msgstr ""
 
 #: src/gui/editor.c
 #, c-format
-msgid "Select to type it: a whole number from %g to %g"
+msgid "Select to type it: a whole number from %.0f to %.0f"
 msgstr ""
 
 #: src/gui/editor.c
@@ -185,35 +185,33 @@ msgid "Select to type it: #RRGGBB"
 msgstr ""
 
 #: src/gui/editor.c
-msgid "A folder name: letters, digits, spaces, - _ and ., not starting with ."
+#, c-format
+msgid "%s is not a folder name: letters, digits, spaces, - _ and ., not starting with ."
 msgstr ""
 
 #: src/gui/editor.c
 #, c-format
-msgid "A whole number from %g to %g, not \"%s\""
+msgid "%s is not a color #RRGGBB, as #1A2B3C"
 msgstr ""
 
 #: src/gui/editor.c
 #, c-format
-msgid "A number from %g to %g, three digits and two decimals at most, not \"%s\""
+msgid "%s is not a whole number from 0 to %lu"
 msgstr ""
 
 #: src/gui/editor.c
 #, c-format
-msgid "At most %u bytes"
-msgstr ""
-
-#: src/gui/editor.c
-msgid "A color: #RRGGBB, as #1A2B3C"
-msgstr ""
-
-#: src/gui/editor.c
-msgid "A whole number, 0 to 10000"
+msgid "%s is not a whole number from %.0f to %.0f"
 msgstr ""
 
 #: src/gui/editor.c
 #, c-format
-msgid "Closest value in range: %s"
+msgid "%s is not a number from %g to %g, two decimals at most"
+msgstr ""
+
+#: src/gui/editor.c
+#, c-format
+msgid "%s is more than %u bytes"
 msgstr ""
 
 #: src/gui/editor.c
@@ -222,12 +220,50 @@ msgstr ""
 
 #: src/gui/editor.c
 #, c-format
-msgid "Only the digits of a whole number from %g to %g"
+msgid "Only the digits of a whole number from %.0f to %.0f"
 msgstr ""
 
 #: src/gui/editor.c
 #, c-format
 msgid "Only the digits of a number from %g to %g, three digits and two decimals at most"
+msgstr ""
+
+#: src/gui/editor.c
+msgid "A folder name: letters, digits, spaces, - _ and ., not starting with ."
+msgstr ""
+
+#: src/gui/editor.c
+msgid "A color: #RRGGBB, as #1A2B3C"
+msgstr ""
+
+#: src/gui/editor.c
+#, c-format
+msgid "A whole number from 0 to %lu"
+msgstr ""
+
+#: src/gui/editor.c
+#, c-format
+msgid "A whole number from %.0f to %.0f; empty, the default %s"
+msgstr ""
+
+#: src/gui/editor.c
+#, c-format
+msgid "A whole number from %.0f to %.0f"
+msgstr ""
+
+#: src/gui/editor.c
+#, c-format
+msgid "A number from %g to %g, two decimals at most; empty, the default %s"
+msgstr ""
+
+#: src/gui/editor.c
+#, c-format
+msgid "A number from %g to %g, two decimals at most"
+msgstr ""
+
+#: src/gui/editor.c
+#, c-format
+msgid "Text, up to %u bytes"
 msgstr ""
 
 #: src/gui/editor.c
@@ -953,6 +989,11 @@ msgstr ""
 
 #: src/gui/main.c
 #, c-format
+msgid "%s: %s is no longer a UI scale: ui_scale = %d now"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
 msgid "Recent Games not kept: %s could not be written."
 msgstr ""
 
@@ -1137,14 +1178,6 @@ msgstr ""
 
 #: src/gui/main.c
 msgid "Run Anyway"
-msgstr ""
-
-#: src/gui/main.c
-msgid "Revert"
-msgstr ""
-
-#: src/gui/main.c
-msgid "Keep"
 msgstr ""
 
 #: src/gui/main.c
@@ -1824,11 +1857,12 @@ msgstr ""
 
 #: src/gui/main.c
 #, c-format
-msgid "AOT build: O%c%s"
+msgid "AOT build: O%c"
 msgstr ""
 
 #: src/gui/main.c
-msgid " (levels differ)"
+#, c-format
+msgid "AOT build: O%c, its JIT cache O%c: a pack needs one level"
 msgstr ""
 
 #: src/gui/main.c
@@ -1936,7 +1970,7 @@ msgid "UI scale"
 msgstr ""
 
 #: src/gui/main.c
-msgid "Auto fits the screen. A new scale asks to be kept"
+msgid "1x to 4x. A new one asks to be kept"
 msgstr ""
 
 #: src/gui/main.c
@@ -2005,7 +2039,7 @@ msgstr ""
 
 #: src/gui/main.c
 #, c-format
-msgid "%s of Auto: %dx"
+msgid "%dx (%dx in this window)"
 msgstr ""
 
 #: src/gui/main.c
@@ -2374,11 +2408,6 @@ msgstr ""
 
 #: src/gui/main.c
 #, c-format
-msgid "%s is not a nickname: %s"
-msgstr ""
-
-#: src/gui/main.c
-#, c-format
 msgid "User %d keeps %s: %s"
 msgstr ""
 
@@ -2392,15 +2421,18 @@ msgid "User %d is %s now"
 msgstr ""
 
 #: src/gui/main.c
-msgid "0.25 of Auto"
+msgid "Keep"
+msgstr ""
+
+#. A key of the foot's sentences, which a click finds by this word
+#: src/gui/main.c
+#, snx-key
+msgid "Back"
 msgstr ""
 
 #: src/gui/main.c
-msgid "0.5 of Auto"
-msgstr ""
-
-#: src/gui/main.c
-msgid "0.75 of Auto"
+#, c-format
+msgid "%dx needs a window %d pixels high: this one is %d"
 msgstr ""
 
 #: src/gui/main.c
@@ -2468,6 +2500,11 @@ msgid "Non-standard resolution, experimental."
 msgstr ""
 
 #: src/gui/main.c
+#, c-format
+msgid "%s is not a nickname: %s"
+msgstr ""
+
+#: src/gui/main.c
 msgid "Paste one local folder's path"
 msgstr ""
 
@@ -2509,6 +2546,10 @@ msgstr ""
 
 #: src/gui/main.c
 msgid "Ctrl+S saves too"
+msgstr ""
+
+#: src/gui/main.c
+msgid "A nickname, 4 to 20 of A-Z a-z 0-9 space . _ -"
 msgstr ""
 
 #: src/gui/main.c
@@ -2711,12 +2752,6 @@ msgstr ""
 msgid "Next"
 msgstr ""
 
-#. A key of the foot's sentences, which a click finds by this word
-#: src/gui/main.c
-#, snx-key
-msgid "Back"
-msgstr ""
-
 #: src/gui/main.c
 msgid "Skip"
 msgstr ""
@@ -2774,11 +2809,6 @@ msgstr ""
 
 #: src/gui/main.c
 msgid "Tip: nickname 4 to 20 of A-Z a-z 0-9 space . _ -"
-msgstr ""
-
-#: src/gui/main.c
-#, c-format
-msgid "Auto (%dx)"
 msgstr ""
 
 #: src/gui/main.c
@@ -3229,7 +3259,7 @@ msgstr ""
 
 #: src/gui/main.c
 #, c-format
-msgid "The JIT cache is O%c, but the game's AOT optimization is O%c. They must match: set Optimization level to O%c before building, or set JIT optimization to O%c and play once to make a matching cache."
+msgid "The JIT cache's level (JIT optimization O%c) and the game's AOT optimization O%c differ. An AOT pack needs them equal: set Optimization level to O%c before building, or set JIT optimization to O%c and play once to make a matching cache."
 msgstr ""
 
 #: src/gui/main.c
@@ -3277,6 +3307,16 @@ msgstr ""
 #: src/gui/main.c
 #, c-format
 msgid "Pick the file from this computer's storage (%s)."
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "%s opens with %s: cannot find %s beside ScarletNX or on PATH."
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "%s opens with %s, not %s."
 msgstr ""
 
 #: src/gui/main.c
@@ -4304,6 +4344,18 @@ msgstr ""
 msgid "off, as LLVM 23 can break a module with it: Settings > Debug turns it on"
 msgstr ""
 
+#: src/common/utilities/setup.c
+msgid "The launcher's UI scale"
+msgstr ""
+
+#: src/common/utilities/setup.c
+msgid "Auto, and 0.25, 0.5 and 0.75 of it"
+msgstr ""
+
+#: src/common/utilities/setup.c
+msgid "1x to 4x: the number Auto gave that screen"
+msgstr ""
+
 #: src/nx/runtime/settings.txt
 msgid "gdbstub"
 msgstr ""
@@ -4349,7 +4401,7 @@ msgid "Optimization level"
 msgstr ""
 
 #: src/nx/runtime/settings.txt
-msgid "LLVM's optimization of the game's code when it is recompiled: 0 none, 3 the most, z the smallest. A game made already keeps its code until it is recompiled"
+msgid "LLVM's optimization of the game's code when it is recompiled: 0 none, 3 the most, z the smallest. A game made already keeps its code until it is recompiled. Only an AOT pack built from the game's JIT cache needs it to match JIT optimization"
 msgstr ""
 
 #: src/nx/runtime/settings.txt

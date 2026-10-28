@@ -21,6 +21,10 @@
 #define LIGHT_RGBA                                                                                                     \
     (0xFFu << 24 | (SNX_GUI_THEME_YORHA_PAGE & 0xFFu) << 16 | (SNX_GUI_THEME_YORHA_PAGE & 0xFF00u) |                   \
      (SNX_GUI_THEME_YORHA_PAGE >> 16 & 0xFFu))
+/* a panel in a dialog (the keyboard's line): the soft colour over the page at a quarter */
+#define PANEL_RGBA                                                                                                     \
+    (0x40u << 24 | (SNX_GUI_THEME_YORHA_SOFT & 0xFFu) << 16 | (SNX_GUI_THEME_YORHA_SOFT & 0xFF00u) |                   \
+     (SNX_GUI_THEME_YORHA_SOFT >> 16 & 0xFFu))
 /* the menu's colour of a held control, as R G B A bytes */
 #define FAILURE                                                                                                        \
     (0xFFu << 24 | (SNX_GUI_THEME_YORHA_FAILURE & 0xFFu) << 16 | (SNX_GUI_THEME_YORHA_FAILURE & 0xFF00u) |             \
@@ -125,8 +129,9 @@ static void draw(void) {
     list.max = 2048;
     overlay_draw(&list, SW, SH, 0);
 }
-/* whether text shows anywhere on the picture, its letters a cell apart on one row (spaces draw nothing) */
-static int shows(const char* text) {
+/* whether text shows anywhere on the picture, its letters a cell apart on one row (spaces draw nothing), each in rgba
+   unless any */
+static int shows_as(const char* text, int any, u32 rgba) {
     int i, k;
     for (i = 0; i < list.n; ++i) {
         float x = list.q[i].x, y = list.q[i].y, step = 8.0f * (float)s;
@@ -136,13 +141,14 @@ static int shows(const char* text) {
             for (j = 0; j < list.n && !found; ++j)
                 found = list.q[j].x == x + (float)k * step && list.q[j].y == y &&
                         list.q[j].u == SNX_CONTROLS_FONT_X + c % 16 * 8 &&
-                        list.q[j].v == SNX_CONTROLS_FONT_Y + c / 16 * 16;
+                        list.q[j].v == SNX_CONTROLS_FONT_Y + c / 16 * 16 && (any || list.q[j].rgba == rgba);
             if (!found) break;
         }
         if (!text[k]) return 1;
     }
     return 0;
 }
+static int shows(const char* text) { return shows_as(text, 1, 0); }
 /* the quads filled with rgba */
 static int quads_of(u32 rgba) {
     int i, n = 0;
@@ -235,6 +241,144 @@ static void prepare_screen(void) {
     assert(on_note == 96);
     prepare_screen_set(NULL, NULL, NULL, 0, NULL, 0, NULL, 0);
     assert(!prepare_screen_shown());
+}
+/* a tap on a row of the dialog drawn last, list.q[0] its page: rows from its top, items counted from its foot */
+static int tap_row(int row) {
+    return overlay_tap(list.q[0].x + 10.0f, list.q[0].y + (float)(row * 16 * s) + 5.0f, SW, SH);
+}
+static int rows_drawn(void) { return (int)(list.q[0].h / (float)(16 * s)); }
+/* The software keyboard's box: over the game, not under the menu; the game's texts; what typing, Backspace, Enter short
+   of the least and Enter, Esc, a pad's A and B, and taps do; the most a line holds, in UTF-16 units; the answer, taken
+   once; a password; a long line's end */
+static void keyboard_box(void) {
+    OverlayKeyboard k = {0};
+    char out[OVERLAY_KB_TEXT];
+    const i32 still[4] = {0};
+    OverlayTyping typing;
+    u32 ticket = 0;
+    int i, xs;
+    if (overlay_shown()) overlay_toggle();
+    assert(!overlay_keyboard_shown() && overlay_keyboard_take(&ticket, out, sizeof out) == -1);
+    snprintf(k.text, sizeof k.text, "Ann");
+    snprintf(k.header, sizeof k.header, "Your rival's name");
+    snprintf(k.sub, sizeof k.sub, "Up to six letters");
+    snprintf(k.guide, sizeof k.guide, "Pick a name");
+    snprintf(k.ok, sizeof k.ok, "Done");
+    k.min = 4;
+    k.max = 6;
+    k.ticket = 7;
+    overlay_keyboard_show(&k);
+    assert(overlay_keyboard_shown());
+    draw();
+    assert(shows("SCARLETNX  /  KEYBOARD") && shows("Your rival's name") && shows("Up to six letters") &&
+           shows("Pick a name"));
+    assert(shows("Ann\xDD") && shows("3 of 6 characters, 4 at least.") && shows("Enter or A: Done. Esc or B: Cancel."));
+    assert(shows("\xFE Done") && shows("\xFE Cancel") && quads_of(PANEL_RGBA) == 1); /* the line on its panel */
+    /* Enter short of the least: still there, saying how many more in the failure colour, until the line changes */
+    assert(overlay_keyboard_key(OVERLAY_KEY_ENTER) == OVERLAY_NONE && overlay_keyboard_shown());
+    draw();
+    assert(shows_as("1 more character needed, 4 at least.", 0, FAILURE) && !shows("3 of 6"));
+    assert(overlay_keyboard_take(&ticket, out, sizeof out) == -1);
+    /* typed: the controls left out, up to the most */
+    overlay_keyboard_type("i\te!x");
+    draw();
+    assert(shows("Annie!\xDD") && shows("6 of 6 characters, 4 at least.") && !shows("more character"));
+    /* Backspace a character at a time; one past U+FFFF is two units, and doesn't fit in one */
+    assert(overlay_keyboard_key(OVERLAY_KEY_BACKSPACE) == OVERLAY_NONE);
+    overlay_keyboard_key(OVERLAY_KEY_BACKSPACE);
+    overlay_keyboard_type("\xC3\xA9\xF0\x9F\x98\x80");
+    draw();
+    assert(shows("Anni\x82\xDD") && shows("5 of 6 characters"));
+    overlay_keyboard_key(OVERLAY_KEY_BACKSPACE);
+    overlay_keyboard_type("\xF0\x9F\x98\x80");
+    draw();
+    assert(shows("Anni?\xDD") && shows("6 of 6 characters"));
+    overlay_keyboard_key(OVERLAY_KEY_BACKSPACE);
+    draw();
+    assert(shows("Anni\xDD") && shows("4 of 6 characters"));
+    /* Enter gives the line: the box goes, and its answer is taken once */
+    assert(overlay_keyboard_key(OVERLAY_KEY_ENTER) == OVERLAY_KEYBOARD && !overlay_keyboard_shown());
+    draw();
+    assert(!shows("KEYBOARD"));
+    assert(overlay_keyboard_take(&ticket, out, sizeof out) == 0 && ticket == 7 && !strcmp(out, "Anni"));
+    assert(overlay_keyboard_take(&ticket, out, sizeof out) == -1);
+    /* nothing is typed into a box that doesn't show */
+    overlay_keyboard_type("zz");
+    assert(overlay_keyboard_key(OVERLAY_KEY_ENTER) == OVERLAY_NONE && overlay_keyboard_take(&ticket, out, 8) == -1);
+    /* Esc cancels */
+    k.ticket = 8;
+    overlay_keyboard_show(&k);
+    assert(overlay_keyboard_key(OVERLAY_KEY_CANCEL) == OVERLAY_KEYBOARD);
+    assert(overlay_keyboard_take(&ticket, out, sizeof out) == 1 && ticket == 8);
+    /* a pad's A gives the line, B cancels; A held as the box comes isn't a press */
+    overlay_controls(1, still, 1000);
+    snprintf(k.text, sizeof k.text, "Anna");
+    k.ticket = 9;
+    overlay_keyboard_show(&k);
+    assert(overlay_controls(1, still, 1016) == OVERLAY_NONE && overlay_keyboard_shown());
+    assert(overlay_controls(0, still, 1032) == OVERLAY_NONE);
+    assert(overlay_controls(1, still, 1048) == OVERLAY_KEYBOARD && !overlay_keyboard_shown());
+    assert(overlay_keyboard_take(&ticket, out, sizeof out) == 0 && ticket == 9 && !strcmp(out, "Anna"));
+    k.ticket = 10;
+    overlay_keyboard_show(&k);
+    overlay_controls(0, still, 1064);
+    assert(overlay_controls(1ull << 13, still, 1080) == OVERLAY_NONE); /* up: nothing */
+    assert(overlay_controls(2, still, 1096) == OVERLAY_KEYBOARD && overlay_keyboard_take(&ticket, out, 8) == 1);
+    /* taps: the line asks for the system's keyboard, OK does as Enter (short of the least: nothing yet), Cancel as
+       Esc, the rest nothing */
+    snprintf(k.text, sizeof k.text, "Bo");
+    k.ticket = 11;
+    overlay_keyboard_show(&k);
+    assert(overlay_keyboard_typing(SW, SH, &typing) && typing.ticket == 11 && !typing.password && !typing.numbers);
+    assert(typing.line.w > 0 && typing.line.h == (float)(16 * s));
+    assert(overlay_tap(typing.line.x + 4, typing.line.y + 4, SW, SH) == OVERLAY_TYPE);
+    assert(overlay_tap(5.0f, 5.0f, SW, SH) == OVERLAY_NONE && overlay_keyboard_shown());
+    draw();
+    assert(rows_drawn() > 3 && tap_row(rows_drawn() - 3) == OVERLAY_NONE && overlay_keyboard_shown());
+    overlay_keyboard_type("bby");
+    assert(tap_row(rows_drawn() - 3) == OVERLAY_KEYBOARD);
+    assert(overlay_keyboard_take(&ticket, out, sizeof out) == 0 && !strcmp(out, "Bobby"));
+    k.ticket = 12;
+    overlay_keyboard_show(&k);
+    draw();
+    assert(tap_row(rows_drawn() - 2) == OVERLAY_KEYBOARD && overlay_keyboard_take(&ticket, out, 8) == 1);
+    /* the menu goes over the box, and takes the pad: the box comes back as it was */
+    k.ticket = 13;
+    overlay_keyboard_show(&k);
+    overlay_toggle();
+    draw();
+    assert(shows("SCARLETNX  /  MENU") && !shows("SCARLETNX  /  KEYBOARD"));
+    overlay_controls(0, still, 1112);
+    assert(overlay_controls(2, still, 1128) == OVERLAY_CLOSE && overlay_keyboard_shown());
+    overlay_toggle();
+    draw();
+    assert(shows("SCARLETNX  /  KEYBOARD") && shows("Bo\xDD"));
+    /* the game takes its box away: another's ticket leaves it, its own hides it unanswered */
+    overlay_keyboard_hide(99);
+    assert(overlay_keyboard_shown());
+    overlay_keyboard_hide(13);
+    assert(!overlay_keyboard_shown() && overlay_keyboard_take(&ticket, out, sizeof out) == -1);
+    /* a password's characters are asterisks, and the system's keyboard is told */
+    snprintf(k.text, sizeof k.text, "abc");
+    k.password = 1;
+    overlay_keyboard_show(&k);
+    draw();
+    assert(shows("***\xDD") && !shows("abc") && overlay_keyboard_typing(SW, SH, &typing) && typing.password);
+    overlay_keyboard_hide(13);
+    /* no most: OVERLAY_KB_UNITS; a line past the box's four rows shows its end (70 columns a row here: 400 x, END and
+       the cursor take six, and the last four hold 260 of the x) */
+    k.password = 0;
+    k.min = 0;
+    k.max = 0;
+    k.sub[0] = 0; /* its "six" would be one more x */
+    memset(k.text, 'x', 400);
+    memcpy(k.text + 400, "END", 4);
+    overlay_keyboard_show(&k);
+    draw();
+    for (i = 0, xs = 0; i < list.n; ++i)
+        xs += list.q[i].u == SNX_CONTROLS_FONT_X + 'x' % 16 * 8 && list.q[i].v == SNX_CONTROLS_FONT_Y + 'x' / 16 * 16;
+    assert(shows("xEND\xDD") && shows("403 of 1024 characters.") && xs == 260);
+    overlay_keyboard_hide(13);
 }
 int main(void) {
     const u32 ink = 0xFF3A4145u;
@@ -920,7 +1064,8 @@ int main(void) {
         for (i = 0, pictures = 0; i < list.n; ++i) pictures += list.q[i].v == SNX_CONTROLS_ATLAS_HEIGHT;
         assert(!pictures && !shows("Player"));
     }
-    puts("overlay: placing, pages, taps, keys, values, scrolling, look, the error's panel, the atlas and the user "
-         "passed");
+    keyboard_box();
+    puts("overlay: placing, pages, taps, keys, values, scrolling, look, the error's panel, the atlas, the user and the "
+         "keyboard's box passed");
     return 0;
 }

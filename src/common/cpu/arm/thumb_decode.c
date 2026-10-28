@@ -262,14 +262,13 @@ static unsigned twin(SnxThumb* o, uint32_t word) { return twin_kind(o, word, snx
    floating-point instruction encoding") */
 static unsigned coprocessor(unsigned a, unsigned b, SnxThumb* o) {
     uint32_t word;
-    SnxA32Kind kind;
     if ((a & 0xEF00) == 0xEF00)
         word = 0xF2000000u | ((uint32_t)(a & 0x1000) << 12) | ((uint32_t)(a & 0xFF) << 16) | b;
     else if ((a & 0xFF10) == 0xF900)
         word = 0xF4000000u | ((uint32_t)(a & 0xFF) << 16) | b;
     else
         word = ((uint32_t)a << 16) | b;
-    kind = snx_a32_decode(word);
+    SnxA32Kind kind = snx_a32_decode(word);
     if (kind == SNX_A32_VECTOR) { /* Thumb's VSTR, VLDM and VSTM can't take the PC as their base, as A32's can */
         SnxArmVector v;
         snx_arm_vector_decode(word, &v);
@@ -282,11 +281,11 @@ static unsigned coprocessor(unsigned a, unsigned b, SnxThumb* o) {
 /* E8xx/E9xx: LDM/STM (and PUSH.W/POP.W), LDRD/STRD, the exclusives and acquire/release, TBB/TBH */
 static unsigned multiple_dual(unsigned a, unsigned b, SnxThumb* o) {
     unsigned n = a & 15, op1 = (a >> 7) & 3, op2 = (a >> 4) & 3, op3 = (b >> 4) & 15;
-    unsigned t = b >> 12, t2 = (b >> 8) & 15, d = b & 15, i, count = 0;
+    unsigned t = b >> 12, t2 = (b >> 8) & 15, d = b & 15;
     if (!(a & 0x40)) { /* LDM/STM IA (op1 1) or DB (op1 2), with Thumb's stricter lists */
-        unsigned load = (a >> 4) & 1, wb = (a >> 5) & 1;
+        unsigned load = (a >> 4) & 1, wb = (a >> 5) & 1, count = 0;
         if (op1 != 1 && op1 != 2) return 0;
-        for (i = 0; i < 16; ++i) count += (b >> i) & 1;
+        for (unsigned i = 0; i < 16; ++i) count += (b >> i) & 1;
         if (n == 15 || count < 2 || (b & 0x2000) || (load ? (b & 0xC000) == 0xC000 : (b & 0x8000)) ||
             (wb && ((b >> n) & 1)))
             return 0;
@@ -330,7 +329,6 @@ static unsigned multiple_dual(unsigned a, unsigned b, SnxThumb* o) {
         static const unsigned size32[4] = {2, 3, 0, 1};
         static const unsigned kind32[4] = {0, 0xF, 0xC, 0xE};
         unsigned size = op3 & 3, kind = op3 >> 2, load = op2 & 1, pair = 0;
-        uint32_t word;
         if (!kind || (kind == 1 && size == 2) || (kind == 2 && size == 3) || n == 15) return 0;
         if (size == 3) { /* the second register is any one: the A32 emitter takes it from .ra, A32's being Rt + 1 */
             if (t == 13 || t == 15 || t2 == 13 || t2 == 15 || (load && (t == t2 || d != 15)) ||
@@ -339,7 +337,7 @@ static unsigned multiple_dual(unsigned a, unsigned b, SnxThumb* o) {
             pair = t2 + 1;
         } else if (t2 != 15 || (load && d != 15))
             return 0;
-        word = 0xE1800090u | (uint32_t)size32[size] << 21 | (uint32_t)load << 20 | (uint32_t)n << 16 |
+        uint32_t word = 0xE1800090u | (uint32_t)size32[size] << 21 | (uint32_t)load << 20 | (uint32_t)n << 16 |
                (uint32_t)kind32[kind] << 8;
         if (load)
             word |= (uint32_t)t << 12 | 0xF;

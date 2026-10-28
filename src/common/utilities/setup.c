@@ -4,7 +4,8 @@
 #include "common/utilities/common.h"
 #include "common/utilities/ini_lines.h"
 #include "common/utilities/users.h"
-#include <ctype.h>
+#include "common/utilities/ascii.h"
+#include "common/utilities/endian.h"
 #include <openssl/rand.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -51,7 +52,9 @@ const SnxNotice snx_notices[SNX_NOTICES] = {
      "--recompile, --data, --no-setup, -r --name, --jit-only", "[cli] the options' names", SNX_NOTICE_ALL},
     {SNX_TR_NOOP("SLP vectorizer"), SNX_TR_NOOP("LLVM's, on in the recompile and the JIT"),
      SNX_TR_NOOP("off, as LLVM 23 can break a module with it: Settings > Debug turns it on"), "LLVM's SLP vectorizer",
-     SNX_NOTICE_ALL}};
+     SNX_NOTICE_ALL},
+    {SNX_TR_NOOP("The launcher's UI scale"), SNX_TR_NOOP("Auto, and 0.25, 0.5 and 0.75 of it"),
+     SNX_TR_NOOP("1x to 4x: the number Auto gave that screen"), "`ui_scale = auto`", SNX_NOTICE_ALL}};
 int snx_notice_here(int notice) {
     int systems = snx_notices[notice].systems;
 #if defined(__ANDROID__)
@@ -76,13 +79,13 @@ static long setup_number(const char* value) {
 }
 int snx_setup_read(const char* path, SnxSetup* setup, char* why, size_t why_size) {
     size_t size, n = 0;
-    char *text, *key, *value, unknown[256];
+    char *key, *value, unknown[256];
     long number;
     int rc = 0;
     SnxIni ini;
     setup->version = setup->notices = 0;
     if (!snx_is_file(path)) return 0;
-    text = (char*)snx_read_file(path, &size);
+    char* text = (char*)snx_read_file(path, &size);
     if (!text) {
         snprintf(why, why_size, "%s could not be read", path);
         return -1;
@@ -114,13 +117,12 @@ int snx_setup_read(const char* path, SnxSetup* setup, char* why, size_t why_size
 }
 int snx_setup_done(const char* path, const SnxSetup* setup, char* why, size_t why_size) {
     char *dir = snx_dirname(path), *staged = snx_format("%s.new", path), *text;
-    int failed;
     text = snx_format("; ScarletNX's setup (docs/USAGE.md#setup): the version of the steps it asked and the notices it "
                       "showed.\n; Delete this file, or run scarletnx --setup, to go through it again\n"
                       "[setup]\nversion = %d\nnotices = %d\n",
                       setup->version > SNX_SETUP_VERSION ? setup->version : SNX_SETUP_VERSION,
                       setup->notices > SNX_NOTICES ? setup->notices : SNX_NOTICES);
-    failed = !dir || snx_mkdirs(dir) || snx_write_file(staged, text, strlen(text)) || snx_replace(staged, path);
+    int failed = !dir || snx_mkdirs(dir) || snx_write_file(staged, text, strlen(text)) || snx_replace(staged, path);
     if (failed) {
         remove(staged);
         snprintf(why, why_size, "%s could not be written", path);
@@ -141,10 +143,9 @@ int snx_setup_here(int step) {
 }
 int snx_setup_shows(const SnxSetup* setup, int notice) { return notice >= setup->notices && snx_notice_here(notice); }
 int snx_setup_due(const SnxSetup* setup) {
-    int i;
-    for (i = 0; i < SNX_SETUP_STEPS; ++i)
+    for (int i = 0; i < SNX_SETUP_STEPS; ++i)
         if (snx_setup_asks(setup, i)) return 1;
-    for (i = 0; i < SNX_NOTICES; ++i)
+    for (int i = 0; i < SNX_NOTICES; ++i)
         if (snx_setup_shows(setup, i)) return 1;
     return 0;
 }
@@ -162,9 +163,9 @@ void snx_setup_keys_override_set(const char* prod, const char* title) {
     g_setup.title_keys_override = title;
 }
 int snx_setup_options(int argc, char** argv, char* why, size_t why_size) {
-    int i, n = 1, skips = 0, debug = 0;
+    int n = 1, skips = 0, debug = 0;
     snx_setup_skip = snx_setup_again = 0;
-    for (i = 1; i < argc; ++i) {
+    for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--")) { /* the game's own arguments, as they are */
             while (i < argc) argv[n++] = argv[i++];
             break;
@@ -198,13 +199,9 @@ int snx_setup_options(int argc, char** argv, char* why, size_t why_size) {
 
 int snx_setup_uid(uint64_t uid[2]) {
     unsigned char bytes[16];
-    int i;
     if (RAND_bytes(bytes, sizeof bytes) != 1) return -1;
-    uid[0] = uid[1] = 0;
-    for (i = 0; i < 8; ++i) {
-        uid[0] = uid[0] << 8 | bytes[i];
-        uid[1] = uid[1] << 8 | bytes[8 + i];
-    }
+    uid[0] = snx_ld_be64(bytes);
+    uid[1] = snx_ld_be64(bytes + 8);
     /* the text is uid[0], then uid[1], in hex: its 13th digit (bits 12 to 15 of uid[0]) a UUID's version, 4 for one
        made of random bits, and the 17th (the top of uid[1]) its variant, RFC 4122's 10 in the two high bits */
     uid[0] = (uid[0] & ~(uint64_t)0xF000) | 0x4000;
@@ -214,11 +211,11 @@ int snx_setup_uid(uint64_t uid[2]) {
 int snx_setup_first_saves(const char* games) {
     static const uint64_t first[2] = {SNX_USERS_FIRST_UID0, SNX_USERS_FIRST_UID1};
     char **names = NULL, text[33];
-    size_t count = 0, i;
+    size_t count = 0;
     int found = 0;
     if (!games || snx_list_dir(games, &names, &count)) return 0;
     snx_users_uid_text(first, text);
-    for (i = 0; i < count; ++i) {
+    for (size_t i = 0; i < count; ++i) {
         char save[SNX_PATH_SIZE];
         found += !snx_path_format(save, sizeof save, "%s/%s/%s_data/save/user.%s", games, names[i], names[i], text) &&
                  snx_is_dir(save);
@@ -245,13 +242,13 @@ int snx_keys_text(const char* data, size_t size) {
         const char *line = data + at, *end = (const char*)memchr(line, '\n', size - at);
         size_t n = end ? (size_t)(end - line) : size - at, i = 0, name, hex = 0;
         while (i < n && (line[i] == ' ' || line[i] == '\t')) ++i;
-        for (name = i; i < n && (isalnum((unsigned char)line[i]) || line[i] == '_'); ++i) {}
+        for (name = i; i < n && (snx_is_alnum(line[i]) || line[i] == '_'); ++i) {}
         name = i - name;
         while (i < n && (line[i] == ' ' || line[i] == '\t')) ++i;
         if (name && i < n && line[i] == '=') {
             for (++i; i < n && (line[i] == ' ' || line[i] == '\t'); ++i) {}
-            for (; i < n && isxdigit((unsigned char)line[i]); ++i) ++hex;
-            while (i < n && isspace((unsigned char)line[i])) ++i;
+            for (; i < n && snx_is_hex(line[i]); ++i) ++hex;
+            while (i < n && snx_is_space(line[i])) ++i;
             keys += hex >= 2 && i == n;
         }
         at += n + 1;
@@ -270,7 +267,7 @@ static char* keys_home(void) {
 }
 char* snx_keys_found(const char* data, const char* name) {
     const char* override;
-    char *path, *home;
+    char* home;
     if (!strcmp(name, "prod.keys"))
         override = g_setup.prod_keys_override;
     else if (!strcmp(name, "title.keys"))
@@ -278,7 +275,7 @@ char* snx_keys_found(const char* data, const char* name) {
     else
         override = NULL;
     if (override) return snx_is_file(override) ? snx_strdup(override) : NULL;
-    path = data ? snx_path_join(data, name) : NULL;
+    char* path = data ? snx_path_join(data, name) : NULL;
 #ifdef SNX_IOS
     free(path); /* the data folder keeps them in keys/ */
     path = data ? snx_path_join(data, "keys") : NULL;
@@ -409,23 +406,22 @@ static int put_text(const char* path, const char* text, size_t size, char* why, 
 }
 int snx_ini_put(const char* path, const char* section, const char* key, const char* value, char* why, size_t why_size) {
     size_t size = 0, at = 0, n, out_n = 0, last = (size_t)-1;
-    char *text = snx_is_file(path) ? (char*)snx_read_file(path, &size) : (char*)snx_strdup(""), *out, line_key[64];
+    char *text = snx_is_file(path) ? (char*)snx_read_file(path, &size) : (char*)snx_strdup(""), line_key[64];
     char here[64], *entry = snx_format("%s = %s\n", key, value);
-    int put = 0, rc;
+    int put = 0;
     if (!text) {
         snprintf(why, why_size, "%s could not be read", path);
         free(entry);
         return -1;
     }
-    out = (char*)snx_alloc(size + strlen(section) + strlen(entry) + 8);
+    char* out = (char*)snx_alloc(size + strlen(section) + strlen(entry) + 8);
     here[0] = 0;
     /* each line as it was, but key's in section, which becomes entry; with none there, entry goes after the section's
        last key, or in a section of its own at the end */
     while (at < size) {
         const char* end = (const char*)memchr(text + at, '\n', size - at);
-        int kind;
         n = end ? (size_t)(end - (text + at)) + 1 : size - at;
-        kind = ini_line(text + at, n - (end != NULL), here, sizeof here, line_key, sizeof line_key);
+        int kind = ini_line(text + at, n - (end != NULL), here, sizeof here, line_key, sizeof line_key);
         if (!put && kind == 2 && !strcmp(here, section) && !strcmp(line_key, key)) {
             memcpy(out + out_n, entry, strlen(entry));
             out_n += strlen(entry);
@@ -444,21 +440,20 @@ int snx_ini_put(const char* path, const char* section, const char* key, const ch
         out_n += strlen(entry);
     } else if (!put)
         out_n += (size_t)sprintf(out + out_n, "[%s]\n%s", section, entry);
-    rc = put_text(path, out, out_n, why, why_size);
+    int rc = put_text(path, out, out_n, why, why_size);
     free(out);
     free(entry);
     free(text);
     return rc;
 }
 int snx_lines_add(const char* path, const char* line, char* why, size_t why_size) {
-    size_t size = 0, n = strlen(line), at;
-    char *text = snx_is_file(path) ? (char*)snx_read_file(path, &size) : (char*)snx_strdup(""), *out;
-    int rc;
+    size_t size = 0, n = strlen(line);
+    char* text = snx_is_file(path) ? (char*)snx_read_file(path, &size) : (char*)snx_strdup("");
     if (!text) {
         snprintf(why, why_size, "%s could not be read", path);
         return -1;
     }
-    for (at = 0; at < size;) {
+    for (size_t at = 0; at < size;) {
         const char* end = (const char*)memchr(text + at, '\n', size - at);
         size_t len = end ? (size_t)(end - (text + at)) : size - at;
         if (len == n && !memcmp(text + at, line, n)) {
@@ -467,12 +462,12 @@ int snx_lines_add(const char* path, const char* line, char* why, size_t why_size
         }
         at += len + 1;
     }
-    out = (char*)snx_alloc(size + n + 2);
+    char* out = (char*)snx_alloc(size + n + 2);
     memcpy(out, text, size);
     if (size && text[size - 1] != '\n') out[size++] = '\n';
     memcpy(out + size, line, n);
     out[size + n] = '\n';
-    rc = put_text(path, out, size + n + 1, why, why_size);
+    int rc = put_text(path, out, size + n + 1, why, why_size);
     free(out);
     free(text);
     return rc;

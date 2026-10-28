@@ -8,7 +8,6 @@
    archive lays out is checked against the input's size, each header against its own checksum, names against the
    tar's field ends, and duplicates are refused, so a malformed bundle is refused rather than read loosely. */
 #include "3ds/loader/internal.h"
-#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -53,7 +52,7 @@ static bool suffix(const char* name, size_t n, const char* suffix) {
     size_t e = strlen(suffix);
     if (n < e) return false;
     for (size_t i = 0; i < e; ++i)
-        if (tolower((unsigned char)name[n - e + i]) != suffix[i]) return false;
+        if (snx_to_lower(name[n - e + i]) != suffix[i]) return false;
     return true;
 }
 static bool game_name(const char* name, size_t n) {

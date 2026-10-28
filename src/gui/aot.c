@@ -95,6 +95,14 @@ int gui_aot_cache_info(const char* path, GuiAotInfo* info) {
 }
 
 int gui_aot_levels_match(const char* game_opt, char cache_opt) {
+#if defined(__ANDROID__) || defined(SNX_IOS)
+    /* a phone's JIT compiles at O0 and its level is no setting there (guest_jit.c), so every cache it writes is O0:
+       the AOT level cannot be made to match it, and a pack links the cached code as it is */
+    (void)game_opt;
+    (void)cache_opt;
+    return 1;
+#else
     char game = game_opt && game_opt[0] ? game_opt[0] : '2';
     return game == cache_opt;
+#endif
 }

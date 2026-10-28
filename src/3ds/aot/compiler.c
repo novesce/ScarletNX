@@ -8,17 +8,13 @@
 #include "common/cpu/arm/llvm.h"
 #include "common/cpu/recompiler/llvm/ir.h"
 #include "common/cpu/recompiler/llvm/link.h"
+#include "common/cpu/recompiler/workers.h"
 #include "common/utilities/common.h"
 #include "common/utilities/endian.h"
 #include <llvm-c/Core.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <pthread.h>
-#endif
 
 _Static_assert(SNX_ARM_CODEGEN_OPTIONS_ABI == SNX_CTR_MODULE_CODEGEN_ABI, "codegen ABI");
 _Static_assert(SNX_ARM_MEMORY_CHECKED == SNX_CTR_MODULE_CHECKED_MODE, "memory ABI");
@@ -30,12 +26,6 @@ typedef struct {
     unsigned mode, index, length;
 } Entry;
 /* a path's file name */
-static const char* leaf(const char* path) {
-    const char* last = path;
-    for (const char* p = path; *p; ++p)
-        if (*p == '/' || *p == '\\') last = p + 1;
-    return last;
-}
 static void name(char out[40], unsigned mode, unsigned index) {
     snprintf(out, 40, "ctr_%c_%u", mode ? 't' : 'a', index);
 }
@@ -235,38 +225,21 @@ typedef struct {
     unsigned rest_count;
     uint64_t output_bytes;
     char error[512];
-#ifdef _WIN32
-    CRITICAL_SECTION lock;
-#else
-    pthread_mutex_t lock;
-#endif
+    SnxWorkLock lock;
 } Work;
-static void work_lock(Work* w) {
-#ifdef _WIN32
-    EnterCriticalSection(&w->lock);
-#else
-    pthread_mutex_lock(&w->lock);
-#endif
-}
-static void work_unlock(Work* w) {
-#ifdef _WIN32
-    LeaveCriticalSection(&w->lock);
-#else
-    pthread_mutex_unlock(&w->lock);
-#endif
-}
-static void worker(Work* w) {
+static void worker(void* arg) {
+    Work* w = arg;
     char error[512] = "";
     SnxIr* ir = snx_ir_new("ctr-static-aot", '1', error, sizeof error);
     bool ok = ir != NULL;
     for (;;) {
-        work_lock(w);
+        snx_work_lock(&w->lock);
         if (!ok && !w->failed) {
             w->failed = true;
             snprintf(w->error, sizeof w->error, "%s", error);
         }
         unsigned i = w->failed ? w->chunks : w->next++;
-        work_unlock(w);
+        snx_work_unlock(&w->lock);
         if (i >= w->chunks) break;
         unsigned begin = i * CHUNK_ENTRIES, n = w->count - begin;
         if (n > CHUNK_ENTRIES) n = CHUNK_ENTRIES;
@@ -274,7 +247,7 @@ static void worker(Work* w) {
         unsigned rest_count = 0;
         ok = chunk(ir, w->image, w->entries + begin, n, &w->objects[i], w->exhaustive, &rest, &rest_count, error,
                    sizeof error);
-        work_lock(w);
+        snx_work_lock(&w->lock);
         Entry* merged = rest_count ? realloc(w->rest, (w->rest_count + rest_count) * sizeof *merged) : w->rest;
         if (ok && rest_count && !merged) {
             ok = false;
@@ -288,56 +261,18 @@ static void worker(Work* w) {
             if (!(++w->finished % 16) || w->finished == w->chunks)
                 printf("ARM11 AOT: %u/%u chunks of static blocks emitted\n", w->finished, w->chunks);
         }
-        work_unlock(w);
+        snx_work_unlock(&w->lock);
         free(rest);
     }
     snx_ir_free(ir);
 }
-#ifdef _WIN32
-static DWORD WINAPI worker_main(LPVOID w) {
-    worker(w);
-    return 0;
-}
-#else
-static void* worker_main(void* w) {
-    worker(w);
-    return NULL;
-}
-#endif
 static bool compile_chunks(Work* w) {
-    unsigned jobs = snx_cpu_count(), created = 0;
+    unsigned jobs = snx_cpu_count();
     if (jobs > w->chunks) jobs = w->chunks;
     if (jobs < 1) jobs = 1;
-#ifdef _WIN32
-    HANDLE* threads = calloc(jobs, sizeof *threads);
-    InitializeCriticalSection(&w->lock);
-#else
-    pthread_t* threads = calloc(jobs, sizeof *threads);
-    pthread_mutex_init(&w->lock, NULL);
-#endif
-    for (unsigned i = 1; threads && i < jobs; ++i) {
-#ifdef _WIN32
-        if (!(threads[created] = CreateThread(NULL, 0, worker_main, w, 0, NULL))) break;
-#else
-        if (pthread_create(&threads[created], NULL, worker_main, w)) break;
-#endif
-        ++created;
-    }
-    worker(w);
-    for (unsigned i = 0; i < created; ++i) {
-#ifdef _WIN32
-        WaitForSingleObject(threads[i], INFINITE);
-        CloseHandle(threads[i]);
-#else
-        pthread_join(threads[i], NULL);
-#endif
-    }
-#ifdef _WIN32
-    DeleteCriticalSection(&w->lock);
-#else
-    pthread_mutex_destroy(&w->lock);
-#endif
-    free(threads);
+    snx_work_lock_init(&w->lock);
+    snx_run_workers(jobs, worker, w);
+    snx_work_lock_destroy(&w->lock);
     return !w->failed;
 }
 static int by_place(const void* a, const void* b) {
@@ -443,7 +378,7 @@ int snx_ctr_aot_compile(const char* extracted, const SnxCtrSource* game, char* e
         result = 3;
         goto done;
     }
-    if (snx_link(objects, files, exports, 1, leaf(target), &linked, error, error_size)) goto done;
+    if (snx_link(objects, files, exports, 1, snx_path_leaf(target), &linked, error, error_size)) goto done;
     if (linked.size > MODULE_LIMIT) {
         snprintf(error, error_size, "native module output limit exceeded");
         result = 3;

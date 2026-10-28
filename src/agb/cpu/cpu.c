@@ -79,7 +79,7 @@ static uint32_t bus(SnxArmCPU* arm, uint32_t address, uint32_t size_write, uint3
 }
 
 void agb_cpu_init(AgbCpu* cpu, AgbBoard* board, uint8_t* map) {
-    memset(cpu, 0, sizeof(*cpu));
+    *cpu = (AgbCpu){0};
     cpu->board = board;
     cpu->arm.mem = map; /* the flat window: one pointer add per guest access */
     cpu->arm.mem_size = AGB_MAP_SIZE + AGB_MAP_GUARD;
@@ -446,10 +446,10 @@ static int interpret(AgbBoard* board, AgbCpu* cpu, uint32_t word, int thumb) {
         /* The list transfers the recompiler rejects: the S bit form moves the user bank registers, the
            base in the list stores the written back base unless it comes first, and the empty list
            transfers R15 and moves the base by 0x40. List transfers go to the exact addresses. */
-        unsigned n = word >> 16 & 15, list = word & 0xFFFF, count = 0, index = 0, i;
+        unsigned n = word >> 16 & 15, list = word & 0xFFFF, count = 0, index = 0;
         int load = (word >> 20) & 1, pre = !!(word & (1u << 24)), up = !!(word & (1u << 23));
         int wb = !!(word & (1u << 21)), sbit = !!(word & (1u << 22));
-        uint32_t base = n == 15 ? cpu->arm.r[15] + 8 : cpu->arm.r[n], adjusted, start;
+        uint32_t base = n == 15 ? cpu->arm.r[15] + 8 : cpu->arm.r[n];
         if (!list) {
             /* the empty list transfers R15 where the first of 16 registers would go, and moves the base by
                0x40 in its direction */
@@ -463,13 +463,12 @@ static int interpret(AgbBoard* board, AgbCpu* cpu, uint32_t word, int thumb) {
             cpu->arm.r[n] = up ? base + 0x40 : base - 0x40;
             return 0;
         }
-        for (i = 0; i < 16; ++i) count += list >> i & 1;
-        adjusted = up ? base + count * 4 : base - count * 4;
-        start = up ? base + (pre ? 4 : 0) : adjusted + (pre ? 0 : 4);
-        for (i = 0; i < 16; ++i) {
-            uint32_t address;
+        for (unsigned i = 0; i < 16; ++i) count += list >> i & 1;
+        uint32_t adjusted = up ? base + count * 4 : base - count * 4;
+        uint32_t start = up ? base + (pre ? 4 : 0) : adjusted + (pre ? 0 : 4);
+        for (unsigned i = 0; i < 16; ++i) {
             if (!(list >> i & 1)) continue;
-            address = start + index++ * 4;
+            uint32_t address = start + index++ * 4;
             if (load) {
                 uint32_t value = agb_read32(board, address);
                 if (sbit && i != 15) {
@@ -523,7 +522,6 @@ int agb_cpu_run(AgbBoard* board, AgbCpu* cpu, AgbRecomp* recomp, uint32_t cycles
                 uint32_t audio_capacity, uint32_t* audio_written, char* error, size_t error_size) {
     AgbSink sink = {board, audio, audio_capacity, 0, cpu->over};
     while (sink.elapsed < cycles) {
-        const AgbBlock* block;
         /* IntrWait, outside the interrupt handler: over once the handler flagged what it waits for, which it takes out
            of the flags; else it halts for the next interrupt */
         if (cpu->wait && !board->cpu_halted && (cpu->arm.cpsr & 0x1F) != 0x12) {
@@ -547,7 +545,8 @@ int agb_cpu_run(AgbBoard* board, AgbCpu* cpu, AgbRecomp* recomp, uint32_t cycles
             irq_return(board, cpu);
             continue;
         }
-        block = agb_recomp_lookup(recomp, board, cpu->arm.r[15], (cpu->arm.cpsr & SNX_ARM_T) != 0, error, error_size);
+        const AgbBlock* block =
+            agb_recomp_lookup(recomp, board, cpu->arm.r[15], (cpu->arm.cpsr & SNX_ARM_T) != 0, error, error_size);
         if (!block) return -1;
         cpu->arm.exit = SNX_ARM_OK;
         block->fn(&cpu->arm);

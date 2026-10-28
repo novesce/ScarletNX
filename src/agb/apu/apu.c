@@ -182,9 +182,8 @@ void agb_apu_fifo_write(AgbBoard* board, int fifo, const void* bytes, uint32_t s
 }
 
 static int fifo_pop(AgbApu* apu, int fifo) {
-    int8_t sample;
     if (!apu->fifo_count[fifo]) return 0;
-    sample = apu->fifo[fifo][apu->fifo_read[fifo]];
+    int8_t sample = apu->fifo[fifo][apu->fifo_read[fifo]];
     apu->fifo_read[fifo] = (uint8_t)((apu->fifo_read[fifo] + 1) % AGB_FIFO_CAPACITY);
     --apu->fifo_count[fifo];
     return sample;
@@ -213,15 +212,14 @@ static void tick_envelope(AgbApu* apu) {
 }
 
 static void tick_sweep(AgbApu* apu) {
-    uint32_t shift, period = (apu->cnt_l[0] >> 4) & 7;
-    int shadow, frequency;
+    uint32_t period = (apu->cnt_l[0] >> 4) & 7;
     if (!apu->enabled[0] || !period) return;
     if (--apu->sweep_timer[0]) return;
     apu->sweep_timer[0] = period;
-    shift = apu->cnt_l[0] & 7;
+    uint32_t shift = apu->cnt_l[0] & 7;
     if (!shift) return;
-    shadow = apu->sweep_shadow[0];
-    frequency = apu->cnt_l[0] & 0x8 ? shadow - (shadow >> shift) : shadow + (shadow >> shift);
+    int shadow = apu->sweep_shadow[0];
+    int frequency = apu->cnt_l[0] & 0x8 ? shadow - (shadow >> shift) : shadow + (shadow >> shift);
     if (frequency > 0x7FF) {
         apu->enabled[0] = 0;
         return;
@@ -236,12 +234,11 @@ static void tick_sweep(AgbApu* apu) {
    plays its four bit digits, and a stopped channel contributes nothing at all. */
 static int channel_sample(AgbBoard* board, int channel) {
     AgbApu* apu = &board->apu;
-    uint32_t frequency;
     if (!apu->enabled[channel] || !(apu->soundcnt_x & 0x80)) return 0;
     if (channel < 2) {
         int position = apu->duty_position[channel] & 7;
         int high = position < duty_steps[apu->cnt_h[channel] >> 6 & 3];
-        frequency = (uint32_t)(apu->cnt_x[channel] & 0x7FF);
+        uint32_t frequency = (uint32_t)(apu->cnt_x[channel] & 0x7FF);
         /* eight duty positions per wave cycle, 131072 Hz at the middle frequency */
         apu->phase[channel] += 0x10000u * 32 / (2048u - frequency);
         apu->duty_position[channel] = (uint8_t)((apu->duty_position[channel] + (apu->phase[channel] >> 16)) & 7);
@@ -250,19 +247,19 @@ static int channel_sample(AgbBoard* board, int channel) {
     }
     if (channel == 2) {
         uint32_t bank = apu->cnt_l[2] & 0x20;
-        int sample, centered;
+        int sample;
         /* one bank mode plays the selected bank; two bank mode plays the other one */
         if (apu->cnt_l[2] & 0x40) bank = !bank;
         {
             uint8_t byte = apu->wave_ram[bank][(apu->wave_position >> 1) & 15];
             sample = apu->wave_position & 1 ? byte >> 4 : byte & 15;
         }
-        frequency = (uint32_t)(apu->cnt_x[2] & 0x7FF);
+        uint32_t frequency = (uint32_t)(apu->cnt_x[2] & 0x7FF);
         /* 32 four bit digits per wave cycle, one quarter of the square's rate */
         apu->phase[2] += 0x10000u * 64 / (2048u - frequency);
         apu->wave_position = (uint8_t)((apu->wave_position + (apu->phase[2] >> 16)) & 31);
         apu->phase[2] &= 0xFFFF;
-        centered = sample * 2 - 15;
+        int centered = sample * 2 - 15;
         switch (apu->cnt_h[2] >> 13 & 3) {
             case 0: return 0;
             case 2: return centered >> 1;
@@ -274,7 +271,6 @@ static int channel_sample(AgbBoard* board, int channel) {
     {
         uint32_t code = (uint32_t)(apu->cnt_x[3] & 7), shift = (uint32_t)(apu->cnt_x[3] >> 4 & 15);
         uint32_t rate = code ? 524288u / (code << shift) : 1048576u >> shift;
-        int high;
         apu->phase[3] += rate;
         while (apu->phase[3] >= AGB_APU_RATE) {
             uint32_t bit = (apu->noise_lfsr & 1) ^ ((apu->noise_lfsr >> 1) & 1);
@@ -282,7 +278,7 @@ static int channel_sample(AgbBoard* board, int channel) {
             if (apu->cnt_x[3] & 0x80) apu->noise_lfsr = (uint16_t)((apu->noise_lfsr & ~(1u << 6)) | (bit << 6));
             apu->phase[3] -= AGB_APU_RATE;
         }
-        high = !(apu->noise_lfsr & 1);
+        int high = !(apu->noise_lfsr & 1);
         return high ? apu->envelope_volume[3] : -apu->envelope_volume[3];
     }
 }

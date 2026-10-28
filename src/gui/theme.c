@@ -264,6 +264,27 @@ int gui_theme_set(void* object, const GuiThemeKey* key, const char* value) {
     }
     return 0;
 }
+int gui_theme_check(const GuiThemeKey* key, const char* value) {
+    char text[64];
+    GuiRgb c;
+    uint32_t n;
+    int i;
+    switch (key->type) {
+        case GUI_KEY_TEXT:
+            if (strchr(value, '\n')) return 0;
+            if (!key->numeric) return strlen(value) < key->size;
+            return number(value, key->whole, key->lo, key->hi, text, sizeof text);
+        case GUI_KEY_COLOUR: return colour(&c, value);
+        case GUI_KEY_FLAG: return !strcmp(value, "true") || !strcmp(value, "false");
+        case GUI_KEY_NUMBER: return !integer(&n, value) ? 0 : n > key->max ? 2 : 1;
+        case GUI_KEY_WORD:
+            for (i = 0; key->words[i]; ++i)
+                if (!strcmp(value, key->words[i])) return 1;
+            return 0;
+        case GUI_KEY_ACTION: return 0;
+    }
+    return 0;
+}
 void gui_theme_get(const void* object, const GuiThemeKey* key, char* out, size_t size) {
     const char* field = (const char*)object + key->at;
     const GuiRgb* c = (const GuiRgb*)field;

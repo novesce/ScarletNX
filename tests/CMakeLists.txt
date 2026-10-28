@@ -38,9 +38,9 @@ endfunction()
 # what the tests reach that this list misses
 if(SNX_TEST_SANITIZERS)
     cmake_language(DEFER DIRECTORY "${PROJECT_SOURCE_DIR}" CALL snx_test_sanitize
-        # the common code: network, filesystems, LZ4 and xxHash
+        # the common code: network, filesystems, LZ4 and xxHash, the Vulkan setup the frontends share
         scarletnx-common scarletnx-net scarletnx-ldn scarletnx-filesystem snx_demangle snx_lz4
-        snx_xxhash
+        snx_xxhash snx_vk_common
         snx-logscan
         # the recompiler and its backends
         snx_llvm snx_arm_llvm scarletnx-recompiler scarletnx-recompiler-shared
@@ -1033,6 +1033,13 @@ add_executable(snx-test-link-file link_file.c)
 snx_test_target(snx-test-link-file 99)
 target_link_libraries(snx-test-link-file PRIVATE snx_test_common)
 add_test(NAME link_file COMMAND snx-test-link-file)
+if(APPLE)
+    # MoltenVK, which the app carries and a game's runtime copy (outside the bundle) gets beside it (docs/APPLE.md)
+    add_executable(snx-test-vulkan-driver vulkan_driver.c)
+    snx_test_target(snx-test-vulkan-driver 99)
+    target_link_libraries(snx-test-vulkan-driver PRIVATE snx_test_common)
+    add_test(NAME vulkan_driver COMMAND snx-test-vulkan-driver)
+endif()
 add_executable(snx-test-launcher-name launcher_name.c)
 snx_test_target(snx-test-launcher-name 99)
 target_link_libraries(snx-test-launcher-name PRIVATE scarletnx-common)

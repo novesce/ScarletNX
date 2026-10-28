@@ -9,7 +9,7 @@
 #include <string.h>
 
 void agb_memory_init(AgbMemory* memory) {
-    memset(memory, 0, sizeof(*memory));
+    *memory = (AgbMemory){0};
     memory->ewram = (uint8_t*)calloc(1, AGB_EWRAM_SIZE);
     memory->iwram = (uint8_t*)calloc(1, AGB_IWRAM_SIZE);
     memory->palette = (uint8_t*)calloc(1, AGB_PALETTE_SIZE);
@@ -29,7 +29,7 @@ void agb_memory_free(AgbMemory* memory) {
     free(memory->vram);
     free(memory->oam);
     free(memory->sram);
-    memset(memory, 0, sizeof(*memory));
+    *memory = (AgbMemory){0};
 }
 
 static uint32_t vram_offset(uint32_t address) {
@@ -65,17 +65,15 @@ static int is_rom(uint32_t address) { return (address >> 24 & 0x0F) >= 0x08 && (
 static int is_bios(uint32_t address) { return (address & 0x0FFFFFFF) < AGB_BIOS_SIZE; }
 
 uint8_t agb_read8(AgbBoard* board, uint32_t address) {
-    uint8_t* p;
     if ((address >> 24) == 0x04) return (uint8_t)(agb_io_read16(board, address & 0x0FFFFFFE) >> ((address & 1) * 8));
     if ((address >> 24) >= 0x0E) return agb_save_read8(board, address);
     if (is_bios(address)) return (uint8_t)(board->bios_prefetch >> (address & 3) * 8);
-    p = region8(board, address);
+    uint8_t* p = region8(board, address);
     if (p) return *p;
     return is_rom(address) ? rom8(board, address) : 0;
 }
 
 uint16_t agb_read16(AgbBoard* board, uint32_t address) {
-    uint8_t* p;
     address &= 0x0FFFFFFE;
     if ((address >> 24) == 0x04) return agb_io_read16(board, address);
     if ((address >> 24) >= 0x0E) {
@@ -85,13 +83,12 @@ uint16_t agb_read16(AgbBoard* board, uint32_t address) {
     }
     if ((address >> 24) == 0x0D && agb_save_eeprom(board)) return agb_eeprom_read(board);
     if (is_bios(address)) return (uint16_t)(board->bios_prefetch >> (address & 2) * 8);
-    p = region8(board, address);
+    uint8_t* p = region8(board, address);
     if (p) return snx_ld_le16(p);
     return is_rom(address) ? (uint16_t)(rom8(board, address) | rom8(board, address + 1) << 8) : 0;
 }
 
 uint32_t agb_read32(AgbBoard* board, uint32_t address) {
-    uint8_t* p;
     address &= 0x0FFFFFFC;
     if ((address >> 24) == 0x04)
         return agb_io_read16(board, address) | (uint32_t)agb_io_read16(board, address + 2) << 16;
@@ -100,7 +97,7 @@ uint32_t agb_read32(AgbBoard* board, uint32_t address) {
         return byte * 0x01010101u;
     }
     if (is_bios(address)) return board->bios_prefetch;
-    p = region8(board, address);
+    uint8_t* p = region8(board, address);
     if (p) return snx_ld_le32(p);
     if (!is_rom(address)) return 0;
     return (uint32_t)rom8(board, address) | (uint32_t)rom8(board, address + 1) << 8 |
@@ -108,7 +105,6 @@ uint32_t agb_read32(AgbBoard* board, uint32_t address) {
 }
 
 void agb_write8(AgbBoard* board, uint32_t address, uint8_t value) {
-    uint8_t* p;
     if ((address >> 24) == 0x04) {
         agb_io_write16(board, address & 0x0FFFFFFE, (uint16_t)(value * 0x0101u), address & 1 ? 0xFF00 : 0x00FF);
         return;
@@ -117,7 +113,7 @@ void agb_write8(AgbBoard* board, uint32_t address, uint8_t value) {
         agb_save_write8(board, address, value);
         return;
     }
-    p = region8(board, address);
+    uint8_t* p = region8(board, address);
     if (!p) return;
     switch (address >> 24) {
         /* byte writes reach these halfword wide buses as the byte duplicated in both halves */
@@ -135,7 +131,6 @@ void agb_write8(AgbBoard* board, uint32_t address, uint8_t value) {
 }
 
 void agb_write16(AgbBoard* board, uint32_t address, uint16_t value) {
-    uint8_t* p;
     if ((address >> 24) >= 0x0E) {
         /* the save memory is 8 bits wide: a wider store puts one lane's byte down */
         agb_save_write8(board, address, (uint8_t)(value >> ((address & 1) * 8)));
@@ -150,12 +145,11 @@ void agb_write16(AgbBoard* board, uint32_t address, uint16_t value) {
         agb_eeprom_write(board, value, 1); /* a store of the CPU's is a transfer of one */
         return;
     }
-    p = region8(board, address);
+    uint8_t* p = region8(board, address);
     if (p) snx_st_le16(p, value);
 }
 
 void agb_write32(AgbBoard* board, uint32_t address, uint32_t value) {
-    uint8_t* p;
     if ((address >> 24) >= 0x0E) {
         agb_save_write8(board, address, (uint8_t)(value >> ((address & 3) * 8)));
         return;
@@ -166,6 +160,6 @@ void agb_write32(AgbBoard* board, uint32_t address, uint32_t value) {
         agb_io_write16(board, address + 2, (uint16_t)(value >> 16), 0xFFFF);
         return;
     }
-    p = region8(board, address);
+    uint8_t* p = region8(board, address);
     if (p) snx_st_le32(p, value);
 }

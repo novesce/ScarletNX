@@ -2,14 +2,11 @@
    Copyright 2026 the ScarletNX contributors */
 #include "common/cpu/arm/successors.h"
 #include "common/cpu/arm/arm.h"
-#include <string.h>
+#include "common/utilities/endian.h"
 
 static uint32_t sign_extend(uint32_t value, unsigned bits) {
     uint32_t sign = 1u << (bits - 1);
     return (value ^ sign) - sign;
-}
-static uint32_t read32(const unsigned char* p) {
-    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
 }
 /* whether control never reaches the instruction after the A32 instruction w when it runs: a branch without link, a
    write to the PC, BKPT. A call returns there, as does an instruction the block compiler leaves to the backend
@@ -39,9 +36,8 @@ static void a32_next(SnxArmProfile profile, uint32_t pc, uint32_t w, void (*foun
 static void thumb_next(SnxArmProfile profile, uint32_t pc, const unsigned char* code, size_t units, size_t count,
                        void (*found)(void*, uint32_t, int), void* context) {
     size_t used = 0, len = 1;
-    unsigned it_len = 0, it_idx = 0, it_conds[4], cond = 14, i;
-    SnxThumb t;
-    memset(&t, 0, sizeof(t));
+    unsigned it_len = 0, it_idx = 0, it_conds[4], cond = 14;
+    SnxThumb t = {0};
     while (used < units) {
         unsigned hw1 = code[used * 2] | (unsigned)code[used * 2 + 1] << 8;
         unsigned hw2 = used + 1 < count ? code[used * 2 + 2] | (unsigned)code[used * 2 + 3] << 8 : 0;
@@ -58,7 +54,8 @@ static void thumb_next(SnxArmProfile profile, uint32_t pc, const unsigned char* 
             for (it_len = 4; !(mask & 1); mask >>= 1) --it_len;
             mask = t.imm & 15;
             it_idx = 0;
-            for (i = 0; i < it_len; ++i) it_conds[i] = i == 0 ? first : ((first & 0xE) | ((mask >> (4 - i)) & 1));
+            for (unsigned i = 0; i < it_len; ++i)
+                it_conds[i] = i == 0 ? first : ((first & 0xE) | ((mask >> (4 - i)) & 1));
         }
     }
     pc += (uint32_t)used * 2; /* the last instruction */
@@ -130,5 +127,5 @@ void snx_arm_successors(SnxArmProfile profile, uint32_t pc, const unsigned char*
     if (thumb)
         thumb_next(profile, pc, code, units, count, found, context);
     else
-        a32_next(profile, pc + (uint32_t)(units - 1) * 4, read32(code + (units - 1) * 4), found, context);
+        a32_next(profile, pc + (uint32_t)(units - 1) * 4, snx_ld_le32(code + (units - 1) * 4), found, context);
 }

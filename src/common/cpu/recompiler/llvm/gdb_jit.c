@@ -75,9 +75,8 @@ static void notify(struct jit_code_entry* entry, uint32_t action) {
 }
 
 unsigned char* snx_gdb_jit_copy(const void* owner, const void* object, size_t size) {
-    Entry* e;
     if (!__atomic_load_n(&g_gdb_jit.on, __ATOMIC_RELAXED) || size > SIZE_MAX - sizeof(Entry)) return NULL;
-    e = (Entry*)malloc(sizeof(Entry) + size);
+    Entry* e = (Entry*)malloc(sizeof(Entry) + size);
     if (!e) return NULL;
     memcpy(e + 1, object, size);
     e->entry.symfile_addr = (const char*)(e + 1);
@@ -100,10 +99,10 @@ void snx_gdb_jit_add(unsigned char* copy) {
 }
 
 void snx_gdb_jit_remove(const void* owner) {
-    Entry **link, *e;
+    Entry* e;
     if (!__atomic_load_n(&g_gdb_jit.on, __ATOMIC_RELAXED)) return;
     pthread_mutex_lock(&g_gdb_jit.lock);
-    for (link = &g_gdb_jit.first; (e = *link) != NULL;) {
+    for (Entry** link = &g_gdb_jit.first; (e = *link) != NULL;) {
         if (e->owner != owner) {
             link = &e->next;
             continue;

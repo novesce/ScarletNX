@@ -4,15 +4,18 @@
    in the CPU structure, and a call that takes c can read or change any of them, so LLVM keeps each in memory across
    every loop that has one, even a call it never makes (the poll on each backward branch, an FP helper's slow path).
    Once the function is emitted, ir_promote_registers moves those accesses onto a stack slot per register, which
-   SROA and mem2reg make SSA values. Two passes over the function's blocks keep the copies to the few that matter: a
-   call or return (a site) stores the registers written since the last site on some path to it (dirty), and the
-   function loads a register on entry and after a call only where it is read before it is written or stored by a
-   site (live). A store of part of a register (a lane) reads the rest. The CPU structure holds the architectural
-   registers wherever anything else can look at them: in the runtime, a callee, a helper. In between (a fault's crash
-   report) it holds them as they were at the last call. FPCR and FPSR are locals too, for the FP fast paths' tests:
-   the helpers that use only them (ir_noregs) are sites for those two alone, which read FPCR and change FPSR */
+   SROA and mem2reg make SSA values. It runs at O1 and above: at O0 those passes do not run, so the slots and the
+   copies at every site stay, which costs call-heavy code and grows the JIT's arena. Two passes over the function's
+   blocks keep the copies to the few that matter: a call or return (a site) stores the registers written since the
+   last site on some path to it (dirty), and the function loads a register on entry and after a call only where it is
+   read before it is written or stored by a site (live). A store of part of a register (a lane) reads the rest. The
+   CPU structure holds the architectural registers wherever anything else can look at them: in the runtime, a callee,
+   a helper. In between (a fault's crash report) it holds them as they were at the last call. FPCR and FPSR are
+   locals too, for the FP fast paths' tests: the helpers that use only them (ir_noregs) are sites for those two
+   alone, which read FPCR and change FPSR */
 #include "common/cpu/recompiler/llvm/ir.h"
 #include "common/cpu/aarch64/cpu.h"
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -104,24 +107,21 @@ static int push_access(Scan* s, LLVMValueRef inst, unsigned slot, unsigned delta
 /* a load or store of the field at offset through pointer: 0, or -1 when its register can't be promoted */
 static int access(SnxIr* ir, Scan* s, LLVMValueRef inst, LLVMValueRef pointer, size_t offset) {
     LLVMTargetDataRef layout = LLVMGetModuleDataLayout(ir->mod);
-    LLVMValueRef value;
-    unsigned slot, size, kind;
     int store = LLVMIsAStoreInst(inst) != NULL;
     if (store && LLVMGetOperand(inst, 1) != pointer) return -1; /* the pointer itself stored somewhere */
-    value = store ? LLVMGetOperand(inst, 0) : inst;
-    size = (unsigned)LLVMStoreSizeOfType(layout, LLVMTypeOf(value));
-    slot = slot_of(offset, size);
+    LLVMValueRef value = store ? LLVMGetOperand(inst, 0) : inst;
+    unsigned size = (unsigned)LLVMStoreSizeOfType(layout, LLVMTypeOf(value));
+    unsigned slot = slot_of(offset, size);
     if (slot == SLOTS) return 0;
     if (slot > SLOTS || LLVMGetVolatile(inst) || LLVMGetOrdering(inst) != LLVMAtomicOrderingNotAtomic) return -1;
     s->used[slot] = 1;
-    kind = !store ? READ : size == slot_size(slot) ? WRITE : PART;
+    unsigned kind = !store ? READ : size == slot_size(slot) ? WRITE : PART;
     return push_access(s, inst, slot, (unsigned)(offset - slot_offset(slot)), kind);
 }
 
 /* the uses of a pointer to the CPU structure at offset: loads and stores, and calls (sites already) */
 static int pointer_uses(SnxIr* ir, Scan* s, LLVMValueRef pointer, size_t offset) {
-    LLVMUseRef use;
-    for (use = LLVMGetFirstUse(pointer); use; use = LLVMGetNextUse(use)) {
+    for (LLVMUseRef use = LLVMGetFirstUse(pointer); use; use = LLVMGetNextUse(use)) {
         LLVMValueRef user = LLVMGetUser(use);
         if (LLVMIsALoadInst(user) || LLVMIsAStoreInst(user)) {
             if (access(ir, s, user, pointer, offset)) return -1;
@@ -167,9 +167,9 @@ static LLVMTypeRef slot_type(SnxIr* ir, unsigned slot) {
 
 /* *at = *from, as the register's own type */
 static void copy(SnxIr* ir, LLVMBuilderRef b, unsigned slot, LLVMValueRef from, LLVMValueRef at, int to_cpu) {
-    LLVMValueRef load = LLVMBuildLoad2(b, slot_type(ir, slot), from, ""), store;
+    LLVMValueRef load = LLVMBuildLoad2(b, slot_type(ir, slot), from, "");
     LLVMSetAlignment(load, slot_size(slot) > 8 ? 8 : slot_size(slot));
-    store = LLVMBuildStore(b, load, at);
+    LLVMValueRef store = LLVMBuildStore(b, load, at);
     LLVMSetAlignment(store, slot_size(slot) > 8 ? 8 : slot_size(slot));
     ir_tag_cpu(ir, to_cpu ? store : load);
 }
@@ -192,7 +192,7 @@ static int set_join(Set* to, const Set* from) {
 }
 
 static int access_by_inst(const void* a, const void* b) {
-    LLVMValueRef x = ((const Access*)a)->inst, y = ((const Access*)b)->inst;
+    SnxU64 x = (SnxU64)(uintptr_t)((const Access*)a)->inst, y = (SnxU64)(uintptr_t)((const Access*)b)->inst;
     return x < y ? -1 : x > y;
 }
 
@@ -202,13 +202,13 @@ typedef struct {
     size_t index;
 } BlockKey;
 static int key_by_block(const void* a, const void* b) {
-    LLVMBasicBlockRef x = ((const BlockKey*)a)->block, y = ((const BlockKey*)b)->block;
+    SnxU64 x = (SnxU64)(uintptr_t)((const BlockKey*)a)->block, y = (SnxU64)(uintptr_t)((const BlockKey*)b)->block;
     return x < y ? -1 : x > y;
 }
 static size_t block_index(const BlockKey* keys, size_t count, LLVMBasicBlockRef block) {
-    BlockKey key, *found;
+    BlockKey key;
     key.block = block;
-    found = (BlockKey*)bsearch(&key, keys, count, sizeof(*keys), key_by_block);
+    BlockKey* found = (BlockKey*)bsearch(&key, keys, count, sizeof(*keys), key_by_block);
     return found ? found->index : count;
 }
 
@@ -218,16 +218,14 @@ static int returns(LLVMValueRef site) {
 
 /* what a site can see: every register, or (env) FPCR and FPSR; and of those what it can change */
 static Set seen(int env) {
-    Set s;
-    memset(&s, 0, sizeof(s));
+    Set s = {0};
     if (!env) return (Set){{~0ull, ~0ull}};
     set_add(&s, SLOT_FPCR);
     set_add(&s, SLOT_FPSR);
     return s;
 }
 static Set changed(int env) {
-    Set s;
-    memset(&s, 0, sizeof(s));
+    Set s = {0};
     if (!env) return (Set){{~0ull, ~0ull}};
     set_add(&s, SLOT_FPSR);
     return s;
@@ -235,8 +233,7 @@ static Set changed(int env) {
 
 /* the dirty registers after a block's events, from those before it; with record, what each site stores */
 static Set dirty_through(const Block* block, const Event* events, Site* sites, int record, Set dirty) {
-    size_t e;
-    for (e = block->first; e < block->first + block->count; ++e) {
+    for (size_t e = block->first; e < block->first + block->count; ++e) {
         const Event* ev = &events[e];
         if (ev->kind == WRITE || ev->kind == PART)
             set_add(&dirty, ev->index);
@@ -255,8 +252,7 @@ static Set dirty_through(const Block* block, const Event* events, Site* sites, i
 
 /* the live registers before a block's events, from those after it; with reload, what each site loads after it */
 static Set live_through(const Block* block, const Event* events, Site* sites, int reload, Set live) {
-    size_t e;
-    for (e = block->first + block->count; e-- > block->first;) {
+    for (size_t e = block->first + block->count; e-- > block->first;) {
         const Event* ev = &events[e];
         if (ev->kind == READ || ev->kind == PART)
             set_add(&live, ev->index);
@@ -278,105 +274,131 @@ static Set live_through(const Block* block, const Event* events, Site* sites, in
 
 /* the definition of each register reaching each block: UNSEEN before any path reaches it, ENTRY the entry's load,
    else the index of the block that defines it (a write or a site's reload), or of the block a PHI joins it in, where
-   its predecessors bring different ones. Each pass takes every block's meet of its predecessors again, until none
-   changes. phis[slot] counts the PHIs where the register is live. 0, or -1 out of memory */
+   its predecessors bring different ones. A block takes its predecessors' meet again whenever one of them changed,
+   until none does: sweeping every block until nothing changed moved a change one block a sweep wherever a successor
+   came first, and a function of 58185 blocks took minutes of sweeps. phis[slot] counts the PHIs where the register is
+   live. 0, or -1 out of memory */
 #define UNSEEN ((size_t)-1)
 #define ENTRY  ((size_t)-2)
 static int count_phis(const Block* blocks, size_t nblocks, const BlockKey* keys, const Event* events,
                       const Site* sites, size_t* phis) {
     size_t *in = (size_t*)malloc(nblocks * SLOTS * sizeof(*in)), *pred_first = (size_t*)calloc(nblocks + 1, sizeof(size_t));
-    size_t *preds = NULL, npreds = 0, i, k, e, pass;
+    size_t *succ_first = (size_t*)calloc(nblocks + 1, sizeof(size_t));
+    size_t* work = (size_t*)malloc((nblocks ? nblocks : 1) * sizeof(*work));
+    size_t *preds = NULL, *succs = NULL, npreds = 0, nsucc = 0, k, head = 0, queued_n = 0;
     Set* defines = (Set*)calloc(nblocks, sizeof(*defines));
+    unsigned char* queued = (unsigned char*)calloc(nblocks ? nblocks : 1, 1);
     int changed, rc = -1;
-    unsigned slot;
-    if (!in || !pred_first || !defines) goto done;
-    /* the predecessors, as lists by block: counted, then placed */
-    for (pass = 0; pass < 2; ++pass) {
+    if (!in || !pred_first || !succ_first || !work || !defines || !queued) goto done;
+    /* the predecessors and successors, as lists by block: counted, then placed */
+    for (size_t pass = 0; pass < 2; ++pass) {
         size_t* fill = NULL;
         if (pass) {
-            for (i = 0; i < nblocks; ++i) pred_first[i + 1] += pred_first[i];
+            for (size_t i = 0; i < nblocks; ++i) {
+                pred_first[i + 1] += pred_first[i];
+                succ_first[i + 1] += succ_first[i];
+            }
             preds = (size_t*)malloc((npreds ? npreds : 1) * sizeof(*preds));
+            succs = (size_t*)malloc((npreds ? npreds : 1) * sizeof(*succs));
             fill = (size_t*)malloc((nblocks ? nblocks : 1) * sizeof(*fill));
-            if (!preds || !fill) {
+            if (!preds || !succs || !fill) {
                 free(fill);
                 goto done;
             }
             memcpy(fill, pred_first, nblocks * sizeof(*fill));
         }
-        for (i = 0; i < nblocks; ++i) {
+        for (size_t i = 0; i < nblocks; ++i) {
             LLVMValueRef term = LLVMGetBasicBlockTerminator(blocks[i].block);
-            unsigned n = term ? LLVMGetNumSuccessors(term) : 0, j;
-            for (j = 0; j < n; ++j) {
+            unsigned n = term ? LLVMGetNumSuccessors(term) : 0;
+            for (unsigned j = 0; j < n; ++j) {
                 k = block_index(keys, nblocks, LLVMGetSuccessor(term, j));
                 if (k >= nblocks) continue;
-                if (pass)
+                if (pass) {
                     preds[fill[k]++] = i;
-                else {
+                    succs[nsucc++] = k;
+                } else {
                     ++pred_first[k + 1];
+                    ++succ_first[i + 1];
                     ++npreds;
                 }
             }
         }
         free(fill);
     }
-    for (i = 0; i < nblocks; ++i)
-        for (e = blocks[i].first; e < blocks[i].first + blocks[i].count; ++e) {
+    for (size_t i = 0; i < nblocks; ++i)
+        for (size_t e = blocks[i].first; e < blocks[i].first + blocks[i].count; ++e) {
             const Event* ev = &events[e];
             if (ev->kind == WRITE || ev->kind == PART)
                 set_add(&defines[i], ev->index);
             else if (ev->kind == SITE)
                 (void)set_join(&defines[i], &sites[ev->index].reload);
         }
-    for (i = 0; i < nblocks * SLOTS; ++i) in[i] = i < SLOTS ? ENTRY : UNSEEN;
-    /* a PHI stays one (the meet only moves up: UNSEEN, one definition, a PHI), so passes are bounded */
-    do {
+    for (size_t i = 0; i < nblocks * SLOTS; ++i) in[i] = i < SLOTS ? ENTRY : UNSEEN;
+    /* every block but the entry once, in order, then again each block a predecessor of changed: a PHI stays one (the
+       meet only moves up: UNSEEN, one definition, a PHI), so the work is bounded */
+    for (k = 1; k < nblocks; ++k) {
+        work[queued_n++] = k;
+        queued[k] = 1;
+    }
+    while (queued_n) {
+        k = work[head];
+        head = head + 1 == nblocks ? 0 : head + 1;
+        --queued_n;
+        queued[k] = 0;
         changed = 0;
-        for (k = 1; k < nblocks; ++k)
-            for (slot = 0; slot < SLOTS; ++slot) {
-                size_t meet = UNSEEN, p;
-                if (in[k * SLOTS + slot] == k) continue;
-                for (p = pred_first[k]; p < pred_first[k + 1]; ++p) {
-                    size_t from = preds[p], out = set_has(&defines[from], slot) ? from : in[from * SLOTS + slot];
-                    if (out == UNSEEN || out == meet) continue;
-                    if (meet != UNSEEN) {
-                        meet = k;
-                        break;
-                    }
-                    meet = out;
+        for (unsigned slot = 0; slot < SLOTS; ++slot) {
+            size_t meet = UNSEEN;
+            if (in[k * SLOTS + slot] == k) continue;
+            for (size_t p = pred_first[k]; p < pred_first[k + 1]; ++p) {
+                size_t from = preds[p], out = set_has(&defines[from], slot) ? from : in[from * SLOTS + slot];
+                if (out == UNSEEN || out == meet) continue;
+                if (meet != UNSEEN) {
+                    meet = k;
+                    break;
                 }
-                if (meet != in[k * SLOTS + slot]) {
-                    in[k * SLOTS + slot] = meet;
-                    changed = 1;
-                }
+                meet = out;
             }
-    } while (changed);
+            if (meet != in[k * SLOTS + slot]) {
+                in[k * SLOTS + slot] = meet;
+                changed = 1;
+            }
+        }
+        if (changed)
+            for (size_t i = succ_first[k]; i < succ_first[k + 1]; ++i) {
+                size_t to = succs[i];
+                if (!to || queued[to]) continue;
+                work[(head + queued_n++) % nblocks] = to;
+                queued[to] = 1;
+            }
+    }
     memset(phis, 0, SLOTS * sizeof(*phis));
     for (k = 1; k < nblocks; ++k)
-        for (slot = 0; slot < SLOTS; ++slot)
+        for (unsigned slot = 0; slot < SLOTS; ++slot)
             if (in[k * SLOTS + slot] == k && set_has(&blocks[k].live_in, slot)) ++phis[slot];
     rc = 0;
 done:
     free(in);
     free(pred_first);
+    free(succ_first);
+    free(work);
     free(preds);
+    free(succs);
     free(defines);
+    free(queued);
     return rc;
 }
 
 void ir_promote_registers(SnxIr* ir, LLVMValueRef fn) {
-    Scan s;
+    Scan s = {0};
     LLVMBasicBlockRef bb;
-    LLVMValueRef inst, local[SLOTS];
-    LLVMBuilderRef b;
+    LLVMValueRef local[SLOTS];
     Block* blocks = NULL;
     BlockKey* keys = NULL;
     Event* events = NULL;
     Site* sites = NULL;
     size_t i, nblocks = 0, nevents = 0, nsites = 0, cap = 0, site_cap = 0, k;
     size_t phis[SLOTS];
-    unsigned slot;
     int changed;
-    memset(&s, 0, sizeof(s));
     if (pointer_uses(ir, &s, ir->c, 0) || !s.count) goto done;
     qsort(s.access, s.count, sizeof(*s.access), access_by_inst);
     /* the blocks and their events */
@@ -389,7 +411,7 @@ void ir_promote_registers(SnxIr* ir, LLVMValueRef fn) {
         blocks[i].first = nevents;
         keys[i].block = bb;
         keys[i].index = i;
-        for (inst = LLVMGetFirstInstruction(bb); inst; inst = LLVMGetNextInstruction(inst)) {
+        for (LLVMValueRef inst = LLVMGetFirstInstruction(bb); inst; inst = LLVMGetNextInstruction(inst)) {
             Event ev;
             if (LLVMIsALoadInst(inst) || LLVMIsAStoreInst(inst)) {
                 Access key, *a;
@@ -407,7 +429,7 @@ void ir_promote_registers(SnxIr* ir, LLVMValueRef fn) {
                     if (!grown) goto done;
                     sites = grown;
                 }
-                memset(&sites[nsites], 0, sizeof(*sites));
+                sites[nsites] = (Site){0};
                 sites[nsites].inst = inst;
                 sites[nsites].env = LLVMIsACallInst(inst) && call_site(inst) == ENV;
                 ev.kind = SITE;
@@ -446,12 +468,11 @@ void ir_promote_registers(SnxIr* ir, LLVMValueRef fn) {
         for (i = nblocks; i-- > 0;) {
             LLVMValueRef term = LLVMGetBasicBlockTerminator(blocks[i].block);
             unsigned n = term ? LLVMGetNumSuccessors(term) : 0, j;
-            Set in;
             for (j = 0; j < n; ++j) {
                 k = block_index(keys, nblocks, LLVMGetSuccessor(term, j));
                 if (k < nblocks) (void)set_join(&blocks[i].live_out, &blocks[k].live_in);
             }
-            in = live_through(&blocks[i], events, sites, 0, blocks[i].live_out);
+            Set in = live_through(&blocks[i], events, sites, 0, blocks[i].live_out);
             if (set_join(&blocks[i].live_in, &in)) changed = 1;
         }
     } while (changed);
@@ -463,22 +484,21 @@ void ir_promote_registers(SnxIr* ir, LLVMValueRef fn) {
        register allocator then spends its time on */
     if (count_phis(blocks, nblocks, keys, events, sites, phis)) goto done;
     {
-        size_t uses[SLOTS];
-        memset(uses, 0, sizeof(uses));
+        size_t uses[SLOTS] = {0};
         for (i = 0; i < s.count; ++i) ++uses[s.access[i].slot];
-        for (slot = 0; slot < SLOTS; ++slot)
+        for (unsigned slot = 0; slot < SLOTS; ++slot)
             if (phis[slot] > uses[slot] + 8) s.used[slot] = 0;
     }
-    b = LLVMCreateBuilderInContext(ir->ctx);
+    LLVMBuilderRef b = LLVMCreateBuilderInContext(ir->ctx);
     /* the locals, loaded on entry where live */
     LLVMPositionBuilderBefore(b, LLVMGetFirstInstruction(blocks[0].block));
-    for (slot = 0; slot < SLOTS; ++slot) {
+    for (unsigned slot = 0; slot < SLOTS; ++slot) {
         local[slot] = NULL;
         if (!s.used[slot]) continue;
         local[slot] = LLVMBuildAlloca(b, slot_type(ir, slot), "");
         LLVMSetAlignment(local[slot], slot_size(slot) > 8 ? 16 : slot_size(slot));
     }
-    for (slot = 0; slot < SLOTS; ++slot)
+    for (unsigned slot = 0; slot < SLOTS; ++slot)
         if (local[slot] && set_has(&blocks[0].live_in, slot))
             copy(ir, b, slot, cpu_pointer(ir, b, slot), local[slot], 0);
     /* every access on its local */
@@ -499,11 +519,11 @@ void ir_promote_registers(SnxIr* ir, LLVMValueRef fn) {
     for (i = 0; i < nsites; ++i) {
         LLVMValueRef site = sites[i].inst;
         LLVMPositionBuilderBefore(b, site);
-        for (slot = 0; slot < SLOTS; ++slot)
+        for (unsigned slot = 0; slot < SLOTS; ++slot)
             if (local[slot] && set_has(&sites[i].dirty, slot)) copy(ir, b, slot, local[slot], cpu_pointer(ir, b, slot), 1);
         if (!returns(site)) continue;
         LLVMPositionBuilderBefore(b, LLVMGetNextInstruction(site));
-        for (slot = 0; slot < SLOTS; ++slot)
+        for (unsigned slot = 0; slot < SLOTS; ++slot)
             if (local[slot] && set_has(&sites[i].reload, slot)) copy(ir, b, slot, cpu_pointer(ir, b, slot), local[slot], 0);
     }
     LLVMDisposeBuilder(b);

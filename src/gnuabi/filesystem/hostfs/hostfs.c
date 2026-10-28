@@ -136,7 +136,7 @@ static unsigned host_type(unsigned mode) {
 }
 
 static void from_host(const HostStat* h, GnuStat* st) {
-    memset(st, 0, sizeof *st);
+    *st = (GnuStat){0};
     st->dev = (uint64_t)h->st_dev;
     st->inode = (uint64_t)h->st_ino;
     st->mode = host_type((unsigned)h->st_mode) | ((unsigned)h->st_mode & 07777);
@@ -205,10 +205,9 @@ static void host_name(const char* guest, char* host, size_t capacity) {
 int gnu_hostfs_guest_path(GnuVfsState* s, const char* host, char* guest, size_t capacity) {
     size_t n = s->sysroot ? strlen(s->sysroot) : 0;
     char copy[GNU_VFS_PATH_MAX];
-    size_t i;
     if (strlen(host) >= sizeof copy) return -GNU_ENAMETOOLONG;
     strcpy(copy, host);
-    for (i = 0; copy[i]; ++i)
+    for (size_t i = 0; copy[i]; ++i)
         if (copy[i] == '\\') copy[i] = '/';
     if (n && !strncmp(copy, s->sysroot, n) && (copy[n] == '/' || !copy[n])) {
         snprintf(guest, capacity, "%s", copy[n] ? copy + n : "/");
@@ -261,8 +260,7 @@ static int descriptor_folder(GnuVfsState* s, int fd, char* out) {
 }
 
 static GnuNode* virtual_child(GnuNode* parent, const char* name) {
-    GnuNode* n;
-    for (n = parent ? parent->children : NULL; n; n = n->sibling)
+    for (GnuNode* n = parent ? parent->children : NULL; n; n = n->sibling)
         if (!n->deleted && !strcmp(n->name, name)) return n;
     return NULL;
 }
@@ -633,9 +631,9 @@ static int read_listing(GnuOpen* f) {
                 list = bigger;
             }
             memset(list + used, 0, 8);
-            gnu_vfs_put64(list + used, (uint64_t)(used + 1));
+            snx_st_le64(list + used, (uint64_t)(used + 1));
             list[used + 8] = (unsigned char)type;
-            gnu_vfs_put16(list + used + 9, (uint16_t)n);
+            snx_st_le16(list + used + 9, (uint16_t)n);
             memcpy(list + used + 11, name, n + 1);
             used += 11 + n + 1;
         } while (FindNextFileW(search, &found));
@@ -666,9 +664,9 @@ static int read_listing(GnuOpen* f) {
                 }
                 list = bigger;
             }
-            gnu_vfs_put64(list + used, (uint64_t)entry->d_ino);
+            snx_st_le64(list + used, (uint64_t)entry->d_ino);
             list[used + 8] = (unsigned char)type;
-            gnu_vfs_put16(list + used + 9, (uint16_t)n);
+            snx_st_le16(list + used + 9, (uint16_t)n);
             memcpy(list + used + 11, entry->d_name, n + 1);
             used += 11 + n + 1;
         }
@@ -690,7 +688,7 @@ int64_t gnu_hostfs_getdents(GnuOpen* f, unsigned char* destination, size_t count
     /* the listing is read again from the start, as rewinddir does */
     if ((!f->entries || !f->offset) && (error = read_listing(f))) return error;
     while (at < f->entries_size) {
-        size_t n = (size_t)f->entries[at + 9] | (size_t)f->entries[at + 10] << 8;
+        size_t n = snx_ld_le16(f->entries + at + 9);
         size_t length = (19 + n + 1 + 7) & ~(size_t)7;
         if (index++ >= f->offset) {
             unsigned char* record;
@@ -701,8 +699,8 @@ int64_t gnu_hostfs_getdents(GnuOpen* f, unsigned char* destination, size_t count
             record = destination + used;
             memset(record, 0, length);
             memcpy(record, f->entries + at, 8);
-            gnu_vfs_put64(record + 8, index);
-            gnu_vfs_put16(record + 16, (uint16_t)length);
+            snx_st_le64(record + 8, index);
+            snx_st_le16(record + 16, (uint16_t)length);
             record[18] = f->entries[at + 8];
             memcpy(record + 19, f->entries + at + 11, n + 1);
             used += length;
@@ -745,10 +743,10 @@ int64_t gnu_hostfs_ioctl(GnuOpen* f, GnuMemory* memory, uint32_t request, uint64
 #ifdef _WIN32
             if (!_isatty(f->host)) return -GNU_ENOTTY;
             memset(bytes, 0, 60);
-            gnu_vfs_put32(bytes + 0, 0x500);  /* ICRNL | IXON */
-            gnu_vfs_put32(bytes + 4, 0x5);    /* OPOST | ONLCR */
-            gnu_vfs_put32(bytes + 8, 0xbf);   /* B38400 | CS8 | CREAD */
-            gnu_vfs_put32(bytes + 12, 0x8a3b); /* ISIG | ICANON | ECHO... */
+            snx_st_le32(bytes + 0, 0x500);  /* ICRNL | IXON */
+            snx_st_le32(bytes + 4, 0x5);    /* OPOST | ONLCR */
+            snx_st_le32(bytes + 8, 0xbf);   /* B38400 | CS8 | CREAD */
+            snx_st_le32(bytes + 12, 0x8a3b); /* ISIG | ICANON | ECHO... */
             return gnu_memory_write(memory, argument, bytes, 60);
 #else
         {
@@ -757,17 +755,17 @@ int64_t gnu_hostfs_ioctl(GnuOpen* f, GnuMemory* memory, uint32_t request, uint64
             memset(bytes, 0, 60);
 #ifdef __linux__
             /* Linux's termios is the same on every architecture but the c_cc size; the flags are the guest's */
-            gnu_vfs_put32(bytes + 0, (uint32_t)t.c_iflag);
-            gnu_vfs_put32(bytes + 4, (uint32_t)t.c_oflag);
-            gnu_vfs_put32(bytes + 8, (uint32_t)t.c_cflag);
-            gnu_vfs_put32(bytes + 12, (uint32_t)t.c_lflag);
+            snx_st_le32(bytes + 0, (uint32_t)t.c_iflag);
+            snx_st_le32(bytes + 4, (uint32_t)t.c_oflag);
+            snx_st_le32(bytes + 8, (uint32_t)t.c_cflag);
+            snx_st_le32(bytes + 12, (uint32_t)t.c_lflag);
             bytes[16] = (unsigned char)t.c_line;
             memcpy(bytes + 17, t.c_cc, sizeof t.c_cc < 19 ? sizeof t.c_cc : 19);
 #else
-            gnu_vfs_put32(bytes + 0, 0x500);
-            gnu_vfs_put32(bytes + 4, 0x5);
-            gnu_vfs_put32(bytes + 8, 0xbf);
-            gnu_vfs_put32(bytes + 12, 0x8a3b);
+            snx_st_le32(bytes + 0, 0x500);
+            snx_st_le32(bytes + 4, 0x5);
+            snx_st_le32(bytes + 8, 0xbf);
+            snx_st_le32(bytes + 12, 0x8a3b);
 #endif
             return gnu_memory_write(memory, argument, bytes, 60);
         }
@@ -778,15 +776,15 @@ int64_t gnu_hostfs_ioctl(GnuOpen* f, GnuMemory* memory, uint32_t request, uint64
             HANDLE h = (HANDLE)_get_osfhandle(f->host);
             if (!_isatty(f->host) || !GetConsoleScreenBufferInfo(h, &info)) return -GNU_ENOTTY;
             memset(bytes, 0, 8);
-            gnu_vfs_put16(bytes, (uint16_t)(info.srWindow.Bottom - info.srWindow.Top + 1));
-            gnu_vfs_put16(bytes + 2, (uint16_t)(info.srWindow.Right - info.srWindow.Left + 1));
+            snx_st_le16(bytes, (uint16_t)(info.srWindow.Bottom - info.srWindow.Top + 1));
+            snx_st_le16(bytes + 2, (uint16_t)(info.srWindow.Right - info.srWindow.Left + 1));
 #else
             struct winsize w;
             if (ioctl(f->host, TIOCGWINSZ, &w)) return fail();
-            gnu_vfs_put16(bytes, w.ws_row);
-            gnu_vfs_put16(bytes + 2, w.ws_col);
-            gnu_vfs_put16(bytes + 4, w.ws_xpixel);
-            gnu_vfs_put16(bytes + 6, w.ws_ypixel);
+            snx_st_le16(bytes, w.ws_row);
+            snx_st_le16(bytes + 2, w.ws_col);
+            snx_st_le16(bytes + 4, w.ws_xpixel);
+            snx_st_le16(bytes + 6, w.ws_ypixel);
 #endif
             return gnu_memory_write(memory, argument, bytes, 8);
         }
@@ -804,7 +802,7 @@ int64_t gnu_hostfs_ioctl(GnuOpen* f, GnuMemory* memory, uint32_t request, uint64
 #else
             if (ioctl(f->host, FIONREAD, &available)) return fail();
 #endif
-            gnu_vfs_put32(bytes, (uint32_t)available);
+            snx_st_le32(bytes, (uint32_t)available);
             return gnu_memory_write(memory, argument, bytes, 4);
         }
     }
@@ -832,8 +830,7 @@ static int path_stat(GnuHostPath* at, GnuStat* st) {
 }
 
 static int64_t host_statfs(GnuMemory* memory, const char* host, uint64_t address) {
-    unsigned char bytes[120];
-    memset(bytes, 0, sizeof bytes);
+    unsigned char bytes[120] = {0};
 #ifdef _WIN32
     {
         ULARGE_INTEGER available, total, free_bytes;
@@ -841,28 +838,28 @@ static int64_t host_statfs(GnuMemory* memory, const char* host, uint64_t address
         BOOL ok = w && GetDiskFreeSpaceExW(w, &available, &total, &free_bytes);
         free(w);
         if (!ok) return -GNU_ENOENT;
-        gnu_vfs_put64(bytes + 8, 4096);
-        gnu_vfs_put64(bytes + 16, total.QuadPart / 4096);
-        gnu_vfs_put64(bytes + 24, free_bytes.QuadPart / 4096);
-        gnu_vfs_put64(bytes + 32, available.QuadPart / 4096);
-        gnu_vfs_put64(bytes + 64, 255);
-        gnu_vfs_put64(bytes + 72, 4096);
+        snx_st_le64(bytes + 8, 4096);
+        snx_st_le64(bytes + 16, total.QuadPart / 4096);
+        snx_st_le64(bytes + 24, free_bytes.QuadPart / 4096);
+        snx_st_le64(bytes + 32, available.QuadPart / 4096);
+        snx_st_le64(bytes + 64, 255);
+        snx_st_le64(bytes + 72, 4096);
     }
 #else
     {
         struct statvfs v;
         if (statvfs(host, &v)) return fail();
-        gnu_vfs_put64(bytes + 8, (uint64_t)v.f_bsize);
-        gnu_vfs_put64(bytes + 16, (uint64_t)v.f_blocks);
-        gnu_vfs_put64(bytes + 24, (uint64_t)v.f_bfree);
-        gnu_vfs_put64(bytes + 32, (uint64_t)v.f_bavail);
-        gnu_vfs_put64(bytes + 40, (uint64_t)v.f_files);
-        gnu_vfs_put64(bytes + 48, (uint64_t)v.f_ffree);
-        gnu_vfs_put64(bytes + 64, (uint64_t)v.f_namemax);
-        gnu_vfs_put64(bytes + 72, (uint64_t)v.f_frsize);
+        snx_st_le64(bytes + 8, (uint64_t)v.f_bsize);
+        snx_st_le64(bytes + 16, (uint64_t)v.f_blocks);
+        snx_st_le64(bytes + 24, (uint64_t)v.f_bfree);
+        snx_st_le64(bytes + 32, (uint64_t)v.f_bavail);
+        snx_st_le64(bytes + 40, (uint64_t)v.f_files);
+        snx_st_le64(bytes + 48, (uint64_t)v.f_ffree);
+        snx_st_le64(bytes + 64, (uint64_t)v.f_namemax);
+        snx_st_le64(bytes + 72, (uint64_t)v.f_frsize);
     }
 #endif
-    gnu_vfs_put64(bytes, 0xEF53); /* f_type: ext4's magic, what a Linux program expects of a disk */
+    snx_st_le64(bytes, 0xEF53); /* f_type: ext4's magic, what a Linux program expects of a disk */
     return gnu_memory_write(memory, address, bytes, sizeof bytes);
 }
 
@@ -884,8 +881,7 @@ static int64_t host_utimens(GnuMemory* memory, const char* host, uint64_t times)
 #else
     {
         struct timespec ts[2];
-        int i;
-        for (i = 0; i < 2 && times; ++i) {
+        for (int i = 0; i < 2 && times; ++i) {
             ts[i].tv_sec = (time_t)t[i * 2];
             /* UTIME_NOW and UTIME_OMIT are Linux's values; other hosts have their own */
             ts[i].tv_nsec = t[i * 2 + 1] == 0x3fffffff   ? UTIME_NOW

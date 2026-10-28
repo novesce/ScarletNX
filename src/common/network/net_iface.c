@@ -79,7 +79,7 @@ static int list_interfaces(SnxNetInterface* out, int max) {
         for (IP_ADAPTER_UNICAST_ADDRESS* u = a->FirstUnicastAddress; u && n < max; u = u->Next) {
             if (u->Address.lpSockaddr->sa_family != AF_INET) continue;
             SnxNetInterface* i = &out[n++];
-            memset(i, 0, sizeof *i);
+            *i = (SnxNetInterface){0};
             memcpy(i->ip, &((struct sockaddr_in*)u->Address.lpSockaddr)->sin_addr, 4);
             mask_of(u->OnLinkPrefixLength, i->mask);
             for (IP_ADAPTER_GATEWAY_ADDRESS* g = a->FirstGatewayAddress; g; g = g->Next)
@@ -157,13 +157,12 @@ static void apple_gateway(const char* name, uint8_t out[4]) {
     int mib[6] = {CTL_NET, PF_ROUTE, 0, AF_INET, NET_RT_FLAGS, RTF_GATEWAY};
     unsigned index = if_nametoindex(name);
     size_t size = 0;
-    char *table, *p;
     if (!index || sysctl(mib, 6, NULL, &size, NULL, 0) || !size) return;
     size += size / 4; /* room for routes added since */
-    table = malloc(size);
+    char* table = malloc(size);
     if (!table) return;
     if (!sysctl(mib, 6, table, &size, NULL, 0))
-        for (p = table; p + sizeof(struct rt_msghdr) <= table + size;) {
+        for (char* p = table; p + sizeof(struct rt_msghdr) <= table + size;) {
             const struct rt_msghdr* m = (const struct rt_msghdr*)p;
             const struct sockaddr *dst = NULL, *gw = NULL;
             const char* a = (const char*)(m + 1);
@@ -218,7 +217,7 @@ static int list_interfaces(SnxNetInterface* out, int max) {
             (a->ifa_flags & IFF_LOOPBACK))
             continue;
         SnxNetInterface* i = &out[n++];
-        memset(i, 0, sizeof *i);
+        *i = (SnxNetInterface){0};
         snprintf(i->name, sizeof i->name, "%s", a->ifa_name);
         memcpy(i->ip, &((struct sockaddr_in*)a->ifa_addr)->sin_addr, 4);
         memcpy(i->mask, &((struct sockaddr_in*)a->ifa_netmask)->sin_addr, 4);
@@ -240,11 +239,11 @@ static int list_interfaces(SnxNetInterface* out, int max) {
 int snx_net_dns_servers(uint8_t (*ipv4)[4], int max, char* text, size_t text_size) {
     struct __res_state res;
     union res_sockaddr_union servers[MAXNS];
-    int n = 0, count;
+    int n = 0;
     if (text && text_size) text[0] = 0;
     memset(&res, 0, sizeof res);
     if (res_ninit(&res)) return 0;
-    count = res_getservers(&res, servers, MAXNS);
+    int count = res_getservers(&res, servers, MAXNS);
     for (int i = 0; i < count; i++) {
         char name[INET6_ADDRSTRLEN];
         const void* addr = servers[i].sin.sin_family == AF_INET    ? (const void*)&servers[i].sin.sin_addr

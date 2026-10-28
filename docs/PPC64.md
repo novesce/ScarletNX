@@ -88,9 +88,9 @@ and CI check these paths on 4 KiB hosts (`ldr_service_64k_pages`, `gnuabi_memory
 
 ## What differs from the other hosts
 
-- **The baseline is POWER8** unless a big-endian build names an older machine (`SNX_PPC64_CPU` in
-  `cmake/cross.cmake`, [below](#the-powerpc-970-and-power4)). Before it there is no `lqarx`/`stqcx.`, and the 128-bit
-  compare-and-swap that STXP becomes would be a libatomic call, which a module doesn't link.
+- **The baseline is POWER4** but see [below](#the-powerpc-970-and-power4). Before it there is
+  no `lqarx`/`stqcx.`, and the 128-bit compare-and-swap that STXP becomes would be a libatomic call,
+  which a module doesn't link.
 - **Guest tail calls go through stubs.** Without POWER10's PC-relative code, LLVM refuses a guaranteed tail call to a
   function it can't see shares the caller's TOC: another unit's function, or a pointer. A module has one TOC, so the
   jump is safe, and `ppc_tail_calls` in `src/common/cpu/recompiler/llvm/ir.c` sends those calls to a naked stub of the
@@ -214,8 +214,7 @@ build machine's Wayland and DRM.
 
 ## The PowerPC 970 and POWER4
 
-`SNX_PPC64_CPU` names the oldest CPU a big-endian build runs on: `power8` (the default), `power7` to `power4`, or
-`970` for the PowerPC 970 of the PowerMac G5. The `linux-ppc64-g5-cross` preset is the ELFv2 build for the 970.
+For the PowerPC 970 of the PowerMac G5. The `linux-ppc64-g5-cross` preset is the ELFv2 build for the 970.
 Clang, FFmpeg and the recompiler's runtime library are built for it, and the recompiler builds a game's module for
 the host's CPU, or for this one where the host's name isn't known. What changes before POWER8:
 

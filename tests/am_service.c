@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
    Copyright 2026 the ScarletNX contributors */
-/* Inline keyboard lifecycle and fixed-size SDK replies, with a deterministic host dialog. */
+/* Inline keyboard lifecycle and fixed-size SDK replies, with the keyboard's box and its player stood in for. */
 #include "nx/hle/services/services_int.h"
 #include <math.h>
 #include <stdarg.h>
@@ -29,9 +29,23 @@ static void test_fail(const char* expression, int line) {
 void pm_init(PMutex* m) { (void)m; }
 void pm_lock(PMutex* m) { (void)m; }
 void pm_unlock(PMutex* m) { (void)m; }
+void pc_init(PCond* c) { (void)c; }
+void pc_broadcast(PCond* c) { (void)c; }
+/* the log's lines since the last log_has, which looks for one */
+static char test_log[16384];
 void logf_(int level, const char* format, ...) {
+    size_t n = strlen(test_log);
+    va_list args;
     (void)level;
-    (void)format;
+    va_start(args, format);
+    vsnprintf(test_log + n, sizeof test_log - n, format, args);
+    va_end(args);
+}
+static int log_has(const char* line) {
+    int found = strstr(test_log, line) != NULL;
+    if (!found) fprintf(stderr, "am_service.c: the log has no \"%s\" in:\n%s", line, test_log);
+    test_log[0] = 0;
+    return found;
 }
 void fatal(const char* format, ...) {
     va_list args;
@@ -169,14 +183,32 @@ int hid_connected_players(u32* selected_id) {
     *selected_id = 0;
     return test_players;
 }
-static const char* dialog_text = "Aé😀";
-static const char* dialog_then; /* what the dialog answers from its second time on, when set */
-static int dialog_cancel, dialog_calls;
+/* The keyboard's box, as the backend's stand-in: the last one shown and how many have, the ticket last hidden, and no
+   window to show one in when no_window. The player answers a whole applet's box while its thread waits for it
+   (kthread_wait): player_text, or a cancel */
+static OverlayKeyboard box_shown;
+static int box_shows, no_window;
+static u32 box_hidden;
+static const char* player_text = "Aé😀";
+static int player_cancels;
 static int modern_packet;
-int plat_text_input(char* out, size_t cap, const char* initial) {
-    (void)initial;
-    snprintf(out, cap, "%s", dialog_calls++ && dialog_then ? dialog_then : dialog_text);
-    return dialog_cancel;
+static u32 appear_min; /* the inline keyboard's least, in its appear argument */
+int backend_keyboard_show(const OverlayKeyboard* k) {
+    if (no_window) return -1;
+    box_shown = *k;
+    box_shows++;
+    return 0;
+}
+void backend_keyboard_hide(u32 ticket) { box_hidden = ticket; }
+static int popped_while_waiting; /* a whole keyboard applet counted as popped while its thread waited */
+int kthread_wait(PCond* c, PMutex* m, i64 timeout_ns) {
+    int i;
+    (void)c, (void)m, (void)timeout_ns;
+    for (i = 0; i < AM_APPLETS; i++)
+        if (g_hle.am.applets[i].obj && g_hle.am.applets[i].applet_id == 0x11)
+            popped_while_waiting |= g_hle.am.applets[i].out_popped;
+    am_keyboard_answered(box_shown.ticket, player_cancels, player_text);
+    return 0;
 }
 /* a storage's numbers, little-endian as the game has them */
 static void put32(u8* dst, u32 v) { snx_st_le32(dst, v); }
@@ -187,6 +219,9 @@ static void send_request(SvcObj* a, u32 request, u64 flags, int utf8) {
     put32(packet, request);
     snx_st_le64(packet + 12, flags);
     put32(packet + 4 + (modern_packet ? 0x38 : 0x40), 20);
+    put32(packet + 4 + (modern_packet ? 0x3C : 0x44), appear_min);
+    packet[4 + (modern_packet ? 0x1C : 0x24)] = 'G'; /* the OK's label */
+    packet[4 + (modern_packet ? 0x1E : 0x26)] = 'o';
     packet[4 + (modern_packet ? 0x484 : 0x45C)] = (u8)utf8;
     storage = am_storage_new(modern_packet ? sizeof packet : 0x4A4, packet);
     CHECK(nn_am_service_ILibraryAppletAccessor_PushInteractiveInData(a, storage) == 0);
@@ -289,6 +324,8 @@ static void test_vr_mode(void) {
     CHECK(nn_am_service_ICommonStateGetter_SetVrModeEnabled(NULL, 0) == 0);
     CHECK(nn_am_service_ICommonStateGetter_IsVrModeEnabled(NULL, &on) == 0 && on == 0);
 }
+/* the inline keyboard: Appear shows the box with the game's text, most, least and OK label; the replies wait for the
+   player, whose text is the changed and decided string in the game's encoding, or a cancel; then it hides */
 static void test_inline(void) {
     SvcObj* a;
     SvcObj* s;
@@ -296,7 +333,8 @@ static void test_inline(void) {
     StorageData* data;
     u8 completed;
     u32 handle;
-    dialog_cancel = 0;
+    int shows = box_shows;
+    appear_min = 2;
     CHECK(nn_am_service_ILibraryAppletCreator_CreateLibraryApplet(NULL, 0x11, 3, &a) == 0);
     la = a->data;
     CHECK(nn_am_service_ILibraryAppletAccessor_GetAppletStateChangedEvent(a, &handle) == 0);
@@ -309,6 +347,9 @@ static void test_inline(void) {
     CHECK(nn_am_service_ILibraryAppletAccessor_PopInteractiveOutData(a, &s) == RC(128, 2));
     send_request(a, 0xA, 4, 0);
     svcobj_unref(reply(a, 3, 1, 8));
+    CHECK(box_shows == shows + 1 && box_shown.max == 20 && box_shown.min == 2 && !strcmp(box_shown.ok, "Go"));
+    CHECK(nn_am_service_ILibraryAppletAccessor_PopInteractiveOutData(a, &s) == RC(128, 2)); /* the player types */
+    am_keyboard_answered(box_shown.ticket, 0, player_text);
     svcobj_unref(reply(a, 3, 2, 0x404));
     s = reply(a, 3, 5, 0x3F8);
     data = s->data;
@@ -318,22 +359,118 @@ static void test_inline(void) {
     svcobj_unref(s);
     svcobj_unref(reply(a, 1, 1, 8));
     CHECK(!kev(la->state_ev)->signaled);
+    /* the text the game holds is the box's next line; UTF-8 replies */
+    send_request(a, 0xA, 4 | 0x20, 1);
+    svcobj_unref(reply(a, 3, 1, 8));
+    CHECK(!strcmp(box_shown.text, player_text));
+    am_keyboard_answered(box_shown.ticket, 0, "hey");
+    svcobj_unref(reply(a, 3, 7, 0x7EC));
+    s = reply(a, 3, 9, 0x7E0);
+    CHECK(strcmp((char*)((StorageData*)s->data)->d + 8, "hey") == 0);
+    svcobj_unref(s);
+    svcobj_unref(reply(a, 1, 1, 8));
+    /* cancelled, with the line the box had, as the backend hands it */
+    send_request(a, 0xA, 4, 1);
+    svcobj_unref(reply(a, 3, 1, 8));
+    am_keyboard_answered(box_shown.ticket, 1, "typed");
+    svcobj_unref(reply(a, 3, 6, 8));
+    svcobj_unref(reply(a, 1, 1, 8));
+    /* Disappear takes the box away, and an answer after it goes nowhere, said */
+    send_request(a, 0xA, 4, 1);
+    svcobj_unref(reply(a, 3, 1, 8));
+    send_request(a, 0xA, 1u << 7, 1);
+    svcobj_unref(reply(a, 1, 1, 8));
+    CHECK(box_hidden == box_shown.ticket);
+    test_log[0] = 0;
+    am_keyboard_answered(box_shown.ticket, 0, "late");
+    CHECK(nn_am_service_ILibraryAppletAccessor_PopInteractiveOutData(a, &s) == RC(128, 2));
+    {
+        char line[128];
+        snprintf(line, sizeof line,
+                 "am: the software keyboard's box %u answered after the game took it away: the game "
+                 "has no answer\n",
+                 box_shown.ticket);
+        CHECK(log_has(line));
+    }
+    /* Finalize takes a box that shows away */
+    send_request(a, 0xA, 4, 1);
+    svcobj_unref(reply(a, 3, 1, 8));
+    box_hidden = 0;
+    send_request(a, 4, 0, 0);
+    CHECK(box_hidden == box_shown.ticket);
+    CHECK(kev(la->state_ev)->signaled);
+    CHECK(nn_am_service_ILibraryAppletAccessor_IsCompleted(a, &completed) == 0 && completed);
+    svcobj_unref(a);
+    close_handles();
+    CHECK(test_objects == 0 && test_kobjs == 0);
+    appear_min = 0;
+}
+/* the inline keyboard answered without the box: swkbd_text first (short of the least: cancelled, said), and with no
+   window the game's own text; an applet closed while its box shows takes it away; a save state's load puts back the
+   box of a keyboard the state shows */
+static void test_inline_unasked(void) {
+    SvcObj *a, *b;
+    SvcObj* s;
+    int shows = box_shows;
+    CHECK(nn_am_service_ILibraryAppletCreator_CreateLibraryApplet(NULL, 0x11, 3, &a) == 0);
+    send_request(a, 0xA, 1, 1);
+    svcobj_unref(reply(a, 1, 0, 9));
+    strcpy(g_settings.keyboard_text, "hi");
     send_request(a, 0xA, 4 | 0x20, 1);
     svcobj_unref(reply(a, 3, 1, 8));
     svcobj_unref(reply(a, 3, 7, 0x7EC));
     s = reply(a, 3, 9, 0x7E0);
-    CHECK(strcmp((char*)((StorageData*)s->data)->d + 8, dialog_text) == 0);
+    CHECK(!strcmp((char*)((StorageData*)s->data)->d + 8, "hi") && box_shows == shows);
     svcobj_unref(s);
     svcobj_unref(reply(a, 1, 1, 8));
-    dialog_cancel = 1;
+    appear_min = 3;
+    test_log[0] = 0;
     send_request(a, 0xA, 4, 1);
     svcobj_unref(reply(a, 3, 1, 8));
     svcobj_unref(reply(a, 3, 6, 8));
     svcobj_unref(reply(a, 1, 1, 8));
-    send_request(a, 4, 0, 0);
-    CHECK(kev(la->state_ev)->signaled);
-    CHECK(nn_am_service_ILibraryAppletAccessor_IsCompleted(a, &completed) == 0 && completed);
+    CHECK(log_has("am: the software keyboard is cancelled: swkbd_text \"hi\" is 2 characters, the game asks for 3 at "
+                  "least\n"));
+    appear_min = 0;
+    g_settings.keyboard_text[0] = 0;
+    /* no window: the game's text ("hi", as the last answer left it), said */
+    no_window = 1;
+    test_log[0] = 0;
+    send_request(a, 0xA, 4, 1);
+    svcobj_unref(reply(a, 3, 1, 8));
+    svcobj_unref(reply(a, 3, 7, 0x7EC));
+    s = reply(a, 3, 9, 0x7E0);
+    CHECK(!strcmp((char*)((StorageData*)s->data)->d + 8, "hi") && box_shows == shows);
+    CHECK(log_has("am: no window to show the inline keyboard's box in: it answers the game's text \"hi\"\n"));
+    svcobj_unref(s);
+    svcobj_unref(reply(a, 1, 1, 8));
+    no_window = 0;
+    /* a load puts the box back for the keyboard that shows, and takes the one before away */
+    send_request(a, 0xA, 4, 1);
+    svcobj_unref(reply(a, 3, 1, 8));
+    box_hidden = 0;
+    shows = box_shows;
+    {
+        u32 before = box_shown.ticket;
+        am_state_loaded();
+        CHECK(box_hidden == before && box_shows == shows + 1 && box_shown.ticket != before);
+        CHECK(!strcmp(box_shown.text, "hi") && box_shown.max == 20);
+    }
+    am_keyboard_answered(box_shown.ticket, 0, "ok");
+    svcobj_unref(reply(a, 3, 7, 0x7EC));
+    svcobj_unref(reply(a, 3, 9, 0x7E0));
+    svcobj_unref(reply(a, 1, 1, 8));
+    /* a second applet's box, then the first closed: the second's stays; the second closed: it goes */
+    CHECK(nn_am_service_ILibraryAppletCreator_CreateLibraryApplet(NULL, 0x11, 3, &b) == 0);
+    send_request(b, 0xA, 1, 1);
+    svcobj_unref(reply(b, 1, 0, 9));
+    send_request(b, 0xA, 4, 1);
+    svcobj_unref(reply(b, 3, 1, 8));
+    box_hidden = 0;
     svcobj_unref(a);
+    CHECK(box_hidden == 0);
+    svcobj_unref(b);
+    CHECK(box_hidden == box_shown.ticket);
     close_handles();
     CHECK(test_objects == 0 && test_kobjs == 0);
 }
@@ -348,26 +485,44 @@ static SvcObj* run_applet(u32 id, SvcObj* const* in, int nin) {
     svcobj_unref(a);
     return out;
 }
-/* the standard keyboard: SwkbdConfigCommon's limits (max at 0x3ac, min at 0x3b0) and UTF-8 flag (0x3bd), the dialog
-   asked again until the text is long enough, and the reply's SwkbdResult and text */
-static SvcObj* swkbd(u32 max, u32 min, int utf8) {
-    u8 config[0x3e0] = {0};
-    SvcObj *in[2], *out;
+/* the standard keyboard: SwkbdConfigCommon's texts (the OK's label at 0x4, the header at 0x24, the sub at 0xa6, the
+   guide at 0x1a8), kind (0, NumberPad 1), limits (max at 0x3ac, min at 0x3b0), password mode (0x3b4) and UTF-8 flag
+   (0x3bd), and the initial text in the work buffer (the third storage, from initial_string_offset 0x3c0 for
+   initial_string_length 0x3c4 units); the reply's SwkbdResult and text */
+static u32 config_kind, config_password;
+static void put16s(u8* at, const char* text) {
+    for (; *text; text++, at += 2) at[0] = (u8)*text;
+}
+static SvcObj* swkbd(u32 max, u32 min, int utf8, const char* initial) {
+    u8 config[0x3e0] = {0}, work[0x40] = {0};
+    SvcObj *in[3], *out;
+    int i, n = 2;
+    put32(config, config_kind);
+    put16s(config + 0x4, "Send");
+    put16s(config + 0x24, "Name");
+    put16s(config + 0xa6, "Up to 8");
+    put16s(config + 0x1a8, "Your name");
     put32(config + 0x3ac, max);
     put32(config + 0x3b0, min);
+    put32(config + 0x3b4, config_password);
     config[0x3bd] = (u8)utf8;
+    if (initial) {
+        put16s(work + 8, initial);
+        put32(config + 0x3c0, 8);
+        put32(config + 0x3c4, (u32)strlen(initial));
+        n = 3;
+    }
     in[0] = am_storage_new(0x20, NULL);
     in[1] = am_storage_new(sizeof config, config);
-    dialog_calls = 0;
-    out = run_applet(0x11, in, 2);
-    svcobj_unref(in[0]);
-    svcobj_unref(in[1]);
+    in[2] = am_storage_new(sizeof work, work);
+    popped_while_waiting = 0;
+    out = run_applet(0x11, in, n);
+    for (i = 0; i < 3; i++) svcobj_unref(in[i]);
     CHECK(((StorageData*)out->data)->size == 0x7d8);
     return out;
 }
 /* SetCpuBoostMode hands its mode to apm, and GetCurrentPerformanceConfiguration is apm's for the console's mode */
 extern u32 g_test_apm_boost;
-extern int g_test_unattended;
 static void test_cpu_boost(void) {
     u32 config = 0;
     CHECK(nn_am_service_ICommonStateGetter_SetCpuBoostMode(NULL, 1) == 0 && g_test_apm_boost == 1);
@@ -395,60 +550,99 @@ static void test_lock_event(void) {
     }
 }
 
+/* the standard keyboard's box, its thread waiting for the player; swkbd_text before it; no window */
 static void test_swkbd(void) {
     SvcObj* out;
     u8* d;
     u16 units[4];
-    dialog_cancel = 0;
-    dialog_then = NULL;
-    /* "Aé😀" is four UTF-16 units: three at most keeps the pair whole, cut before it */
-    out = swkbd(3, 0, 0);
+    int shows = box_shows;
+    player_cancels = 0;
+    player_text = "Aé😀";
+    /* the box has the game's texts, kind, limits and initial text; "Aé😀" is four UTF-16 units: three at most keeps
+       the pair whole, cut before it */
+    out = swkbd(3, 0, 0, "Ann");
+    CHECK(box_shows == shows + 1 && box_shown.max == 3 && box_shown.min == 0 && !strcmp(box_shown.text, "Ann"));
+    CHECK(!strcmp(box_shown.ok, "Send") && !strcmp(box_shown.header, "Name") && !strcmp(box_shown.sub, "Up to 8") &&
+          !strcmp(box_shown.guide, "Your name") && !box_shown.password && !box_shown.numbers);
+    CHECK(!popped_while_waiting); /* a save state taken while it waits pops it again on load */
     d = ((StorageData*)out->data)->d;
     CHECK(get32(d) == 0 && d[4] == 'A' && d[6] == 0xE9 && d[7] == 0 && d[8] == 0 && d[9] == 0);
     svcobj_unref(out);
-    out = swkbd(0, 0, 1);
-    CHECK(!strcmp((char*)((StorageData*)out->data)->d + 4, "Aé😀"));
+    out = swkbd(0, 0, 1, NULL);
+    CHECK(!strcmp((char*)((StorageData*)out->data)->d + 4, "Aé😀") && box_shown.max == AM_SWKBD_UNITS);
+    CHECK(box_shown.text[0] == 0);
     svcobj_unref(out);
-    /* too short for the minimum: asked again, and the second answer is taken */
-    dialog_then = "hello";
-    out = swkbd(0, 5, 1);
-    CHECK(dialog_calls == 2 && get32(((StorageData*)out->data)->d) == 0);
-    CHECK(!strcmp((char*)((StorageData*)out->data)->d + 4, "hello"));
+    /* the least is the box's to keep; a least above the most is the most, said */
+    out = swkbd(0, 5, 1, NULL);
+    CHECK(box_shown.min == 5);
     svcobj_unref(out);
-    dialog_then = NULL;
-    /* a minimum above the maximum is the maximum */
-    out = swkbd(2, 9, 0);
-    d = ((StorageData*)out->data)->d;
-    CHECK(dialog_calls == 1 && get32(d) == 0 && d[4] == 'A' && d[6] == 0xE9 && d[8] == 0);
+    test_log[0] = 0;
+    out = swkbd(2, 9, 0, NULL);
+    CHECK(box_shown.min == 2 && box_shown.max == 2);
+    CHECK(log_has("am: the software keyboard asks for 9 to 2 characters, 2 it is\n"));
     svcobj_unref(out);
+    /* a password, of digits */
+    config_kind = 1;
+    config_password = 1;
+    out = swkbd(0, 0, 0, NULL);
+    CHECK(box_shown.numbers && box_shown.password);
+    svcobj_unref(out);
+    config_kind = config_password = 0;
     /* cancelled */
-    dialog_cancel = 1;
-    out = swkbd(0, 0, 0);
+    player_cancels = 1;
+    out = swkbd(0, 0, 0, NULL);
     CHECK(get32(((StorageData*)out->data)->d) == 1 && ((StorageData*)out->data)->d[4] == 0);
     svcobj_unref(out);
-    dialog_cancel = 0;
+    player_cancels = 0;
+    /* no window: the game's text, else the user's nickname, each said; cut to the most, and short of the least
+       cancelled, as swkbd_text is */
+    no_window = 1;
+    shows = box_shows;
+    test_log[0] = 0;
+    out = swkbd(0, 0, 1, "Ann");
+    CHECK(get32(((StorageData*)out->data)->d) == 0 && !strcmp((char*)((StorageData*)out->data)->d + 4, "Ann"));
+    CHECK(log_has("am: no window to show the software keyboard's box in: it answers the game's text \"Ann\"\n"));
+    svcobj_unref(out);
+    out = swkbd(0, 0, 1, NULL);
+    CHECK(get32(((StorageData*)out->data)->d) == 0 && !strcmp((char*)((StorageData*)out->data)->d + 4, "Nadia"));
+    CHECK(log_has("am: no window to show the software keyboard's box in: it answers the user's nickname \"Nadia\"\n"));
+    svcobj_unref(out);
+    out = swkbd(3, 0, 1, NULL);
+    CHECK(get32(((StorageData*)out->data)->d) == 0 && !strcmp((char*)((StorageData*)out->data)->d + 4, "Nad"));
+    CHECK(log_has("am: the software keyboard answers \"Nad\" (the user's nickname \"Nadia\", cut to the game's 3 "
+                  "characters)\n"));
+    svcobj_unref(out);
+    out = swkbd(0, 6, 1, NULL);
+    CHECK(get32(((StorageData*)out->data)->d) == 1 && box_shows == shows);
+    CHECK(log_has("am: the software keyboard is cancelled: the user's nickname \"Nadia\" is 5 characters, the game "
+                  "asks for 6 at least\n"));
+    svcobj_unref(out);
+    no_window = 0;
     /* malformed UTF-8 from the host: an overlong form, a surrogate and a cut sequence, each part U+FFFD */
     CHECK(am_utf8_to_16("\xC0\xAF", units, 4) == 2 && units[0] == 0xFFFD && units[1] == 0xFFFD);
     CHECK(am_utf8_to_16("\xED\xA0\x80", units, 4) == 3 && units[2] == 0xFFFD);
     CHECK(am_utf8_to_16("a\xE2\x82", units, 4) == 2 && units[0] == 'a' && units[1] == 0xFFFD);
     CHECK(am_utf8_to_16("\xF4\x90\x80\x80", units, 4) == 4); /* past U+10FFFF */
     CHECK(am_utf8_to_16("\xF0\x9F\x98\x80", units, 4) == 2 && units[0] == 0xD83D && units[1] == 0xDE00);
-    /* a scripted run's text, cancelled when it is shorter than the minimum */
+    /* a scripted run's text, before the box: cut to the most and cancelled short of the least, each said */
     strcpy(g_settings.keyboard_text, "hi");
-    out = swkbd(0, 0, 1);
-    CHECK(dialog_calls == 0 && get32(((StorageData*)out->data)->d) == 0);
+    shows = box_shows;
+    out = swkbd(0, 0, 1, NULL);
+    CHECK(box_shows == shows && get32(((StorageData*)out->data)->d) == 0);
     CHECK(!strcmp((char*)((StorageData*)out->data)->d + 4, "hi"));
     svcobj_unref(out);
-    out = swkbd(0, 3, 1);
+    test_log[0] = 0;
+    out = swkbd(0, 3, 1, NULL);
     CHECK(get32(((StorageData*)out->data)->d) == 1);
+    CHECK(log_has("am: the software keyboard is cancelled: swkbd_text \"hi\" is 2 characters, the game asks for 3 at "
+                  "least\n"));
+    svcobj_unref(out);
+    out = swkbd(1, 0, 1, NULL);
+    CHECK(!strcmp((char*)((StorageData*)out->data)->d + 4, "h"));
+    CHECK(log_has("am: the software keyboard answers \"h\" (swkbd_text \"hi\", cut to the game's 1 character)\n"));
     svcobj_unref(out);
     g_settings.keyboard_text[0] = 0;
-    /* a timed run without that text takes the game's own initial text (none here), and never opens the dialog */
-    g_test_unattended = 1;
-    out = swkbd(0, 0, 1);
-    CHECK(dialog_calls == 0 && get32(((StorageData*)out->data)->d) == 0 && ((StorageData*)out->data)->d[4] == 0);
-    svcobj_unref(out);
-    g_test_unattended = 0;
+    CHECK(box_shows == shows);
 }
 /* the other applets' outputs: the controller applet's players against the game's minimum, a web applet's return
    value, and zeros from the rest */
@@ -631,6 +825,7 @@ int main(void) {
     test_inline();
     modern_packet = 1;
     test_inline();
+    test_inline_unasked();
     test_swkbd();
     test_lock_event();
     test_cpu_boost();

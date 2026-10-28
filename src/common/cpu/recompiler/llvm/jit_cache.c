@@ -4,6 +4,8 @@
 #include "common/cpu/aarch64/a64_decoder.h"
 #include "common/cpu/recompiler/llvm/ir.h"
 #include "common/cpu/recompiler/llvm/rtlib_object.h"
+#include "common/utilities/bits.h"
+#include "common/utilities/endian.h"
 #include <llvm-c/Core.h>
 #include <llvm-c/TargetMachine.h>
 #include <llvm/Config/llvm-config.h>
@@ -22,21 +24,9 @@ struct SnxJitCache {
     size_t count;
 };
 
-static SnxU32 get32(const unsigned char* p) {
-    return (SnxU32)p[0] | (SnxU32)p[1] << 8 | (SnxU32)p[2] << 16 | (SnxU32)p[3] << 24;
-}
-static SnxU64 get64(const unsigned char* p) { return get32(p) | (SnxU64)get32(p + 4) << 32; }
-
-static SnxU64 fnv(const unsigned char* p, size_t n, SnxU64 basis) {
-    size_t i;
-    for (i = 0; i < n; ++i) basis = (basis ^ p[i]) * (SnxU64)0x100000001B3ULL;
-    return basis;
-}
-
 static void free_record(Record* r) {
-    size_t i;
     if (r->functions) {
-        for (i = 0; i < r->pub.function_count; ++i) {
+        for (size_t i = 0; i < r->pub.function_count; ++i) {
             free((void*)r->functions[i].leaders);
             free((void*)r->functions[i].runs);
         }
@@ -44,24 +34,22 @@ static void free_record(Record* r) {
     }
     free((void*)r->pub.name);
     free((void*)r->pub.object);
-    memset(r, 0, sizeof(*r));
+    *r = (Record){0};
 }
 
 /* one record's body, already hash-checked; object and metadata point into the file buffer */
 static int parse_record(const unsigned char* body, size_t length, Record* r, char* error, size_t error_size) {
     const unsigned char* p = body, *end = body + length;
-    size_t name_length, function_count, i, k, leaders, runs;
-    char* name;
     if (length < 6) {
         snprintf(error, error_size, "record is too short");
         return -1;
     }
-    name_length = p[0] | (size_t)p[1] << 8;
+    size_t name_length = snx_ld_le16(p);
     if (name_length >= 64 || 2 + name_length + 4 > length) {
         snprintf(error, error_size, "record name is bad");
         return -1;
     }
-    name = (char*)malloc(name_length + 1);
+    char* name = (char*)malloc(name_length + 1);
     if (!name) {
         snprintf(error, error_size, "out of memory");
         return -1;
@@ -70,7 +58,7 @@ static int parse_record(const unsigned char* body, size_t length, Record* r, cha
     name[name_length] = 0;
     r->pub.name = name;
     p += 2 + name_length;
-    function_count = get32(p);
+    size_t function_count = snx_ld_le32(p);
     p += 4;
     if (function_count > (size_t)(end - p) / 32) {
         snprintf(error, error_size, "record has too many functions");
@@ -83,14 +71,14 @@ static int parse_record(const unsigned char* body, size_t length, Record* r, cha
     }
     r->pub.function_count = function_count;
     r->pub.functions = r->functions;
-    for (i = 0; i < function_count; ++i) {
+    for (size_t i = 0; i < function_count; ++i) {
         SnxJitCacheFunction* f = &r->functions[i];
         if ((size_t)(end - p) < 12) {
             snprintf(error, error_size, "record function is cut off");
             return -1;
         }
-        f->start = get64(p);
-        leaders = get32(p + 8);
+        f->start = snx_ld_le64(p);
+        size_t leaders = snx_ld_le32(p + 8);
         p += 12;
         if (leaders > (size_t)(end - p) / 8) {
             snprintf(error, error_size, "record leaders are cut off");
@@ -103,14 +91,14 @@ static int parse_record(const unsigned char* body, size_t length, Record* r, cha
                 return -1;
             }
             f->leader_count = leaders;
-            for (k = 0; k < leaders; ++k) ((SnxU64*)f->leaders)[k] = get64(p + 8 * k);
+            for (size_t k = 0; k < leaders; ++k) ((SnxU64*)f->leaders)[k] = snx_ld_le64(p + 8 * k);
         }
         p += leaders * 8;
         if ((size_t)(end - p) < 4) {
             snprintf(error, error_size, "record runs are cut off");
             return -1;
         }
-        runs = get32(p);
+        size_t runs = snx_ld_le32(p);
         p += 4;
         if (runs > (size_t)(end - p) / 12) {
             snprintf(error, error_size, "record runs are cut off");
@@ -123,9 +111,9 @@ static int parse_record(const unsigned char* body, size_t length, Record* r, cha
                 return -1;
             }
             f->run_count = runs;
-            for (k = 0; k < runs; ++k) {
-                ((SnxVariantRun*)f->runs)[k].address = get64(p);
-                ((SnxVariantRun*)f->runs)[k].words = get32(p + 8);
+            for (size_t k = 0; k < runs; ++k) {
+                ((SnxVariantRun*)f->runs)[k].address = snx_ld_le64(p);
+                ((SnxVariantRun*)f->runs)[k].words = snx_ld_le32(p + 8);
                 p += 12;
             }
         }
@@ -133,15 +121,15 @@ static int parse_record(const unsigned char* body, size_t length, Record* r, cha
             snprintf(error, error_size, "record hashes are cut off");
             return -1;
         }
-        f->h1 = get64(p);
-        f->h2 = get64(p + 8);
+        f->h1 = snx_ld_le64(p);
+        f->h2 = snx_ld_le64(p + 8);
         p += 16;
     }
     if ((size_t)(end - p) < 8) {
         snprintf(error, error_size, "record object size is cut off");
         return -1;
     }
-    r->pub.object_size = (size_t)get64(p);
+    r->pub.object_size = (size_t)snx_ld_le64(p);
     p += 8;
     if (r->pub.object_size != (size_t)(end - p)) {
         snprintf(error, error_size, "record object size does not match the body");
@@ -161,43 +149,39 @@ static int parse_record(const unsigned char* body, size_t length, Record* r, cha
 char* snx_jit_cache_key(char opt, int hook, int svc, SnxU64 guest) {
     char* cpu = LLVMGetHostCPUName();
     char* features = LLVMGetHostCPUFeatures();
-    char* key;
-    SnxU64 rtlib;
-    size_t n;
-    if (!cpu || !features) {
+    char* triple = LLVMGetDefaultTargetTriple();
+    if (!cpu || !features || !triple) {
         LLVMDisposeMessage(cpu);
         LLVMDisposeMessage(features);
+        LLVMDisposeMessage(triple);
         return NULL;
     }
-    n = strlen(cpu) + strlen(features) + 224;
-    key = (char*)malloc(n);
+    size_t n = strlen(cpu) + strlen(features) + strlen(triple) + 256;
+    char* key = (char*)malloc(n);
     if (key) {
-        rtlib = fnv(snx_rtlib_object, (size_t)snx_rtlib_object_size, 0xCBF29CE484222325ULL);
+        SnxU64 rtlib = snx_fnv1a(SNX_FNV_BASIS, snx_rtlib_object, (size_t)snx_rtlib_object_size);
         /* dec: the decoding (a64.decode and its profile) and a64: the guest's features choose what each word does */
-        sprintf(key,
-                "abi=%d llvm=%s rtlib=%016llx dec=%016llx a64=%016llx cpu=%s opt=%c hook=%d svc=%d slp=%d fpsr=%d "
-                "volatile=%d features=%s",
-                SNX_ABI, LLVM_VERSION_STRING, (unsigned long long)rtlib, (unsigned long long)snx_a64_decoder_hash(),
-                (unsigned long long)snx_a64_features(guest), cpu, opt, hook, svc, snx_ir_slp(),
-                snx_ir_fpsr_exact(), snx_ir_volatile(), features);
+        snprintf(key, n,
+                 "abi=%d obj=%d llvm=%s triple=%s rtlib=%016llx dec=%016llx a64=%016llx cpu=%s opt=%c hook=%d svc=%d "
+                 "slp=%d fpsr=%d volatile=%d features=%s",
+                 SNX_ABI, SNX_IR_OBJECT_VERSION, LLVM_VERSION_STRING, triple, (unsigned long long)rtlib,
+                 (unsigned long long)snx_a64_decoder_hash(), (unsigned long long)snx_a64_features(guest), cpu, opt,
+                 hook, svc, snx_ir_slp(), snx_ir_fpsr_exact(), snx_ir_volatile(), features);
     }
     LLVMDisposeMessage(cpu);
     LLVMDisposeMessage(features);
+    LLVMDisposeMessage(triple);
     return key;
 }
 
 SnxJitCache* snx_jit_cache_open(const char* path, const char* key, char* error, size_t error_size) {
-    SnxJitCache* cache;
-    FILE* f;
     long length;
-    size_t size, key_length, header, at, count = 0, capacity = 0;
-    unsigned char* buffer;
     if (error && error_size) error[0] = 0;
     if (!path || !key) {
         snprintf(error, error_size, "no cache path or key");
         return NULL;
     }
-    f = fopen(path, "rb");
+    FILE* f = fopen(path, "rb");
     if (!f) {
         snprintf(error, error_size, "cannot open %s", path);
         return NULL;
@@ -212,8 +196,8 @@ SnxJitCache* snx_jit_cache_open(const char* path, const char* key, char* error, 
         snprintf(error, error_size, "%s is larger than the cache limit", path);
         return NULL;
     }
-    size = (size_t)length;
-    buffer = (unsigned char*)malloc(size ? size : 1);
+    size_t size = (size_t)length;
+    unsigned char* buffer = (unsigned char*)malloc(size ? size : 1);
     if (!buffer) {
         fclose(f);
         snprintf(error, error_size, "out of memory");
@@ -231,8 +215,8 @@ SnxJitCache* snx_jit_cache_open(const char* path, const char* key, char* error, 
         snprintf(error, error_size, "%s is not a ScarletNX JIT cache", path);
         return NULL;
     }
-    key_length = get32(buffer + 8);
-    header = 12 + key_length;
+    size_t key_length = snx_ld_le32(buffer + 8);
+    size_t header = 12 + key_length;
     if (header > size) {
         free(buffer);
         snprintf(error, error_size, "%s has a bad key length", path);
@@ -243,42 +227,39 @@ SnxJitCache* snx_jit_cache_open(const char* path, const char* key, char* error, 
         snprintf(error, error_size, "the cache key differs from the build's");
         return NULL;
     }
-    cache = (SnxJitCache*)calloc(1, sizeof(*cache));
+    SnxJitCache* cache = (SnxJitCache*)calloc(1, sizeof(*cache));
     if (!cache) {
         free(buffer);
         snprintf(error, error_size, "out of memory");
         return NULL;
     }
     cache->buffer = buffer;
-    at = header;
+    size_t at = header, count = 0, capacity = 0;
     while (at < size) {
-        SnxU64 body_length;
-        const unsigned char* body;
-        Record* grown;
-        if (size - at < 12 || get32(buffer + at) != SNX_JIT_RECORD_MAGIC) {
+        if (size - at < 12 || snx_ld_le32(buffer + at) != SNX_JIT_RECORD_MAGIC) {
             snprintf(error, error_size, "%s has a bad record header", path);
             goto fail;
         }
-        body_length = get64(buffer + at + 4);
+        SnxU64 body_length = snx_ld_le64(buffer + at + 4);
         if (body_length > (SnxU64)(size - at - 12) || (size - at - 12) - (size_t)body_length < 8) {
             snprintf(error, error_size, "%s has a record that runs past the file", path);
             goto fail;
         }
-        body = buffer + at + 12;
-        if (fnv(body, (size_t)body_length, 0xCBF29CE484222325ULL) != get64(body + body_length)) {
+        const unsigned char* body = buffer + at + 12;
+        if (snx_fnv1a(SNX_FNV_BASIS, body, (size_t)body_length) != snx_ld_le64(body + body_length)) {
             snprintf(error, error_size, "%s has a record with a bad hash", path);
             goto fail;
         }
         if (count == capacity) {
             capacity = capacity ? capacity * 2 : 8;
-            grown = (Record*)realloc(cache->records, capacity * sizeof(*grown));
+            Record* grown = (Record*)realloc(cache->records, capacity * sizeof(*grown));
             if (!grown) {
                 snprintf(error, error_size, "out of memory");
                 goto fail;
             }
             cache->records = grown;
         }
-        memset(&cache->records[count], 0, sizeof(cache->records[count]));
+        cache->records[count] = (Record){0};
         cache->count = count + 1; /* close frees a record parse_record left half-built */
         if (parse_record(body, (size_t)body_length, &cache->records[count], error, error_size)) goto fail;
         ++count;
@@ -293,9 +274,8 @@ fail:
 }
 
 void snx_jit_cache_close(SnxJitCache* cache) {
-    size_t i;
     if (!cache) return;
-    for (i = 0; i < cache->count; ++i) free_record(&cache->records[i]);
+    for (size_t i = 0; i < cache->count; ++i) free_record(&cache->records[i]);
     free(cache->records);
     free(cache->buffer);
     free(cache);

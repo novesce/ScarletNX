@@ -28,6 +28,12 @@ void audio_release(void);
 void audio_state_drop(void);
 void audren_state_drop(void); /* the renderers' states and host outputs, which a load makes again from the state's */
 void audio_state_rebuild(void);
+/* The software keyboard's box (am.c): its answer, from the main thread once it holds no UI lock, as am shows the box
+   under its own: the text given, or cancelled, for the box of ticket (an answer to another is said and dropped). And
+   after a save state's load, the game held: the box shown before goes, and an inline keyboard the state shows gets
+   one again */
+void am_keyboard_answered(u32 ticket, int cancelled, const char* text);
+void am_state_loaded(void);
 /* the functions a save state may hold of each file (nx/runtime/state_fns.h) */
 extern const StateFnTable g_am_state_fns;     /* am.c */
 extern const StateFnTable g_audio_state_fns;  /* audio.c */

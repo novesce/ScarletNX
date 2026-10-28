@@ -23,7 +23,7 @@ LLVMValueRef ir_bool32(SnxIr* ir, LLVMValueRef condition) { return LLVMBuildZExt
 
 /* ---- functions and calls ---- */
 
-static void attribute(SnxIr* ir, LLVMValueRef function, LLVMAttributeIndex index, const char* name) {
+void ir_attribute(SnxIr* ir, LLVMValueRef function, LLVMAttributeIndex index, const char* name) {
     unsigned kind = LLVMGetEnumAttributeKindForName(name, strlen(name));
     LLVMAddAttributeAtIndex(function, index, LLVMCreateEnumAttribute(ir->ctx, kind, 0));
 }
@@ -39,7 +39,7 @@ LLVMValueRef ir_extern(SnxIr* ir, const char* name, LLVMTypeRef ret, LLVMTypeRef
     function = LLVMAddFunction(ir->mod, name, LLVMFunctionType(ret, params, count, 0));
     /* -fvisibility=hidden: everything the module links is local to it */
     LLVMSetVisibility(function, LLVMHiddenVisibility);
-    attribute(ir, function, LLVMAttributeFunctionIndex, "nounwind");
+    ir_attribute(ir, function, LLVMAttributeFunctionIndex, "nounwind");
     return function;
 }
 
@@ -56,9 +56,9 @@ size_t ir_off_poll(void) { return offsetof(CPU, poll); }
 
 LLVMValueRef ir_rt_call(SnxIr* ir, size_t offset, LLVMTypeRef ret, LLVMTypeRef* params, LLVMValueRef* args,
                         unsigned count) {
-    LLVMValueRef index = ir_i64(ir, offset), slot, callee;
-    slot = LLVMBuildInBoundsGEP2(ir->b, ir->t_i8, rt_pointer(ir), &index, 1, "");
-    callee = ir_load(ir, ir->t_ptr, slot);
+    LLVMValueRef index = ir_i64(ir, offset);
+    LLVMValueRef slot = LLVMBuildInBoundsGEP2(ir->b, ir->t_i8, rt_pointer(ir), &index, 1, "");
+    LLVMValueRef callee = ir_load(ir, ir->t_ptr, slot);
     ir_state_invalidate(ir);
     return LLVMBuildCall2(ir->b, LLVMFunctionType(ret, params, count, 0), callee, args, count, "");
 }
@@ -166,18 +166,18 @@ LLVMBasicBlockRef ir_block(SnxIr* ir, const char* name) { return LLVMAppendBasic
    loads the old value again. Every emitter writes all of a local before reading it, so the zero folds away */
 LLVMValueRef ir_local(SnxIr* ir, LLVMTypeRef type) {
     LLVMBasicBlockRef here = LLVMGetInsertBlock(ir->b), entry = LLVMGetEntryBasicBlock(ir->fn);
-    LLVMValueRef first = LLVMGetFirstInstruction(entry), slot, zero;
+    LLVMValueRef first = LLVMGetFirstInstruction(entry);
     unsigned long size = (unsigned long)LLVMABISizeOfType(LLVMGetModuleDataLayout(ir->mod), type);
     char name[32];
     if (first)
         LLVMPositionBuilderBefore(ir->b, first);
     else
         LLVMPositionBuilderAtEnd(ir->b, entry);
-    slot = LLVMBuildAlloca(ir->b, type, "");
+    LLVMValueRef slot = LLVMBuildAlloca(ir->b, type, "");
     LLVMSetAlignment(slot, 8);
     LLVMPositionBuilderAtEnd(ir->b, here);
     sprintf(name, "snx_zero%lu", size); /* one per size in each module */
-    zero = LLVMGetNamedGlobal(ir->mod, name);
+    LLVMValueRef zero = LLVMGetNamedGlobal(ir->mod, name);
     if (!zero) {
         LLVMTypeRef bytes = LLVMArrayType(ir->t_i8, (unsigned)size);
         zero = LLVMAddGlobal(ir->mod, bytes, name);

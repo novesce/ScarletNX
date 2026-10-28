@@ -20,6 +20,7 @@
    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
    IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. */
 #include "3ds/gpu/shader.h"
+#include "3ds/gpu/pica_internal.h"
 #include <math.h>
 #include <string.h>
 
@@ -82,8 +83,6 @@ static unsigned effective(unsigned op) {
     return op;
 }
 
-static unsigned bits(uint32_t v, unsigned at, unsigned n) { return (v >> at) & ((1u << n) - 1); }
-
 /* boost::circular_buffer: pushing onto a full stack drops its oldest entry */
 typedef struct {
     uint32_t else_address, end_address;
@@ -129,7 +128,7 @@ static void swizzled(const float* v, uint32_t pattern, unsigned n, float out[4])
     bool negate = (pattern >> negate_at[n - 1]) & 1;
     for (unsigned i = 0; i < 4; ++i) {
         /* component 0 is the selector's top two bits */
-        float x = v[bits(pattern, base + (3 - i) * 2, 2)];
+        float x = v[snx_bits(pattern, base + (3 - i) * 2, 2)];
         out[i] = negate ? -x : x;
     }
 }
@@ -141,15 +140,9 @@ static float* destination(SnxCtrShaderUnit* u, unsigned reg) {
     return discard;
 }
 
-/* float to s32 as x86's truncating conversion gives it: out-of-range and NaN become INT32_MIN */
-static int32_t to_s32(float f) {
-    if (!(f >= -2147483648.0f && f < 2147483648.0f)) return INT32_MIN;
-    return (int32_t)f;
-}
-
 static bool condition(const SnxCtrShaderUnit* u, uint32_t instr) {
     bool x = ((instr >> 25) & 1) == u->cc[0], y = ((instr >> 24) & 1) == u->cc[1];
-    switch (bits(instr, 22, 2)) {
+    switch (snx_bits(instr, 22, 2)) {
         case 0: return x || y;
         case 1: return x && y;
         case 2: return x;
@@ -170,14 +163,14 @@ static bool compare(unsigned op, float a, float b, bool old) {
 }
 
 static void arithmetic(const SnxCtrShaderSetup* s, SnxCtrShaderUnit* u, uint32_t instr, unsigned op, bool inverted) {
-    uint32_t pattern = s->swizzle[bits(instr, 0, 7)];
-    unsigned address = bits(instr, 19, 2);
-    unsigned reg1 = inverted ? bits(instr, 14, 5) : bits(instr, 12, 7);
-    unsigned reg2 = inverted ? bits(instr, 7, 7) : bits(instr, 7, 5);
+    uint32_t pattern = s->swizzle[snx_bits(instr, 0, 7)];
+    unsigned address = snx_bits(instr, 19, 2);
+    unsigned reg1 = inverted ? snx_bits(instr, 14, 5) : snx_bits(instr, 12, 7);
+    unsigned reg2 = inverted ? snx_bits(instr, 7, 7) : snx_bits(instr, 7, 5);
     float a[4], b[4], r;
     swizzled(source(s, u, reg1, inverted ? 0 : address), pattern, 1, a);
     swizzled(source(s, u, reg2, inverted ? address : 0), pattern, 2, b);
-    float* d = destination(u, bits(instr, 21, 5));
+    float* d = destination(u, snx_bits(instr, 21, 5));
     switch (op) {
         case OP_ADD:
             for (unsigned i = 0; i < 4; ++i)
@@ -240,23 +233,23 @@ static void arithmetic(const SnxCtrShaderSetup* s, SnxCtrShaderUnit* u, uint32_t
                 if (enabled(pattern, i)) d[i] = a[i] < b[i] ? 1.0f : 0.0f;
             break;
         case OP_CMP: /* x compares with bits 24..26, y with 21..23 */
-            u->cc[0] = compare(bits(instr, 24, 3), a[0], b[0], u->cc[0]);
-            u->cc[1] = compare(bits(instr, 21, 3), a[1], b[1], u->cc[1]);
+            u->cc[0] = compare(snx_bits(instr, 24, 3), a[0], b[0], u->cc[0]);
+            u->cc[1] = compare(snx_bits(instr, 21, 3), a[1], b[1], u->cc[1]);
             break;
         default: break; /* DST, LIT and the unassigned arithmetic opcodes are not implemented in Azahar either */
     }
 }
 
 static void multiply_add(const SnxCtrShaderSetup* s, SnxCtrShaderUnit* u, uint32_t instr, bool inverted) {
-    uint32_t pattern = s->swizzle[bits(instr, 0, 5)];
-    unsigned address = bits(instr, 22, 2);
-    unsigned reg2 = inverted ? bits(instr, 12, 5) : bits(instr, 10, 7);
-    unsigned reg3 = inverted ? bits(instr, 5, 7) : bits(instr, 5, 5);
+    uint32_t pattern = s->swizzle[snx_bits(instr, 0, 5)];
+    unsigned address = snx_bits(instr, 22, 2);
+    unsigned reg2 = inverted ? snx_bits(instr, 12, 5) : snx_bits(instr, 10, 7);
+    unsigned reg3 = inverted ? snx_bits(instr, 5, 7) : snx_bits(instr, 5, 5);
     float a[4], b[4], c[4];
-    swizzled(source(s, u, bits(instr, 17, 5), 0), pattern, 1, a);
+    swizzled(source(s, u, snx_bits(instr, 17, 5), 0), pattern, 1, a);
     swizzled(source(s, u, reg2, inverted ? 0 : address), pattern, 2, b);
     swizzled(source(s, u, reg3, inverted ? address : 0), pattern, 3, c);
-    float* d = destination(u, bits(instr, 24, 5));
+    float* d = destination(u, snx_bits(instr, 24, 5));
     for (unsigned i = 0; i < 4; ++i)
         if (enabled(pattern, i)) d[i] = snx_ctr_pica_mul(a[i], b[i]) + c[i];
 }
@@ -275,7 +268,7 @@ void snx_ctr_shader_run(const SnxCtrShaderSetup* s, SnxCtrShaderUnit* u, unsigne
            shaders) */
         uint32_t instr = pc < PROGRAM_WORDS - 1 ? s->code[pc] : (uint32_t)OP_END << 26;
         unsigned raw = instr >> 26, op = effective(raw);
-        uint32_t dest = bits(instr, 10, 12), count = bits(instr, 0, 8);
+        uint32_t dest = snx_bits(instr, 10, 12), count = snx_bits(instr, 0, 8);
         switch (kind_of(raw)) {
             case KIND_ARITH: arithmetic(s, u, instr, op, false); break;
             case KIND_ARITH_INVERTED: arithmetic(s, u, instr, op, true); break;
@@ -287,12 +280,12 @@ void snx_ctr_shader_run(const SnxCtrShaderSetup* s, SnxCtrShaderUnit* u, unsigne
                         if (condition(u, instr)) pc = dest - 1;
                         break;
                     case OP_JMPU:
-                        if (((s->b >> bits(instr, 22, 4)) & 1) == !(count & 1)) pc = dest - 1;
+                        if (((s->b >> snx_bits(instr, 22, 4)) & 1) == !(count & 1)) pc = dest - 1;
                         break;
                     case OP_CALL:
                     case OP_CALLU:
                     case OP_CALLC:
-                        if (raw == OP_CALL || (raw == OP_CALLU && ((s->b >> bits(instr, 22, 4)) & 1)) ||
+                        if (raw == OP_CALL || (raw == OP_CALLU && ((s->b >> snx_bits(instr, 22, 4)) & 1)) ||
                             (raw == OP_CALLC && condition(u, instr))) {
                             CallEntry e = {dest + count, pc + 1};
                             PUSH(calls, call_count, 4u, e);
@@ -301,7 +294,7 @@ void snx_ctr_shader_run(const SnxCtrShaderSetup* s, SnxCtrShaderUnit* u, unsigne
                         break;
                     case OP_IFU:
                     case OP_IFC: {
-                        bool taken = raw == OP_IFU ? ((s->b >> bits(instr, 22, 4)) & 1) : condition(u, instr);
+                        bool taken = raw == OP_IFU ? ((s->b >> snx_bits(instr, 22, 4)) & 1) : condition(u, instr);
                         if (taken) {
                             IfEntry e = {dest, dest + count};
                             PUSH(ifs, if_count, 8u, e);
@@ -310,7 +303,7 @@ void snx_ctr_shader_run(const SnxCtrShaderSetup* s, SnxCtrShaderUnit* u, unsigne
                         break;
                     }
                     case OP_LOOP: {
-                        const uint8_t* param = s->i[bits(instr, 22, 2)];
+                        const uint8_t* param = s->i[snx_bits(instr, 22, 2)];
                         u->address[2] = param[1];
                         /* do_loop reads aL after it is set, so previous_aL is the new value, as in Azahar */
                         LoopEntry e = {pc + 1, dest + 1, param[0], param[2], (uint8_t)u->address[2]};
@@ -330,9 +323,9 @@ void snx_ctr_shader_run(const SnxCtrShaderSetup* s, SnxCtrShaderUnit* u, unsigne
                         break;
                     case OP_SETEMIT:
                         if (emitter) {
-                            emitter->vertex_id = bits(instr, 24, 2);
-                            emitter->prim_emit = bits(instr, 23, 1) != 0;
-                            emitter->winding = bits(instr, 22, 1) != 0;
+                            emitter->vertex_id = snx_bits(instr, 24, 2);
+                            emitter->prim_emit = snx_bits(instr, 23, 1) != 0;
+                            emitter->winding = snx_bits(instr, 22, 1) != 0;
                         }
                         break;
                     default: break; /* NOP and the unassigned opcodes */

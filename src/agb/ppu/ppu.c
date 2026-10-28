@@ -241,7 +241,6 @@ static void affine_bg(AgbBoard* board, uint32_t index, int y) {
     }
     for (int x = 0; x < AGB_SCREEN_WIDTH; ++x, sx += pa, sy += pc) {
         int32_t tx = (int32_t)(sx >> 8), ty = (int32_t)(sy >> 8);
-        uint32_t tile, color;
         if (wait) {
             --wait;
             out[x] = held;
@@ -254,8 +253,8 @@ static void affine_bg(AgbBoard* board, uint32_t index, int y) {
             out[x] = LAYER_TRANSPARENT;
             continue;
         }
-        tile = board->memory.vram[screen + (uint32_t)(ty >> 3) * (uint32_t)tiles + (uint32_t)(tx >> 3)];
-        color = board->memory.vram[charbase + tile * 64 + (uint32_t)(ty & 7) * 8 + (uint32_t)(tx & 7)];
+        uint32_t tile = board->memory.vram[screen + (uint32_t)(ty >> 3) * (uint32_t)tiles + (uint32_t)(tx >> 3)];
+        uint32_t color = board->memory.vram[charbase + tile * 64 + (uint32_t)(ty & 7) * 8 + (uint32_t)(tx & 7)];
         out[x] = held = color ? palette(board, color) : LAYER_TRANSPARENT;
         wait = block - 1;
     }
@@ -321,29 +320,29 @@ static void obj_line(AgbBoard* board, int y) {
         uint16_t a0 = oam16(board, (uint32_t)i * 8), a1 = oam16(board, (uint32_t)i * 8 + 2);
         uint16_t a2 = oam16(board, (uint32_t)i * 8 + 4);
         int affine = a0 & 0x100, objwin_mode = (a0 & 0xC00) == 0x800, semi = (a0 & 0xC00) == 0x400;
-        int shape = a0 >> 14, size_index = a1 >> 14, width, height, draw_width, draw_height;
-        int sx, rel, bpp8 = a0 & 0x2000, priority = a2 >> 10 & 3, tile = a2 & 0x3FF, mosaic = a0 & 0x1000, block, span;
+        int shape = a0 >> 14, size_index = a1 >> 14;
+        int bpp8 = a0 & 0x2000, priority = a2 >> 10 & 3, tile = a2 & 0x3FF, mosaic = a0 & 0x1000;
         int32_t pa = 0x100, pb = 0, pc = 0, pd = 0x100;
         /* a sprite that is not affine and has bit 9 is hidden (an affine one's bit 9 doubles its size) */
         if (shape == 3 || (a0 & 0xC00) == 0xC00 || (!affine && (a0 & 0x200))) continue;
-        width = obj_sizes[shape][size_index][0];
-        height = obj_sizes[shape][size_index][1];
-        draw_width = width;
-        draw_height = height;
+        int width = obj_sizes[shape][size_index][0];
+        int height = obj_sizes[shape][size_index][1];
+        int draw_width = width;
+        int draw_height = height;
         if (affine && (a0 & 0x200)) {
             draw_width = width * 2;
             draw_height = height * 2;
         }
-        rel = (y - (a0 & 0xFF)) & 0xFF;
+        int rel = (y - (a0 & 0xFF)) & 0xFF;
         if (rel >= draw_height) continue;
-        sx = (int)(a1 & 0x1FF);
+        int sx = (int)(a1 & 0x1FF);
         if (sx >= 256) sx -= 512;
         /* mosaic: the row of the line its block of lines starts at, the sprite's first if that is above it, and blocks
            of pixels on the screen's grid, the last reaching past the sprite's right edge. A sprite of the OBJ window
            takes the rows alone, as in mGBA */
         if (mosaic) rel = rel < y % mosaic_h ? 0 : rel - y % mosaic_h;
-        block = mosaic && !objwin_mode ? mosaic_w : 1;
-        span = draw_width;
+        int block = mosaic && !objwin_mode ? mosaic_w : 1;
+        int span = draw_width;
         if (block > 1 && sx + span > 0 && (sx + span) % block) span += block - (sx + span) % block;
         if (bitmap && tile < 512) continue;
         if (affine) {

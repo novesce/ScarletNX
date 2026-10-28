@@ -6,8 +6,10 @@
    Project / Azahar Emulator Project) at azahar-emu/azahar a4b335e. Arithmetic on float24 values is host float with
    PICA multiplication, as Azahar's f24. The framebuffer is read and written pixel by pixel in physical memory. */
 #include "3ds/gpu/raster.h"
+#include "3ds/gpu/pica_internal.h"
 #include "3ds/gpu/texture.h"
 #include "3ds/gpu/transfer.h"
+#include "common/utilities/bits.h"
 #include <math.h>
 #include <string.h>
 
@@ -60,13 +62,7 @@ static float dot4(const float* a, const float* b) {
     return mul(a[0], b[0]) + mul(a[1], b[1]) + mul(a[2], b[2]) + mul(a[3], b[3]);
 }
 static float dot3(const float* a, const float* b) { return mul(a[0], b[0]) + mul(a[1], b[1]) + mul(a[2], b[2]); }
-/* a float converted to s32 as x86 does it: out-of-range and NaN become INT32_MIN */
-static int32_t to_s32(float f) {
-    if (!(f >= -2147483648.0f && f < 2147483648.0f)) return INT32_MIN;
-    return (int32_t)f;
-}
 static uint8_t to_u8(float f) { return (uint8_t)to_s32(f); }
-static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 
 /* the rasterizer's vertex: an OutputVertex and its screen position after the perspective divide */
 typedef struct {
@@ -269,7 +265,7 @@ static void color_combine(unsigned op, const int in[3][3], int out[3]) {
             case 0: r = a; break;
             case 1: r = a * b / 255; break;
             case 2: r = a + b < 255 ? a + b : 255; break;
-            case 3: r = clampi(a + b - 128, 0, 255); break;
+            case 3: r = snx_clamp_int(a + b - 128, 0, 255); break;
             case 4: r = (a * c + b * (255 - c)) / 255; break;
             case 5: r = a - b > 0 ? a - b : 0; break;
             case 8: r = (a * b + 255 * c) / 255, r = r < 255 ? r : 255; break;
@@ -279,7 +275,7 @@ static void color_combine(unsigned op, const int in[3][3], int out[3]) {
                 int d = ((in[0][0] * 2 - 255) * (in[1][0] * 2 - 255) + 128) / 256 +
                         ((in[0][1] * 2 - 255) * (in[1][1] * 2 - 255) + 128) / 256 +
                         ((in[0][2] * 2 - 255) * (in[1][2] * 2 - 255) + 128) / 256;
-                r = clampi(d, 0, 255);
+                r = snx_clamp_int(d, 0, 255);
                 break;
             }
             default: r = 0; break;
@@ -293,7 +289,7 @@ static int alpha_combine(unsigned op, const int in[3]) {
         case 0: return a;
         case 1: return a * b / 255;
         case 2: return a + b < 255 ? a + b : 255;
-        case 3: return clampi(a + b - 128, 0, 255);
+        case 3: return snx_clamp_int(a + b - 128, 0, 255);
         case 4: return (a * c + b * (255 - c)) / 255;
         case 5: return a - b > 0 ? a - b : 0;
         case 8: return (a * b + 255 * c) / 255 < 255 ? (a * b + 255 * c) / 255 : 255;
@@ -558,7 +554,7 @@ static void pixel_color(const SnxCtrPica* p, SnxCtrMemory* m, unsigned x, unsign
         }
         for (unsigned k = 0; k < 4; ++k) {
             unsigned eq = k < 3 ? params & 7 : (params >> 8) & 7;
-            out[k] = (uint8_t)clampi(blend_equation(eq, src[k] * sf[k], dst[k] * df[k]), 0, 255);
+            out[k] = (uint8_t)snx_clamp_int(blend_equation(eq, src[k] * sf[k], dst[k] * df[k]), 0, 255);
         }
     } else
         for (unsigned k = 0; k < 4; ++k) out[k] = logic_op(src[k], dst[k], R(OM_LOGIC));
@@ -664,10 +660,9 @@ const char* snx_ctr_raster_check(const SnxCtrPica* p) {
 
 void snx_ctr_raster_triangle(const SnxCtrPica* p, SnxCtrMemory* m, const SnxCtrVertex* a, const SnxCtrVertex* b,
                              const SnxCtrVertex* c) {
-    Vertex buffers[2][MAX_VERTICES];
+    Vertex buffers[2][MAX_VERTICES] = {0};
     Vertex* in = buffers[0];
     Vertex* out = buffers[1];
-    memset(buffers, 0, sizeof buffers);
     out[0].v = *a, out[1].v = *b, out[2].v = *c;
     unsigned n = 3;
     /* FlipQuaternionIfOpposite against the first vertex */

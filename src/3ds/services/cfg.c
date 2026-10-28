@@ -11,6 +11,7 @@
 #include "3ds/services/cfg.h"
 #include "3ds/memory/ctr_memory.h"
 #include "3ds/runtime/internal.h"
+#include "common/utilities/endian.h"
 #include "common/utilities/users.h"
 #include <openssl/evp.h>
 #include <stdio.h>
@@ -43,9 +44,6 @@ static void location_names(uint8_t* out, const char* name) {
     for (unsigned i = 0; i < 16; ++i)
         for (unsigned j = 0; name[j]; ++j) out[i * 0x80 + j * 2] = (uint8_t)name[j];
 }
-static void put32(uint8_t* p, uint32_t v) {
-    for (unsigned i = 0; i < 4; ++i) p[i] = (uint8_t)(v >> (i * 8));
-}
 /* the block's default and its size, 0 for a block with none (cfg_defaults.cpp) */
 static uint32_t block(SnxCtrProcess* p, uint32_t id, uint8_t out[0x800]) {
     memset(out, 0, 0x800);
@@ -58,7 +56,7 @@ static uint32_t block(SnxCtrProcess* p, uint32_t id, uint8_t out[0x800]) {
             for (unsigned i = 0; i < 8; ++i) {
                 uint32_t bits;
                 memcpy(&bits, &settings[i], 4);
-                put32(out + i * 4, bits);
+                snx_st_le32(out + i * 4, bits);
             }
             return 32;
         }
@@ -137,15 +135,15 @@ static void transferable_id(SnxCtrIpc* c) {
     uint8_t buffer[12], hash[32], data[0x800];
     block(c->process, 0x00090001, data);
     memcpy(buffer, data, 8);
-    put32(buffer + 8, c->in[1] & 0xfffff);
+    snx_st_le32(buffer + 8, c->in[1] & 0xfffff);
     if (!EVP_Digest(buffer, sizeof buffer, hash, NULL, EVP_sha256(), NULL)) {
         c->state = SNX_CTR_IPC_UNSUPPORTED;
         return;
     }
     c->out[0] = (c->in[0] & 0xffff0000u) | 0xc0;
     c->out[1] = 0;
-    c->out[2] = (uint32_t)hash[24] | (uint32_t)hash[25] << 8 | (uint32_t)hash[26] << 16 | (uint32_t)hash[27] << 24;
-    c->out[3] = (uint32_t)hash[28] | (uint32_t)hash[29] << 8 | (uint32_t)hash[30] << 16 | (uint32_t)hash[31] << 24;
+    c->out[2] = snx_ld_le32(hash + 24);
+    c->out[3] = snx_ld_le32(hash + 28);
 }
 void snx_ctr_cfg_dispatch(SnxCtrIpc* c) {
     uint8_t data[0x800];

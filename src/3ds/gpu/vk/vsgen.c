@@ -8,6 +8,8 @@
    notice is in shader.c). Multiplication is the host's (Azahar's sanitize_mul off), and RCP and RSQ skip a zero or
    negative operand as Azahar's do then. */
 #include "3ds/gpu/vk/vsgen.h"
+#include "3ds/gpu/pica_internal.h"
+#include "common/utilities/bits.h"
 #include "common/utilities/spirv_emit.h"
 #include <stdlib.h>
 #include <string.h>
@@ -21,7 +23,6 @@ enum {
     OP_CALL = 0x24, OP_CALLC = 0x25, OP_CALLU = 0x26, OP_IFU = 0x27, OP_IFC = 0x28, OP_LOOP = 0x29, OP_EMIT = 0x2a,
     OP_SETEMIT = 0x2b, OP_JMPC = 0x2c, OP_JMPU = 0x2d, OP_CMP = 0x2e, OP_MADI = 0x30, OP_MAD = 0x38
 };
-static unsigned bits(uint32_t v, unsigned at, unsigned n) { return (v >> at) & ((1u << n) - 1); }
 static unsigned opcode(uint32_t instr) { return instr >> 26; }
 static unsigned effective(unsigned op) {
     if ((op & ~7u) == OP_MAD) return OP_MAD;
@@ -32,8 +33,8 @@ static unsigned effective(unsigned op) {
 static bool arithmetic(unsigned op) { return op <= 0x0f || op == OP_MOVA || op == OP_MOV || (op & ~1u) == OP_CMP; }
 static bool inverted_arithmetic(unsigned op) { return op >= 0x18 && op <= 0x1b; }
 /* the flow control fields */
-static uint32_t dest_offset(uint32_t i) { return bits(i, 10, 12); }
-static uint32_t num_instructions(uint32_t i) { return bits(i, 0, 8); }
+static uint32_t dest_offset(uint32_t i) { return snx_bits(i, 10, 12); }
+static uint32_t num_instructions(uint32_t i) { return snx_bits(i, 0, 8); }
 
 /* ---- the control flow analysis: subroutines, the ranges a CALL, IF or LOOP names, each with its exit and the
    addresses JMPs inside it reach ---- */
@@ -323,10 +324,10 @@ static uint32_t cc_bit(Gen* g, unsigned i, bool set) {
     return set ? v : SPV(g->s, SPV_OP_LOGICAL_NOT, g->t_bool, v);
 }
 static uint32_t condition(Gen* g, uint32_t instr) {
-    unsigned op = bits(instr, 22, 2);
-    if (op == 2) return cc_bit(g, 0, bits(instr, 25, 1));
-    if (op == 3) return cc_bit(g, 1, bits(instr, 24, 1));
-    uint32_t x = cc_bit(g, 0, bits(instr, 25, 1)), y = cc_bit(g, 1, bits(instr, 24, 1));
+    unsigned op = snx_bits(instr, 22, 2);
+    if (op == 2) return cc_bit(g, 0, snx_bits(instr, 25, 1));
+    if (op == 3) return cc_bit(g, 1, snx_bits(instr, 24, 1));
+    uint32_t x = cc_bit(g, 0, snx_bits(instr, 25, 1)), y = cc_bit(g, 1, snx_bits(instr, 24, 1));
     return SPV(g->s, op == 0 ? SPV_OP_LOGICAL_OR : SPV_OP_LOGICAL_AND, g->t_bool, x, y); /* any, all */
 }
 static uint32_t uniform_bool(Gen* g, uint32_t index, bool invert) {
@@ -365,10 +366,10 @@ static uint32_t source(Gen* g, unsigned reg, unsigned address, uint32_t pattern,
     else
         v = uniform_f(g, sconst(g, (int32_t)(reg - 0x20)));
     unsigned sel[4];
-    for (unsigned i = 0; i < 4; ++i) sel[i] = bits(pattern, select_at[n - 1] + (3 - i) * 2, 2);
+    for (unsigned i = 0; i < 4; ++i) sel[i] = snx_bits(pattern, select_at[n - 1] + (3 - i) * 2, 2);
     if (sel[0] != 0 || sel[1] != 1 || sel[2] != 2 || sel[3] != 3)
         v = SPV(g->s, SPV_OP_VECTOR_SHUFFLE, g->t_vec4, v, v, sel[0], sel[1], sel[2], sel[3]);
-    if (bits(pattern, negate_at[n - 1], 1)) v = SPV(g->s, SPV_OP_F_NEGATE, g->t_vec4, v);
+    if (snx_bits(pattern, negate_at[n - 1], 1)) v = SPV(g->s, SPV_OP_F_NEGATE, g->t_vec4, v);
     return v;
 }
 /* the destination register's variable, 0 for an output the mask leaves out */
@@ -426,13 +427,13 @@ static uint32_t next_offset(Gen* g, uint32_t offset) {
 static void compile_arithmetic(Gen* g, uint32_t instr, unsigned raw) {
     unsigned op = effective(raw);
     bool inverted = inverted_arithmetic(raw);
-    uint32_t pattern = g->setup->swizzle[bits(instr, 0, 7)];
-    unsigned address = bits(instr, 19, 2);
-    unsigned reg1 = inverted ? bits(instr, 14, 5) : bits(instr, 12, 7);
-    unsigned reg2 = inverted ? bits(instr, 7, 7) : bits(instr, 7, 5);
+    uint32_t pattern = g->setup->swizzle[snx_bits(instr, 0, 7)];
+    unsigned address = snx_bits(instr, 19, 2);
+    unsigned reg1 = inverted ? snx_bits(instr, 14, 5) : snx_bits(instr, 12, 7);
+    unsigned reg2 = inverted ? snx_bits(instr, 7, 7) : snx_bits(instr, 7, 5);
     uint32_t a = source(g, reg1, inverted ? 0 : address, pattern, 1);
     uint32_t b = source(g, reg2, inverted ? address : 0, pattern, 2);
-    uint32_t d = destination(g, bits(instr, 21, 5));
+    uint32_t d = destination(g, snx_bits(instr, 21, 5));
     uint32_t f = g->t_float, v4 = g->t_vec4;
     SpvEmitter* s = g->s;
     switch (op) {
@@ -490,7 +491,7 @@ static void compile_arithmetic(Gen* g, uint32_t instr, unsigned raw) {
             static const uint32_t compare[6] = {SPV_OP_F_ORD_EQUAL,     SPV_OP_F_UNORD_NOT_EQUAL,
                                                 SPV_OP_F_ORD_LESS_THAN, SPV_OP_F_ORD_LESS_THAN_EQUAL,
                                                 SPV_OP_F_ORD_GREATER_THAN, SPV_OP_F_ORD_GREATER_THAN_EQUAL};
-            unsigned mode[2] = {bits(instr, 24, 3), bits(instr, 21, 3)};
+            unsigned mode[2] = {snx_bits(instr, 24, 3), snx_bits(instr, 21, 3)};
             if (mode[0] > 5 || mode[1] > 5) break; /* an unknown compare mode: Azahar logs it and leaves the codes */
             for (unsigned i = 0; i < 2; ++i)
                 store(g, g->cc[i], SPV(s, compare[mode[i]], g->t_bool, extract(g, f, a, i), extract(g, f, b, i)));
@@ -510,15 +511,16 @@ static uint32_t compile_instr(Gen* g, uint32_t offset) {
     }
     if (op == OP_MAD || op == OP_MADI) {
         bool inverted = op == OP_MADI;
-        uint32_t pattern = g->setup->swizzle[bits(instr, 0, 5)];
-        unsigned address = bits(instr, 22, 2);
-        unsigned reg2 = inverted ? bits(instr, 12, 5) : bits(instr, 10, 7);
-        unsigned reg3 = inverted ? bits(instr, 5, 7) : bits(instr, 5, 5);
-        uint32_t a = source(g, bits(instr, 17, 5), 0, pattern, 1);
+        uint32_t pattern = g->setup->swizzle[snx_bits(instr, 0, 5)];
+        unsigned address = snx_bits(instr, 22, 2);
+        unsigned reg2 = inverted ? snx_bits(instr, 12, 5) : snx_bits(instr, 10, 7);
+        unsigned reg3 = inverted ? snx_bits(instr, 5, 7) : snx_bits(instr, 5, 5);
+        uint32_t a = source(g, snx_bits(instr, 17, 5), 0, pattern, 1);
         uint32_t b = source(g, reg2, inverted ? 0 : address, pattern, 2);
         uint32_t c = source(g, reg3, inverted ? address : 0, pattern, 3);
         uint32_t product = SPV(g->s, SPV_OP_F_MUL, g->t_vec4, a, b);
-        set_dest(g, pattern, destination(g, bits(instr, 24, 5)), SPV(g->s, SPV_OP_F_ADD, g->t_vec4, product, c), false);
+        set_dest(g, pattern, destination(g, snx_bits(instr, 24, 5)), SPV(g->s, SPV_OP_F_ADD, g->t_vec4, product, c),
+                 false);
         return offset + 1;
     }
     switch (raw) {
@@ -526,7 +528,7 @@ static uint32_t compile_instr(Gen* g, uint32_t offset) {
         case OP_JMPC:
         case OP_JMPU: {
             uint32_t cond = raw == OP_JMPC ? condition(g, instr)
-                                           : uniform_bool(g, bits(instr, 22, 4), num_instructions(instr) & 1);
+                                           : uniform_bool(g, snx_bits(instr, 22, 4), num_instructions(instr) & 1);
             if (!g->jmp_to) {
                 /* a range the analysis took from its cache without the labels: the GLSL had no loop to break */
                 g->fail = "a jump in a subroutine without labels";
@@ -545,7 +547,7 @@ static uint32_t compile_instr(Gen* g, uint32_t offset) {
             if (raw == OP_CALLC)
                 merge = if_begin(g, condition(g, instr));
             else if (raw == OP_CALLU)
-                merge = if_begin(g, uniform_bool(g, bits(instr, 22, 4), false));
+                merge = if_begin(g, uniform_bool(g, snx_bits(instr, 22, 4), false));
             call_sub(g, sub(g, dest_offset(instr), dest_offset(instr) + num_instructions(instr)));
             if (merge) place(g, merge);
             break;
@@ -553,7 +555,7 @@ static uint32_t compile_instr(Gen* g, uint32_t offset) {
         case OP_NOP: break;
         case OP_IFC:
         case OP_IFU: {
-            uint32_t cond = raw == OP_IFC ? condition(g, instr) : uniform_bool(g, bits(instr, 22, 4), false);
+            uint32_t cond = raw == OP_IFC ? condition(g, instr) : uniform_bool(g, snx_bits(instr, 22, 4), false);
             uint32_t else_offset = dest_offset(instr), endif_offset = else_offset + num_instructions(instr);
             uint32_t then = spv_emit_id(g->s), merge = spv_emit_id(g->s);
             uint32_t otherwise = num_instructions(instr) ? spv_emit_id(g->s) : merge;
@@ -572,7 +574,7 @@ static uint32_t compile_instr(Gen* g, uint32_t offset) {
         }
         case OP_LOOP: {
             /* aL = i.y; for (uint n = 0u; n <= i.x; aL += i.z, ++n) */
-            uint32_t i = uniform_i(g, bits(instr, 22, 2));
+            uint32_t i = uniform_i(g, snx_bits(instr, 22, 2));
             store(g, g->addr[2], SPV(g->s, SPV_OP_BITCAST, g->t_int, extract(g, g->t_uint, i, 1)));
             uint32_t counter = spv_emit_local(g->s, g->t_uint);
             store(g, counter, uconst(g, 0));
@@ -719,9 +721,9 @@ static void generate(Gen* g) {
 
 /* ---- the shader around the program ---- */
 uint64_t snx_ctr_vs_hash(const SnxCtrShaderSetup* setup) {
-    uint64_t h = 0xcbf29ce484222325ull;
-    for (unsigned i = 0; i < PROGRAM_END; ++i) h = (h ^ setup->code[i]) * 0x100000001b3ull;
-    for (unsigned i = 0; i < PROGRAM_END; ++i) h = (h ^ setup->swizzle[i]) * 0x100000001b3ull;
+    uint64_t h = SNX_FNV_BASIS;
+    for (unsigned i = 0; i < PROGRAM_END; ++i) h = snx_fnv_step(h, setup->code[i]);
+    for (unsigned i = 0; i < PROGRAM_END; ++i) h = snx_fnv_step(h, setup->swizzle[i]);
     return h;
 }
 void snx_ctr_vs_config(const SnxCtrPica* pica, SnxCtrVsConfig* c) {
@@ -751,7 +753,7 @@ static uint32_t semantic(Gen* g, const uint32_t* outputs, unsigned slot) {
     unsigned found_attr = 16, found_comp = 0;
     for (unsigned attr = 0; attr < c->vs_output_total; ++attr)
         for (unsigned comp = 0; comp < 4; ++comp)
-            if (bits(c->vs_output_attributes[attr], comp * 8, 5) == slot) found_attr = attr, found_comp = comp;
+            if (snx_bits(c->vs_output_attributes[attr], comp * 8, 5) == slot) found_attr = attr, found_comp = comp;
     if (found_attr < c->num_outputs) return extract(g, g->t_float, outputs[found_attr], found_comp);
     return fconst(g, 1.0f);
 }

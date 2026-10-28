@@ -6,10 +6,10 @@
 #include "3ds/runtime/main.h"
 #include "3ds/ipc/ctr_ipc.h"
 #include "3ds/services/uds.h"
+#include "common/utilities/ascii.h"
 #include "common/utilities/common.h"
 #include "common/utilities/ini_lines.h"
 #include "snx_settings.h"
-#include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
@@ -80,7 +80,7 @@ static bool game_path(const char* path) {
         if (n > length && path[n - length] == '.') {
             bool found = true;
             for (size_t k = 1; found && k < length; ++k)
-                if (tolower((unsigned char)path[n - length + k]) != e[k]) found = false;
+                if (snx_to_lower(path[n - length + k]) != e[k]) found = false;
             if (found) return true;
         }
     }
@@ -331,37 +331,21 @@ static char* last_part(const char* path) {
     for (cut = n; cut && path[cut - 1] != '/' && path[cut - 1] != '\\'; --cut) continue;
     char* name = snx_format("%.*s", (int)(n - cut), path + cut);
     size_t length = name ? strlen(name) : 0;
-    if (length > 4 && name[length - 4] == '.' && tolower((unsigned char)name[length - 3]) == 'e' &&
-        tolower((unsigned char)name[length - 2]) == 'x' && tolower((unsigned char)name[length - 1]) == 'e')
+    if (length > 4 && name[length - 4] == '.' && snx_to_lower(name[length - 3]) == 'e' &&
+        snx_to_lower(name[length - 2]) == 'x' && snx_to_lower(name[length - 1]) == 'e')
         name[length - 4] = 0;
     return name;
 }
 bool snx_ctr_title_name(const char* path) {
     char* name = last_part(path);
     bool title = name && strlen(name) == 16 && !strncmp(name, "0004", 4);
-    for (size_t i = 0; title && i < 16; ++i) title = isxdigit((unsigned char)name[i]);
+    for (size_t i = 0; title && i < 16; ++i) title = snx_is_hex(name[i]);
     free(name);
     return title;
 }
 /* The game's folder, named title (its title ID): in outdir, else the data folder's recompiled/ as the Switch driver
    makes its games (snx_recompiled_game, which an older version's games/ still serves). Resolved, NULL with a line saying
    why */
-static char* game_folder(const char* repo, const char* outdir, const char* argv0, const char* title) {
-    char *exe = repo || outdir ? NULL : snx_executable(argv0), *dir = exe ? snx_dirname(exe) : NULL;
-    char* data = outdir ? NULL : repo ? snx_strdup(repo) : snx_data_dir(dir);
-    char* folder = outdir ? snx_path_join(outdir, title) : data ? snx_recompiled_game(data, title) : NULL;
-    char* resolved = folder ? snx_absolute(folder) : NULL;
-    if (!resolved) {
-        char why[256];
-        fprintf(stderr, "scarletnx-3ds: cannot resolve the game's folder %s: %s\n", folder ? folder : title,
-                snx_os_error(why, sizeof why));
-    }
-    free(folder);
-    free(data);
-    free(dir);
-    free(exe);
-    return resolved;
-}
 /* What the game's .ini (<folder>/<title ID>.ini) says: the game it plays (source=), *source the caller's, NULL
    without one, and the console (model=), *model kept without one. False only when it cannot be read */
 static bool read_game_ini(const char* folder, char** source, SnxCtrModel* model) {
@@ -418,10 +402,6 @@ static bool parse_blocks(const char* text, uint64_t* blocks) {
     if (errno || *end || !n) return false;
     *blocks = (uint64_t)n;
     return true;
-}
-static bool parse_seconds(const char* text, double* seconds) {
-    char* end = NULL;
-    return text && (*seconds = strtod(text, &end)) > 0 && !*end && *seconds <= 1e9;
 }
 /* The folder of the game this program is the copy of, as a Switch game's copy is: its own folder when it is named
    after a title ID, or after the module beside it. NULL for the driver under its own names. The caller's to free */
@@ -491,7 +471,7 @@ int snx_ctr_main(int argc, char** argv) {
             }
             budget_set = true;
         } else if (!positional && (!strcmp(arg, "--seconds") || !strncmp(arg, "--seconds=", 10))) {
-            if (!parse_seconds(arg[9] ? arg + 10 : ++i < argc ? argv[i] : NULL, &seconds)) {
+            if (!snx_parse_seconds(arg[9] ? arg + 10 : ++i < argc ? argv[i] : NULL, &seconds)) {
                 fputs("scarletnx-3ds: --seconds requires a positive number\n", stderr);
                 return 2;
             }
@@ -653,7 +633,12 @@ int snx_ctr_main(int argc, char** argv) {
     else {
         char title[17];
         snprintf(title, sizeof title, "%016" PRIX64, snx_ctr_source_title(source));
-        folder = game_folder(repo, outdir, argv[0], title);
+        folder = snx_game_folder(repo, outdir, argv[0], title, 0);
+        if (!folder) {
+            char why[256];
+            fprintf(stderr, "scarletnx-3ds: cannot resolve the folder of %s: %s\n", title,
+                    snx_os_error(why, sizeof why));
+        }
         if (folder) move_old_folder(old, folder);
     }
     free(old);

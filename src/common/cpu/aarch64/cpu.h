@@ -48,8 +48,11 @@ typedef double f64;
   14: code the guest patches at run time. IC IVAU calls RtAPI.code_changed, and each AOT function first reads its
       byte in SnxModule.stale, which the runtime sets when a line it was compiled from changed: the function then
       runs its entry through dispatch, where the runtime compiles the code there now.
-  15: calls to an exported function go through its dispatch slot, which a hook of the runtime's may hold. */
-#define SNX_ABI 15
+  15: calls to an exported function go through its dispatch slot, which a hook of the runtime's may hold.
+  16: a store-exclusive whose range is covered by the monitor that armed it. A narrow store-exclusive after a wide
+      load-exclusive stores (and returns 0), where every build before made it fail and return 1, so a game's retry
+      loop never ended: both the generated code and the interpreter's helper emit the new comparison. */
+#define SNX_ABI 16
 
 #if defined(_WIN32)
 #define SNX_EXPORT __declspec(dllexport)
@@ -477,10 +480,16 @@ SNX_INLINE u64 ldx(CPU* c, u8* M, u64 a, u32 sz) {
     c->excl_on = 1;
     return v;
 }
-/* STXR/STLXR: the status, 0 when stored */
+/* STXR/STLXR: the status, 0 when stored. The monitor's range must cover the store's, as the console allows a
+   store-exclusive at a smaller size than the load that armed it: games deliberately pair a wide load-exclusive with a
+   narrow store-exclusive to change part of a wider counter in place, and requiring the sizes to be equal made such a
+   pair never store, so the game's retry loop spun on it for good. */
 SNX_INLINE u32 stx(CPU* c, u8* M, u64 a, u32 sz, u64 v) {
     u32 stored = 0;
-    if (c->excl_on && c->excl_addr == a && c->excl_size == sz) {
+    /* the size bits and a pair's flag, which a pair's load sets and its store names too: masked off on both sides,
+       so a pair (0x13) covers a single (0x03) and a single inside a wider single succeeds */
+    u64 armed = 8ull << (c->excl_size & 3), this = 8ull << (sz & 3);
+    if (c->excl_on && c->excl_addr == a && this <= armed) {
         if (sz == 0)
             stored = snx_cas8((u8*)MP(a), (u8)c->excl_val, (u8)v);
         else if (sz == 1)

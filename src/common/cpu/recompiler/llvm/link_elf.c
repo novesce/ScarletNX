@@ -10,7 +10,8 @@
    PowerPC64 module is linked on a big-endian host. PowerPC64 comes in both of its ABIs, as the objects' e_flags say:
    ELFv2 and ELFv1, whose function symbols name .opd descriptors (snx_elf_ppc_entry). The module has one TOC, so a call
    never changes r2 and the nop after it stays one. */
-#include "common/cpu/recompiler/llvm/link.h"
+#include "common/cpu/recompiler/llvm/link_internal.h"
+#include "common/utilities/bits.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -59,20 +60,17 @@ typedef struct {
 } Link;
 
 static int fail(Link* l, const char* format, const char* a, const char* b) {
-    snprintf(l->error, l->error_size, format, a, b);
-    return -1;
+    return snx_link_fail(l->error, l->error_size, format, a, b);
 }
 
 /* The defining object and symbol of object o's symbol index; *undefined_weak for an unresolved weak reference */
 static int definition(Link* l, size_t object, size_t index, size_t* def_object, size_t* def_index,
                       int* undefined_weak) {
     const SnxElfObject* o = &l->objs[object];
-    const Elf64_Sym* s;
-    int found;
     *undefined_weak = 0;
-    found = snx_elf_definition(l->objs, &l->globals, object, index, def_object, def_index, l->error, l->error_size);
+    int found = snx_elf_definition(l->objs, &l->globals, object, index, def_object, def_index, l->error, l->error_size);
     if (found != SNX_ELF_ELSEWHERE) return found;
-    s = &o->syms[index];
+    const Elf64_Sym* s = &o->syms[index];
     if (ELF64_ST_BIND(s->st_info) == STB_WEAK) {
         *undefined_weak = 1;
         return 0;
@@ -92,31 +90,22 @@ static uint64_t symbol_address(Link* l, size_t object, size_t index, int* absolu
     return snx_elf_symbol_address(l->objs, object, index, absolute);
 }
 
-static void got_key(char* key, size_t object, size_t index) {
-    sprintf(key, "%lu:%lu", (unsigned long)object, (unsigned long)index);
-}
-static void veneer_key(char* key, size_t caller, size_t object, size_t index) {
-    sprintf(key, "%lu:%lu:%lu", (unsigned long)caller, (unsigned long)object, (unsigned long)index);
-}
-
 /* A RISC-V low half's value, the displacement of the HI20 relocation it completes: in the same relocations r (n of
    them, of section s), at the place of the low half's label, the AUIPC. 0, or -1 with the reason */
 static int riscv_hi20_value(Link* l, size_t object, const Elf64_Shdr* s, const Elf64_Rela* r, size_t n,
                             const Elf64_Rela* lo, uint64_t* value) {
     const SnxElfObject* o = &l->objs[object];
     size_t index = ELF64_R_SYM(lo->r_info), def_object = 0, def_index = 0, found = 0;
-    uint64_t P;
-    long hi;
     int weak = 0, absolute;
-    char key[72];
     if (index >= o->nsyms || o->syms[index].st_shndx != s->sh_info)
         return fail(l, "%s: a RISC-V low half whose AUIPC is not in its section%s", o->input->name, "");
-    hi = snx_elf_riscv_hi20(r, n, o->syms[index].st_value);
+    long hi = snx_elf_riscv_hi20(r, n, o->syms[index].st_value);
     if (hi < 0) return fail(l, "%s: a RISC-V low half without its HI20 relocation%s", o->input->name, "");
-    P = o->address[s->sh_info] + r[hi].r_offset;
+    uint64_t P = o->address[s->sh_info] + r[hi].r_offset;
     if (definition(l, object, ELF64_R_SYM(r[hi].r_info), &def_object, &def_index, &weak)) return -1;
     if (ELF64_R_TYPE(r[hi].r_info) == SNX_RV_GOT_HI20) {
-        got_key(key, def_object, def_index);
+        char key[72];
+        snx_link_got_key(key, def_object, def_index);
         snx_link_find(&l->got, key, &found);
         *value = l->got_address + 8 * (uint64_t)found + (uint64_t)r[hi].r_addend - P;
     } else
@@ -135,22 +124,20 @@ static int symbolless(const Link* l, const Elf64_Rela* r) {
    AArch64 branch to another object's definition (PowerPC64: any call), once the code is large enough that it may be
    out of reach. x86-64 modules need none, their rel32 calls reaching across the 2 GiB a module may span */
 static int scan_relocations(Link* l) {
-    size_t i, j, k, def_object, def_index, slot;
+    size_t def_object, def_index, slot;
     uint64_t text = snx_elf_text_size(l->objs, l->nobjs);
     int weak, far = (l->machine == EM_AARCH64 && text >= SNX_ELF_VENEER_TEXT) ||
                     (l->machine == EM_PPC64 && text >= PPC_VENEER_TEXT);
     char key[72];
-    for (i = 0; i < l->nobjs; ++i) {
+    for (size_t i = 0; i < l->nobjs; ++i) {
         SnxElfObject* o = &l->objs[i];
-        for (j = 0; j < o->eh->e_shnum; ++j) {
+        for (size_t j = 0; j < o->eh->e_shnum; ++j) {
             const Elf64_Shdr* s = &o->sh[j];
-            const Elf64_Rela* r;
-            size_t n;
             if (s->sh_type == SHT_REL) return fail(l, "%s: REL relocations are not supported%s", o->input->name, "");
             if (s->sh_type != SHT_RELA || s->sh_info >= o->eh->e_shnum || o->kind[s->sh_info] < 0) continue;
-            r = (const Elf64_Rela*)(o->input->data + s->sh_offset);
-            n = s->sh_size / sizeof(Elf64_Rela);
-            for (k = 0; k < n; ++k) {
+            const Elf64_Rela* r = (const Elf64_Rela*)(o->input->data + s->sh_offset);
+            size_t n = s->sh_size / sizeof(Elf64_Rela);
+            for (size_t k = 0; k < n; ++k) {
                 unsigned type = ELF64_R_TYPE(r[k].r_info);
                 if (symbolless(l, &r[k])) {
                     def_object = (size_t)-1;
@@ -159,14 +146,14 @@ static int scan_relocations(Link* l) {
                     return -1;
                 if (snx_elf_got_relocation(l->machine, type)) {
                     if (weak) return fail(l, "%s: GOT reference to an undefined weak symbol%s", o->input->name, "");
-                    got_key(key, def_object, def_index);
+                    snx_link_got_key(key, def_object, def_index);
                     if (!snx_link_find(&l->got, key, &slot)) {
                         snx_link_insert(&l->got, key, l->got_count++);
                         ++l->relative_count;
                     }
                 } else if (far && snx_elf_call_relocation(l->machine, type) && !weak &&
                            (def_object != i || l->machine == EM_PPC64) && def_object != (size_t)-1) {
-                    veneer_key(key, i, def_object, def_index);
+                    snx_link_veneer_key(key, i, def_object, def_index);
                     if (!snx_link_find(&l->veneer, key, &slot)) snx_link_insert(&l->veneer, key, o->veneers++);
                 } else if (snx_elf_absolute_relocation(l->machine, type) && !weak) {
                     if (o->kind[s->sh_info] != SNX_ELF_DATA)
@@ -179,8 +166,6 @@ static int scan_relocations(Link* l) {
     }
     return 0;
 }
-
-static uint64_t align_up(uint64_t v, uint64_t a) { return (v + a - 1) / a * a; }
 
 static unsigned long elf_hash(const char* name) {
     unsigned long h = 0, g;
@@ -218,33 +203,23 @@ static const int kind_section[SNX_ELF_KINDS] = {S_RODATA, S_TEXT, S_DATA, S_BSS}
 
 int snx_link_elf(const SnxLinkInput* inputs, size_t count, const char* const* exports, size_t export_count,
                  const char* soname, SnxLinkOutput* output, char* error, size_t error_size) {
-    Link l;
-    SnxLinkBuffer out, dynstr, strtab, symtab, rela;
+    Link l = {0};
+    SnxLinkBuffer out = {0}, dynstr = {0}, strtab = {0}, symtab = {0}, rela = {0};
     Elf64_Shdr shdr[S_COUNT];
     Elf64_Phdr ph[5];
     Elf64_Ehdr eh;
-    uint64_t hash_off, dynsym_off, dynstr_off, rela_off, rodata_off, text_off, data_off, got_off, dynamic_off, bss_off,
-        end_r, end_data, nbucket, *export_address;
-    size_t i, j, k, nsyms = export_count + 1, ndyn = 0, symbol_count = 0;
+    size_t nsyms = export_count + 1, ndyn = 0;
     int rc = -1;
-    unsigned char* p;
-    uint32_t word;
     Elf64_Dyn dyn[16];
     (void)soname;
-    memset(&l, 0, sizeof(l));
-    memset(&out, 0, sizeof(out));
-    memset(&dynstr, 0, sizeof(dynstr));
-    memset(&strtab, 0, sizeof(strtab));
-    memset(&symtab, 0, sizeof(symtab));
-    memset(&rela, 0, sizeof(rela));
-    memset(output, 0, sizeof(*output));
+    *output = (SnxLinkOutput){0};
     l.error = error;
     l.error_size = error_size;
     l.nobjs = count;
     l.objs = (SnxElfObject*)calloc(count, sizeof(SnxElfObject));
-    export_address = (uint64_t*)calloc(export_count + 1, sizeof(uint64_t));
+    uint64_t* export_address = (uint64_t*)calloc(export_count + 1, sizeof(uint64_t));
     if (!l.objs || !export_address) goto done;
-    for (i = 0; i < count; ++i)
+    for (size_t i = 0; i < count; ++i)
         if (snx_elf_parse(&l.objs[i], &inputs[i], &l.machine, &l.abi, error, error_size)) goto done;
     l.relative = snx_elf_relative_type(l.machine);
     l.page = l.machine == EM_X86_64 ? 0x1000 : 0x10000;
@@ -252,21 +227,22 @@ int snx_link_elf(const SnxLinkInput* inputs, size_t count, const char* const* ex
     snx_elf_layout(l.objs, count, l.kind_size, l.kind_align);
     /* dynamic symbol names */
     snx_link_append(&dynstr, "", 1);
-    for (i = 0; i < export_count; ++i) snx_link_append(&dynstr, exports[i], strlen(exports[i]) + 1);
-    nbucket = export_count ? export_count : 1;
+    for (size_t i = 0; i < export_count; ++i) snx_link_append(&dynstr, exports[i], strlen(exports[i]) + 1);
+    uint64_t nbucket = export_count ? export_count : 1;
     /* addresses */
-    hash_off = align_up(sizeof(Elf64_Ehdr) + sizeof(ph), 8);
-    dynsym_off = align_up(hash_off + 4 * (2 + nbucket + nsyms), 8);
-    dynstr_off = dynsym_off + nsyms * sizeof(Elf64_Sym);
-    rela_off = align_up(dynstr_off + dynstr.size, 8);
-    rodata_off = align_up(rela_off + l.relative_count * sizeof(Elf64_Rela), l.kind_align[SNX_ELF_RODATA]);
-    end_r = rodata_off + l.kind_size[SNX_ELF_RODATA];
-    text_off = align_up(end_r, l.page);
-    data_off = align_up(align_up(text_off + l.kind_size[SNX_ELF_TEXT], l.page), l.kind_align[SNX_ELF_DATA]);
-    got_off = align_up(data_off + l.kind_size[SNX_ELF_DATA], 8);
-    dynamic_off = got_off + 8 * l.got_count;
-    end_data = dynamic_off + sizeof(dyn);
-    bss_off = align_up(end_data, l.kind_align[SNX_ELF_BSS]);
+    uint64_t hash_off = snx_align_up(sizeof(Elf64_Ehdr) + sizeof(ph), 8);
+    uint64_t dynsym_off = snx_align_up(hash_off + 4 * (2 + nbucket + nsyms), 8);
+    uint64_t dynstr_off = dynsym_off + nsyms * sizeof(Elf64_Sym);
+    uint64_t rela_off = snx_align_up(dynstr_off + dynstr.size, 8);
+    uint64_t rodata_off = snx_align_up(rela_off + l.relative_count * sizeof(Elf64_Rela), l.kind_align[SNX_ELF_RODATA]);
+    uint64_t end_r = rodata_off + l.kind_size[SNX_ELF_RODATA];
+    uint64_t text_off = snx_align_up(end_r, l.page);
+    uint64_t data_off = snx_align_up(snx_align_up(text_off + l.kind_size[SNX_ELF_TEXT], l.page),
+                                     l.kind_align[SNX_ELF_DATA]);
+    uint64_t got_off = snx_align_up(data_off + l.kind_size[SNX_ELF_DATA], 8);
+    uint64_t dynamic_off = got_off + 8 * l.got_count;
+    uint64_t end_data = dynamic_off + sizeof(dyn);
+    uint64_t bss_off = snx_align_up(end_data, l.kind_align[SNX_ELF_BSS]);
     l.kind_address[SNX_ELF_RODATA] = rodata_off;
     l.kind_address[SNX_ELF_TEXT] = text_off;
     l.kind_address[SNX_ELF_DATA] = data_off;
@@ -274,28 +250,28 @@ int snx_link_elf(const SnxLinkInput* inputs, size_t count, const char* const* ex
     l.got_address = got_off;
     /* PowerPC64's TOC16 relocations reach 2 GiB either side of it in pairs (@ha, @l): the whole module */
     l.toc = data_off + 0x8000;
-    for (i = 0; i < count; ++i)
-        for (j = 0; j < l.objs[i].eh->e_shnum; ++j)
+    for (size_t i = 0; i < count; ++i)
+        for (size_t j = 0; j < l.objs[i].eh->e_shnum; ++j)
             if (l.objs[i].kind[j] >= 0)
                 l.objs[i].address[j] = l.kind_address[l.objs[i].kind[j]] + l.objs[i].position[j];
     snx_link_reserve(&out, end_data);
     /* section contents */
-    for (i = 0; i < count; ++i) {
+    for (size_t i = 0; i < count; ++i) {
         SnxElfObject* o = &l.objs[i];
-        for (j = 0; j < o->eh->e_shnum; ++j)
+        for (size_t j = 0; j < o->eh->e_shnum; ++j)
             if (o->kind[j] >= 0 && o->kind[j] != SNX_ELF_BSS && o->sh[j].sh_size)
                 memcpy(out.data + o->address[j], o->input->data + o->sh[j].sh_offset, o->sh[j].sh_size);
     }
     /* GOT slots: the address of their symbol, relocated by the loader */
-    for (i = 0; i < l.got.capacity; ++i)
+    for (size_t i = 0; i < l.got.capacity; ++i)
         if (l.got.keys[i]) {
             unsigned long object, index;
             int absolute;
-            uint64_t value, slot = got_off + 8 * l.got.values[i];
+            uint64_t slot = got_off + 8 * l.got.values[i];
             Elf64_Rela r;
             sscanf(l.got.keys[i], "%lu:%lu", &object, &index);
-            value = symbol_address(&l, object, index, &absolute);
-            snx_link_put64(out.data + slot, value);
+            uint64_t value = symbol_address(&l, object, index, &absolute);
+            snx_st_le64(out.data + slot, value);
             r.r_offset = slot;
             r.r_info = ELF64_R_INFO((Elf64_Xword)0, l.relative);
             r.r_addend = (int64_t)value;
@@ -303,18 +279,17 @@ int snx_link_elf(const SnxLinkInput* inputs, size_t count, const char* const* ex
         }
     /* relocations, through elf_object.c as the JIT loader writes them; the module's own parts are the RELATIVE
        entries for absolute addresses, the veneers of branches out of reach and PowerPC64's TOC */
-    for (i = 0; i < count; ++i) {
+    for (size_t i = 0; i < count; ++i) {
         SnxElfObject* o = &l.objs[i];
-        for (j = 0; j < o->eh->e_shnum; ++j) {
+        for (size_t j = 0; j < o->eh->e_shnum; ++j) {
             const Elf64_Shdr* s = &o->sh[j];
-            const Elf64_Rela* r;
-            size_t n, def_object = 0, def_index = 0;
+            size_t def_object = 0, def_index = 0;
             if (s->sh_type != SHT_RELA || s->sh_info >= o->eh->e_shnum || o->kind[s->sh_info] < 0) continue;
-            r = (const Elf64_Rela*)(o->input->data + s->sh_offset);
-            n = s->sh_size / sizeof(Elf64_Rela);
-            for (k = 0; k < n; ++k) {
+            const Elf64_Rela* r = (const Elf64_Rela*)(o->input->data + s->sh_offset);
+            size_t n = s->sh_size / sizeof(Elf64_Rela);
+            for (size_t k = 0; k < n; ++k) {
                 unsigned type = ELF64_R_TYPE(r[k].r_info);
-                uint64_t P = o->address[s->sh_info] + r[k].r_offset, S = 0, slot = 0, at, entry = 0;
+                uint64_t P = o->address[s->sh_info] + r[k].r_offset, S = 0, slot = 0, entry = 0;
                 uint64_t got = l.machine == EM_PPC64 ? l.toc : got_off; /* PowerPC64's TOC (elf_object.h) */
                 int64_t A = r[k].r_addend;
                 int weak = 0, absolute = 1, written = SNX_LINK_OUTSIDE;
@@ -343,26 +318,27 @@ int snx_link_elf(const SnxLinkInput* inputs, size_t count, const char* const* ex
                     A = 0;
                 }
                 if (snx_elf_got_relocation(l.machine, type)) {
-                    got_key(key, def_object, def_index);
+                    snx_link_got_key(key, def_object, def_index);
                     snx_link_find(&l.got, key, &found);
                     slot = got_off + 8 * (uint64_t)found;
                 }
                 if (snx_elf_riscv_lo12(l.machine, type) && riscv_hi20_value(&l, i, s, r, n, &r[k], &S)) goto done;
                 if (r[k].r_offset <= o->sh[s->sh_info].sh_size) {
-                    p = out.data + P;
+                    unsigned char* p = out.data + P;
                     written = snx_elf_relocate(l.machine, p, o->sh[s->sh_info].sh_size - r[k].r_offset, type, S, A, P,
                                                got, slot);
                     if (written == SNX_LINK_RANGE && snx_elf_call_relocation(l.machine, type) && !weak) {
                         /* the caller's veneer, which it reaches, jumps there: PowerPC64's to the global entry, as
                            through a pointer */
-                        veneer_key(key, i, def_object, def_index);
+                        snx_link_veneer_key(key, i, def_object, def_index);
                         if (snx_link_find(&l.veneer, key, &found)) {
                             if (l.machine == EM_PPC64) {
-                                at = l.kind_address[SNX_ELF_TEXT] + o->island +
+                                uint64_t at = l.kind_address[SNX_ELF_TEXT] + o->island +
                                      SNX_ELF_PPC_VENEER_SIZE * (uint64_t)found;
                                 written = snx_elf_ppc_branch_veneer(p, P, out.data + at, at, entry, l.toc);
                             } else {
-                                at = l.kind_address[SNX_ELF_TEXT] + o->island + SNX_ELF_VENEER_SIZE * (uint64_t)found;
+                                uint64_t at = l.kind_address[SNX_ELF_TEXT] + o->island
+                                    + SNX_ELF_VENEER_SIZE * (uint64_t)found;
                                 written = snx_elf_branch_veneer(p, P, out.data + at, at, S + (uint64_t)A, 0);
                             }
                         }
@@ -389,7 +365,7 @@ int snx_link_elf(const SnxLinkInput* inputs, size_t count, const char* const* ex
         }
     }
     /* exports */
-    for (i = 0; i < export_count; ++i) {
+    for (size_t i = 0; i < export_count; ++i) {
         size_t found;
         int absolute;
         if (!snx_link_find(&l.globals, exports[i], &found)) {
@@ -400,19 +376,19 @@ int snx_link_elf(const SnxLinkInput* inputs, size_t count, const char* const* ex
     }
     /* .hash: nbucket, nchain, buckets, chains, words in the host's order as the dynamic loader reads them (a
        big-endian PowerPC64 host's too) */
-    p = out.data + hash_off;
-    word = (uint32_t)nbucket;
+    unsigned char* p = out.data + hash_off;
+    uint32_t word = (uint32_t)nbucket;
     memcpy(p, &word, 4);
     word = (uint32_t)nsyms;
     memcpy(p + 4, &word, 4);
-    for (i = 0; i < export_count; ++i) {
+    for (size_t i = 0; i < export_count; ++i) {
         unsigned char* bucket = p + 8 + 4 * (elf_hash(exports[i]) % nbucket);
         memcpy(p + 8 + 4 * nbucket + 4 * (i + 1), bucket, 4); /* the chain goes on to the bucket's previous head */
         word = (uint32_t)(i + 1);
         memcpy(bucket, &word, 4);
     }
     /* .dynsym */
-    for (i = 0, k = 1; i < export_count; ++i) {
+    for (size_t i = 0, k = 1; i < export_count; ++i) {
         Elf64_Sym s;
         memset(&s, 0, sizeof(s));
         s.st_name = (uint32_t)k;
@@ -478,9 +454,9 @@ int snx_link_elf(const SnxLinkInput* inputs, size_t count, const char* const* ex
         memset(&s, 0, sizeof(s));
         snx_link_append(&symtab, &s, sizeof(s));
     }
-    for (i = 0; i < count; ++i) {
+    for (size_t i = 0; i < count; ++i) {
         SnxElfObject* o = &l.objs[i];
-        for (j = 1; j < o->nsyms; ++j) {
+        for (size_t j = 1; j < o->nsyms; ++j) {
             const Elf64_Sym* src = &o->syms[j];
             int type = ELF64_ST_TYPE(src->st_info);
             Elf64_Sym s;
@@ -502,8 +478,8 @@ int snx_link_elf(const SnxLinkInput* inputs, size_t count, const char* const* ex
             snx_link_append(&symtab, &s, sizeof(s));
         }
     }
-    symbol_count = symtab.size / sizeof(Elf64_Sym);
-    for (i = 0; i < export_count; ++i) {
+    size_t symbol_count = symtab.size / sizeof(Elf64_Sym);
+    for (size_t i = 0; i < export_count; ++i) {
         Elf64_Sym s;
         memset(&s, 0, sizeof(s));
         s.st_name = (uint32_t)snx_link_append(&strtab, exports[i], strlen(exports[i]) + 1);
@@ -518,9 +494,8 @@ int snx_link_elf(const SnxLinkInput* inputs, size_t count, const char* const* ex
     shdr[S_SYMTAB].sh_offset = snx_link_append(&out, symtab.data, symtab.size);
     shdr[S_STRTAB].sh_offset = snx_link_append(&out, strtab.data, strtab.size);
     {
-        SnxLinkBuffer names;
-        memset(&names, 0, sizeof(names));
-        for (i = 0; i < S_COUNT; ++i)
+        SnxLinkBuffer names = {0};
+        for (size_t i = 0; i < S_COUNT; ++i)
             shdr[i].sh_name = (uint32_t)snx_link_append(&names, section_names[i], strlen(section_names[i]) + 1);
         shdr[S_SHSTRTAB].sh_offset = snx_link_append(&out, names.data, names.size);
         shdr[S_SHSTRTAB].sh_size = names.size;
@@ -587,7 +562,7 @@ int snx_link_elf(const SnxLinkInput* inputs, size_t count, const char* const* ex
     out.data = NULL;
     rc = 0;
 done:
-    for (i = 0; l.objs && i < count; ++i) snx_elf_free(&l.objs[i]);
+    for (size_t i = 0; l.objs && i < count; ++i) snx_elf_free(&l.objs[i]);
     free(l.objs);
     free(export_address);
     snx_link_names_free(&l.globals);

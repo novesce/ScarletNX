@@ -65,6 +65,8 @@ void gui_editor_pick_end(GuiEditor* editor, bool keep);
 /* while typing: text added, or the last character taken off */
 void gui_editor_type(GuiEditor* editor, const char* text);
 void gui_editor_erase(GuiEditor* editor);
+/* what the focused row takes when typed, with its numbers: its range, its most bytes, a color's or a folder name's */
+void gui_editor_takes(const GuiEditor* editor, char* out, size_t size);
 /* a row's label and value as the screen shows them */
 void gui_editor_label(const GuiEditor* editor, int row, char* out, size_t size);
 void gui_editor_value(const GuiEditor* editor, int row, char* out, size_t size);

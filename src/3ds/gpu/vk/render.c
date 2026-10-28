@@ -14,6 +14,7 @@
 #include "3ds/gpu/vk/shaders/texture_spv.h"
 #include "3ds/gpu/vk/vk.h"
 #include "3ds/gpu/vk/vsgen.h"
+#include "common/utilities/bits.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -205,12 +206,6 @@ static struct {
     size_t immediate_count, immediate_capacity;
 } g;
 
-static uint64_t fnv(const void* data, size_t size) {
-    const unsigned char* b = (const unsigned char*)data;
-    uint64_t h = 0xcbf29ce484222325ull;
-    for (size_t i = 0; i < size; ++i) h = (h ^ b[i]) * 0x100000001b3ull;
-    return h;
-}
 static VkDevice device(void) { return snx_ctr_vk()->device; }
 
 /* ---- images ---- */
@@ -222,7 +217,7 @@ static void image_free(Image* m) {
         if (m->levels[i]) vkDestroyImageView(d, m->levels[i], NULL);
     if (m->image) vkDestroyImage(d, m->image, NULL);
     if (m->memory) vkFreeMemory(d, m->memory, NULL);
-    memset(m, 0, sizeof *m);
+    *m = (Image){0};
 }
 /* an image in the GENERAL layout, which every use of it here takes: color (RGBA8) or the depth format, with layers 1
    or 6 (a cube), and storage views of each level for a texture */
@@ -232,7 +227,7 @@ static bool image_new(VkFormat format, uint32_t width, uint32_t height, uint32_t
     bool depth = format != VK_FORMAT_R8G8B8A8_UNORM;
     VkImageAspectFlags aspect = depth ? VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT
                                       : VK_IMAGE_ASPECT_COLOR_BIT;
-    memset(m, 0, sizeof *m);
+    *m = (Image){0};
     VkImageCreateInfo ii = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
                             .flags = layers == 6 ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0,
                             .imageType = VK_IMAGE_TYPE_2D,
@@ -499,8 +494,8 @@ static void levels(uint32_t pa, uint64_t size) {
     for (uint64_t at = pa & ~4095u; at < (uint64_t)pa + size; at += 4096) {
         PageState* page = page_state((uint32_t)at);
         if (!page) continue;
-        SnxCtrTrackLevel l = page->dirty || page->write > v->completed ? SNX_CTR_TRACK_OWN
-                             : page->kept || page->read > v->completed ? SNX_CTR_TRACK_WATCH
+        SnxCtrTrackLevel l = page->dirty || page->write > v->ring.completed ? SNX_CTR_TRACK_OWN
+                             : page->kept || page->read > v->ring.completed ? SNX_CTR_TRACK_WATCH
                                                                        : SNX_CTR_TRACK_NONE;
         snx_ctr_track_set(v->memory, (uint32_t)at, 4096, l);
     }
@@ -585,7 +580,7 @@ static void dead_free(Dead* d) {
 /* an image or buffer the recordings in flight, the open one included, may still use: destroyed when they are done */
 static void bury(Image* image, VkBuffer* buffer, VkDeviceMemory* memory) {
     Dead d = {*image, buffer ? *buffer : VK_NULL_HANDLE, memory ? *memory : VK_NULL_HANDLE, snx_ctr_vk_serial()};
-    memset(image, 0, sizeof *image);
+    *image = (Image){0};
     if (buffer) *buffer = VK_NULL_HANDLE;
     if (memory) *memory = VK_NULL_HANDLE;
     if (!d.image.image && !d.buffer) return;
@@ -736,7 +731,7 @@ static Target* target_find(const TargetKey* k) {
         bury(&t->color, NULL, NULL);
         bury(&t->depth, &t->scratch, &t->scratch_memory);
     }
-    memset(t, 0, sizeof *t);
+    *t = (Target){0};
     if (!target_images(t, k->width, k->height)) return NULL;
     t->key = *k;
     if (t == &g.targets[g.target_count]) ++g.target_count;
@@ -847,7 +842,7 @@ static Texture* texture_slot(uint32_t width, uint32_t height, uint32_t levels, u
     }
     if (g.texture_count < TEXTURES) {
         Texture* t = &g.textures[g.texture_count++];
-        memset(t, 0, sizeof *t);
+        *t = (Texture){0};
         return t;
     }
     if (any) return any;
@@ -947,7 +942,7 @@ static bool grow(void** items, size_t* capacity, size_t count, size_t size) {
     return true;
 }
 static bool vs_shader(const SnxCtrPica* p, const SnxCtrVsConfig* c, uint32_t* index, const char** why) {
-    uint64_t h = fnv(c, sizeof *c);
+    uint64_t h = snx_fnv1a(SNX_FNV_BASIS, c, sizeof *c);
     for (size_t i = 0; i < g.vs_count; ++i)
         if (g.vs[i].hash == h && !memcmp(&g.vs[i].config, c, sizeof *c)) {
             *index = (uint32_t)i;
@@ -961,7 +956,7 @@ static bool vs_shader(const SnxCtrPica* p, const SnxCtrVsConfig* c, uint32_t* in
     VsShader* s = &g.vs[g.vs_count];
     memset(s, 0, sizeof *s);
     s->hash = h;
-    s->config = *c;
+    memcpy(&s->config, c, sizeof *c); /* its padding too: lookups memcmp it */
     uint32_t* words;
     size_t count;
     if (snx_ctr_vs_spirv(&p->vs, c, snx_ctr_vk()->preserve_infnan, &words, &count, &s->why))
@@ -972,7 +967,7 @@ static bool vs_shader(const SnxCtrPica* p, const SnxCtrVsConfig* c, uint32_t* in
     return s->module != VK_NULL_HANDLE;
 }
 static bool fs_shader(const SnxCtrFsConfig* c, uint32_t* index, const char** why) {
-    uint64_t h = fnv(c, sizeof *c);
+    uint64_t h = snx_fnv1a(SNX_FNV_BASIS, c, sizeof *c);
     for (size_t i = 0; i < g.fs_count; ++i)
         if (g.fs[i].hash == h && !memcmp(&g.fs[i].config, c, sizeof *c)) {
             *index = (uint32_t)i;
@@ -986,7 +981,7 @@ static bool fs_shader(const SnxCtrFsConfig* c, uint32_t* index, const char** why
     FsShader* s = &g.fs[g.fs_count];
     memset(s, 0, sizeof *s);
     s->hash = h;
-    s->config = *c;
+    memcpy(&s->config, c, sizeof *c); /* its padding too: lookups memcmp it */
     uint32_t* words;
     size_t count;
     snx_ctr_fs_spirv(c, snx_ctr_vk()->preserve_infnan, &words, &count);
@@ -1150,7 +1145,7 @@ static VkPipeline make_pipeline(const PipeKey* k) {
     return pipeline;
 }
 static VkPipeline pipeline(const PipeKey* k) {
-    uint64_t h = fnv(k, sizeof *k);
+    uint64_t h = snx_fnv1a(SNX_FNV_BASIS, k, sizeof *k);
     for (size_t i = 0; i < g.pipe_count; ++i)
         if (g.pipes[i].hash == h && !memcmp(&g.pipes[i].key, k, sizeof *k)) return g.pipes[i].pipeline;
     if (!grow((void**)&g.pipes, &g.pipe_capacity, g.pipe_count, sizeof *g.pipes)) return VK_NULL_HANDLE;

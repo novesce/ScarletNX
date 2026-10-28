@@ -118,6 +118,8 @@ typedef struct SnxIr {
     LLVMBuilderRef b;
     LLVMTargetMachineRef tm;
     int windows;
+    int promote; /* ir_promote_registers at this level (O1 and above): at O0 SROA and mem2reg leave its slots on
+                    the stack */
     const SnxIrFeatures* features;
     LLVMTypeRef t_void, t_i1, t_i8, t_i16, t_i32, t_i64, t_i128, t_ptr, t_guest;
     /* the function being emitted: its CPU* and the guest memory base (u8* const M=c->mem) */
@@ -221,7 +223,7 @@ void snx_ir_emit(SnxIr* ir, SnxCodegen* codegen, const SnxFunction* function);
    tools) */
 LLVMValueRef snx_ir_static_step(SnxIr* ir, SnxU32 word, SnxU64 pc, SnxU64 features, const char* name);
 /* the emitted function's accesses to the registers in the CPU structure onto locals, which the CPU structure gets
-   back around every call and return (ir_promote.c) */
+   back around every call and return (ir_promote.c). snx_ir_emit runs it at O1 and above */
 void ir_promote_registers(SnxIr* ir, LLVMValueRef fn);
 /* Starts a function body: entry block, c and M */
 void snx_ir_begin(SnxIr* ir, LLVMValueRef function);
@@ -244,6 +246,8 @@ void ir_store(SnxIr* ir, LLVMValueRef value, LLVMValueRef pointer);
 LLVMValueRef ir_tag_cpu(SnxIr* ir, LLVMValueRef access);
 LLVMValueRef ir_tag_guest(SnxIr* ir, LLVMValueRef access);
 LLVMValueRef ir_cpu_load(SnxIr* ir, LLVMTypeRef type, size_t offset);
+/* iN */
+static inline LLVMTypeRef ir_int_type(SnxIr* ir, unsigned bits) { return LLVMIntTypeInContext(ir->ctx, bits); }
 void ir_cpu_store(SnxIr* ir, LLVMValueRef value, size_t offset);
 size_t ir_off_x(unsigned n);
 size_t ir_off_v(unsigned n);
@@ -279,6 +283,8 @@ LLVMValueRef ir_call(SnxIr* ir, LLVMValueRef function, LLVMValueRef* args, unsig
 LLVMValueRef ir_call_helper(SnxIr* ir, int id, LLVMValueRef* args, unsigned count);
 /* an out-of-line function of the runtime library (cpu_helpers.c, rtlib.c), declared on first use */
 LLVMValueRef ir_extern(SnxIr* ir, const char* name, LLVMTypeRef ret, LLVMTypeRef* params, unsigned count);
+/* the enum attribute name (no value) at index of function */
+void ir_attribute(SnxIr* ir, LLVMValueRef function, LLVMAttributeIndex index, const char* name);
 /* c->rt-><field>(args...) */
 LLVMValueRef ir_rt_call(SnxIr* ir, size_t offset, LLVMTypeRef ret, LLVMTypeRef* params, LLVMValueRef* args,
                         unsigned count);

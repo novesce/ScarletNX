@@ -5,11 +5,6 @@
 #include <stdio.h>
 #include <string.h>
 
-static void helper_attribute(SnxIr* ir, LLVMValueRef function, LLVMAttributeIndex index, const char* name) {
-    unsigned kind = LLVMGetEnumAttributeKindForName(name, strlen(name));
-    LLVMAddAttributeAtIndex(function, index, LLVMCreateEnumAttribute(ir->ctx, kind, 0));
-}
-
 /* ---- cpu.h's inline helpers ----
    Each mirrors its C body. They are internal and always inlined, as SNX_INLINE asks, so a constant argument
    (a condition, a shift type, an access size) folds away. */
@@ -23,8 +18,8 @@ static LLVMValueRef helper_begin(SnxIr* ir, const char* name, LLVMTypeRef ret, L
                                  Saved* saved) {
     LLVMValueRef function = LLVMAddFunction(ir->mod, name, LLVMFunctionType(ret, params, count, 0));
     LLVMSetLinkage(function, LLVMInternalLinkage);
-    helper_attribute(ir, function, LLVMAttributeFunctionIndex, "alwaysinline");
-    helper_attribute(ir, function, LLVMAttributeFunctionIndex, "nounwind");
+    ir_attribute(ir, function, LLVMAttributeFunctionIndex, "alwaysinline");
+    ir_attribute(ir, function, LLVMAttributeFunctionIndex, "nounwind");
     saved->block = LLVMGetInsertBlock(ir->b);
     saved->fn = ir->fn;
     saved->c = ir->c;
@@ -48,26 +43,27 @@ static void store_flag(SnxIr* ir, LLVMValueRef value, size_t offset) { ir_cpu_st
 
 /* adds64/adds32(c,a,b,cin) */
 static void build_adds(SnxIr* ir, LLVMValueRef function, LLVMTypeRef t, unsigned bits) {
-    LLVMValueRef a = P(1), b = P(2), cin = P(3), r, cf, vf;
-    r = LLVMBuildAdd(B, LLVMBuildAdd(B, a, b, ""), ir_cast(ir, cin, t, 0), "");
+    LLVMValueRef a = P(1), b = P(2), cin = P(3);
+    LLVMValueRef r = LLVMBuildAdd(B, LLVMBuildAdd(B, a, b, ""), ir_cast(ir, cin, t, 0), "");
     store_flag(ir, LLVMBuildLShr(B, r, LLVMConstInt(t, bits - 1, 0), ""), offsetof(CPU, n));
     store_flag(ir, LLVMBuildZExt(B, LLVMBuildICmp(B, LLVMIntEQ, r, LLVMConstInt(t, 0, 0), ""), t, ""),
                offsetof(CPU, z));
-    cf = LLVMBuildSelect(B, LLVMBuildICmp(B, LLVMIntNE, cin, ir_i32(ir, 0), ""), LLVMBuildICmp(B, LLVMIntULE, r, a, ""),
-                         LLVMBuildICmp(B, LLVMIntULT, r, a, ""), "");
+    LLVMValueRef cf = LLVMBuildSelect(B, LLVMBuildICmp(B, LLVMIntNE, cin, ir_i32(ir, 0), ""),
+                                      LLVMBuildICmp(B, LLVMIntULE, r, a, ""),
+                                      LLVMBuildICmp(B, LLVMIntULT, r, a, ""), "");
     ir_cpu_store(ir, ir_bool32(ir, cf), offsetof(CPU, cf));
-    vf = LLVMBuildAnd(B, LLVMBuildNot(B, LLVMBuildXor(B, a, b, ""), ""), LLVMBuildXor(B, a, r, ""), "");
+    LLVMValueRef vf = LLVMBuildAnd(B, LLVMBuildNot(B, LLVMBuildXor(B, a, b, ""), ""), LLVMBuildXor(B, a, r, ""), "");
     store_flag(ir, LLVMBuildLShr(B, vf, LLVMConstInt(t, bits - 1, 0), ""), offsetof(CPU, vf));
     LLVMBuildRet(B, r);
 }
 /* subs64/subs32(c,a,b) */
 static void build_subs(SnxIr* ir, LLVMValueRef function, LLVMTypeRef t, unsigned bits) {
-    LLVMValueRef a = P(1), b = P(2), r, vf;
-    r = LLVMBuildSub(B, a, b, "");
+    LLVMValueRef a = P(1), b = P(2);
+    LLVMValueRef r = LLVMBuildSub(B, a, b, "");
     store_flag(ir, LLVMBuildLShr(B, r, LLVMConstInt(t, bits - 1, 0), ""), offsetof(CPU, n));
     ir_cpu_store(ir, ir_bool32(ir, LLVMBuildICmp(B, LLVMIntEQ, r, LLVMConstInt(t, 0, 0), "")), offsetof(CPU, z));
     ir_cpu_store(ir, ir_bool32(ir, LLVMBuildICmp(B, LLVMIntUGE, a, b, "")), offsetof(CPU, cf));
-    vf = LLVMBuildAnd(B, LLVMBuildXor(B, a, b, ""), LLVMBuildXor(B, a, r, ""), "");
+    LLVMValueRef vf = LLVMBuildAnd(B, LLVMBuildXor(B, a, b, ""), LLVMBuildXor(B, a, r, ""), "");
     store_flag(ir, LLVMBuildLShr(B, vf, LLVMConstInt(t, bits - 1, 0), ""), offsetof(CPU, vf));
     LLVMBuildRet(B, r);
 }
@@ -82,20 +78,20 @@ static void build_logic(SnxIr* ir, LLVMValueRef function, LLVMTypeRef t, unsigne
 }
 /* cond_ok(c,cond) */
 static void build_cond_ok(SnxIr* ir, LLVMValueRef function) {
-    LLVMValueRef cond = P(1), n, z, cf, vf, k, r, nv, zero = ir_i32(ir, 0), result;
+    LLVMValueRef cond = P(1), zero = ir_i32(ir, 0);
     LLVMBasicBlockRef always = ir_block(ir, "always"), test = ir_block(ir, "test");
-    n = ir_cpu_load(ir, ir->t_i32, offsetof(CPU, n));
-    z = ir_cpu_load(ir, ir->t_i32, offsetof(CPU, z));
-    cf = ir_cpu_load(ir, ir->t_i32, offsetof(CPU, cf));
-    vf = ir_cpu_load(ir, ir->t_i32, offsetof(CPU, vf));
-    k = LLVMBuildLShr(B, cond, ir_i32(ir, 1), "");
+    LLVMValueRef n = ir_cpu_load(ir, ir->t_i32, offsetof(CPU, n));
+    LLVMValueRef z = ir_cpu_load(ir, ir->t_i32, offsetof(CPU, z));
+    LLVMValueRef cf = ir_cpu_load(ir, ir->t_i32, offsetof(CPU, cf));
+    LLVMValueRef vf = ir_cpu_load(ir, ir->t_i32, offsetof(CPU, vf));
+    LLVMValueRef k = LLVMBuildLShr(B, cond, ir_i32(ir, 1), "");
     LLVMBuildCondBr(B, LLVMBuildICmp(B, LLVMIntEQ, k, ir_i32(ir, 7), ""), always, test);
     LLVMPositionBuilderAtEnd(B, always);
     LLVMBuildRet(B, ir_i32(ir, 1));
     LLVMPositionBuilderAtEnd(B, test);
-    nv = ir_bool32(ir, LLVMBuildICmp(B, LLVMIntEQ, n, vf, ""));
+    LLVMValueRef nv = ir_bool32(ir, LLVMBuildICmp(B, LLVMIntEQ, n, vf, ""));
     /* case 6: !z && n==vf, case 5: n==vf, case 4: cf && !z, cases 3..0: vf, n, cf, z */
-    r = ir_bool32(
+    LLVMValueRef r = ir_bool32(
         ir, LLVMBuildAnd(B, LLVMBuildICmp(B, LLVMIntEQ, z, zero, ""), LLVMBuildICmp(B, LLVMIntEQ, n, vf, ""), ""));
     r = LLVMBuildSelect(B, LLVMBuildICmp(B, LLVMIntEQ, k, ir_i32(ir, 5), ""), nv, r, "");
     r = LLVMBuildSelect(B, LLVMBuildICmp(B, LLVMIntEQ, k, ir_i32(ir, 4), ""),
@@ -106,8 +102,8 @@ static void build_cond_ok(SnxIr* ir, LLVMValueRef function) {
     r = LLVMBuildSelect(B, LLVMBuildICmp(B, LLVMIntEQ, k, ir_i32(ir, 2), ""), n, r, "");
     r = LLVMBuildSelect(B, LLVMBuildICmp(B, LLVMIntEQ, k, ir_i32(ir, 1), ""), cf, r, "");
     r = LLVMBuildSelect(B, LLVMBuildICmp(B, LLVMIntEQ, k, ir_i32(ir, 0), ""), z, r, "");
-    result = LLVMBuildSelect(B, LLVMBuildTrunc(B, cond, ir->t_i1, ""),
-                             ir_bool32(ir, LLVMBuildICmp(B, LLVMIntEQ, r, zero, "")), r, "");
+    LLVMValueRef result = LLVMBuildSelect(B, LLVMBuildTrunc(B, cond, ir->t_i1, ""),
+                                          ir_bool32(ir, LLVMBuildICmp(B, LLVMIntEQ, r, zero, "")), r, "");
     LLVMBuildRet(B, result);
 }
 /* set_nzcv(c,f) */
@@ -129,10 +125,10 @@ static void build_ror(SnxIr* ir, LLVMValueRef function, LLVMTypeRef t, unsigned 
 }
 /* shf64/shf32(x,t,s) */
 static void build_shf(SnxIr* ir, LLVMValueRef function, LLVMTypeRef t, int ror) {
-    LLVMValueRef x = P(0), type = P(1), s = ir_cast(ir, P(2), t, 0), args[2], r;
+    LLVMValueRef x = P(0), type = P(1), s = ir_cast(ir, P(2), t, 0), args[2];
     args[0] = x;
     args[1] = P(2);
-    r = ir_call(ir, ir_helper(ir, ror), args, 2);
+    LLVMValueRef r = ir_call(ir, ir_helper(ir, ror), args, 2);
     r = LLVMBuildSelect(B, LLVMBuildICmp(B, LLVMIntEQ, type, ir_i32(ir, 2), ""), LLVMBuildAShr(B, x, s, ""), r, "");
     r = LLVMBuildSelect(B, LLVMBuildICmp(B, LLVMIntEQ, type, ir_i32(ir, 1), ""), LLVMBuildLShr(B, x, s, ""), r, "");
     r = LLVMBuildSelect(B, LLVMBuildICmp(B, LLVMIntEQ, type, ir_i32(ir, 0), ""), LLVMBuildShl(B, x, s, ""), r, "");
@@ -145,8 +141,7 @@ static void build_ext64(SnxIr* ir, LLVMValueRef function) {
         unsigned opt, bits;
         int is_signed;
     } kinds[] = {{6, 32, 1}, {5, 16, 1}, {4, 8, 1}, {2, 32, 0}, {1, 16, 0}, {0, 8, 0}};
-    size_t i;
-    for (i = 0; i < sizeof(kinds) / sizeof(kinds[0]); ++i) {
+    for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); ++i) {
         LLVMValueRef narrow = LLVMBuildTrunc(B, x, LLVMIntTypeInContext(ir->ctx, kinds[i].bits), "");
         r = LLVMBuildSelect(B, LLVMBuildICmp(B, LLVMIntEQ, opt, ir_i32(ir, kinds[i].opt), ""),
                             ir_cast(ir, narrow, ir->t_i64, kinds[i].is_signed), r, "");
@@ -162,8 +157,8 @@ static void build_clz(SnxIr* ir, LLVMValueRef function, LLVMTypeRef t) {
 }
 /* cls64/cls32(x): clz(x ^ (x >> 1 arithmetic)) - 1 */
 static void build_cls(SnxIr* ir, LLVMValueRef function, LLVMTypeRef t, int clz) {
-    LLVMValueRef x = P(0), arg;
-    arg = LLVMBuildXor(B, x, LLVMBuildAShr(B, x, LLVMConstInt(t, 1, 0), ""), "");
+    LLVMValueRef x = P(0);
+    LLVMValueRef arg = LLVMBuildXor(B, x, LLVMBuildAShr(B, x, LLVMConstInt(t, 1, 0), ""), "");
     LLVMBuildRet(B, LLVMBuildSub(B, ir_call(ir, ir_helper(ir, clz), &arg, 1), ir_i32(ir, 1), ""));
 }
 static LLVMValueRef swap_pairs(SnxIr* ir, LLVMValueRef x, unsigned shift, SnxU64 mask) {
@@ -179,11 +174,10 @@ static void build_rbit64(SnxIr* ir, LLVMValueRef function) {
         /* wunkolo, "gf2p8affineqb: Bit reversal": the matrix 0x8040201008040201 reverses each byte's bits, BSWAP the
            bytes. Explicit, whatever the LLVM version lowers llvm.bitreverse to */
         LLVMTypeRef v2 = LLVMVectorType(ir->t_i64, 2), v16 = LLVMVectorType(ir->t_i8, 16);
-        LLVMValueRef bytes[16], args[3], v;
-        unsigned i;
+        LLVMValueRef bytes[16], args[3];
         static const unsigned char matrix[8] = {0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80};
-        for (i = 0; i < 16; ++i) bytes[i] = ir_i8(ir, matrix[i & 7]);
-        v = LLVMBuildInsertElement(B, LLVMGetUndef(v2), x, ir_i32(ir, 0), "");
+        for (unsigned i = 0; i < 16; ++i) bytes[i] = ir_i8(ir, matrix[i & 7]);
+        LLVMValueRef v = LLVMBuildInsertElement(B, LLVMGetUndef(v2), x, ir_i32(ir, 0), "");
         args[0] = LLVMBuildBitCast(B, v, v16, "");
         args[1] = LLVMConstVector(bytes, 16);
         args[2] = ir_i8(ir, 0);
@@ -239,24 +233,24 @@ static void build_sdiv(SnxIr* ir, LLVMValueRef function, LLVMTypeRef t) {
 }
 /* umulh64(a,b): (u64)(((u128)a * b) >> 64) */
 static void build_umulh64(SnxIr* ir, LLVMValueRef function) {
-    LLVMValueRef a = ir_cast(ir, P(0), ir->t_i128, 0), b = ir_cast(ir, P(1), ir->t_i128, 0), r;
-    r = LLVMBuildLShr(B, LLVMBuildMul(B, a, b, ""), LLVMConstInt(ir->t_i128, 64, 0), "");
+    LLVMValueRef a = ir_cast(ir, P(0), ir->t_i128, 0), b = ir_cast(ir, P(1), ir->t_i128, 0);
+    LLVMValueRef r = LLVMBuildLShr(B, LLVMBuildMul(B, a, b, ""), LLVMConstInt(ir->t_i128, 64, 0), "");
     LLVMBuildRet(B, LLVMBuildTrunc(B, r, ir->t_i64, ""));
 }
 /* smulh64(a,b): umulh64, minus b when a < 0, minus a when b < 0 */
 static void build_smulh64(SnxIr* ir, LLVMValueRef function) {
-    LLVMValueRef a = P(0), b = P(1), args[2], r, zero = ir_i64(ir, 0);
+    LLVMValueRef a = P(0), b = P(1), args[2], zero = ir_i64(ir, 0);
     args[0] = a;
     args[1] = b;
-    r = ir_call(ir, ir_helper(ir, SNX_IR_UMULH64), args, 2);
+    LLVMValueRef r = ir_call(ir, ir_helper(ir, SNX_IR_UMULH64), args, 2);
     r = LLVMBuildSelect(B, LLVMBuildICmp(B, LLVMIntSLT, a, zero, ""), LLVMBuildSub(B, r, b, ""), r, "");
     r = LLVMBuildSelect(B, LLVMBuildICmp(B, LLVMIntSLT, b, zero, ""), LLVMBuildSub(B, r, a, ""), r, "");
     LLVMBuildRet(B, r);
 }
 /* bmask(n): n >= 64 ? ~0 : (1<<n)-1 */
 static void build_bmask(SnxIr* ir, LLVMValueRef function) {
-    LLVMValueRef n = P(0), mask;
-    mask = LLVMBuildSub(B, LLVMBuildShl(B, ir_i64(ir, 1), ir_u64(ir, n), ""), ir_i64(ir, 1), "");
+    LLVMValueRef n = P(0);
+    LLVMValueRef mask = LLVMBuildSub(B, LLVMBuildShl(B, ir_i64(ir, 1), ir_u64(ir, n), ""), ir_i64(ir, 1), "");
     LLVMBuildRet(
         B, LLVMBuildSelect(B, LLVMBuildICmp(B, LLVMIntUGE, n, ir_i32(ir, 64), ""), ir_i64(ir, ~(SnxU64)0), mask, ""));
 }
@@ -275,29 +269,29 @@ static void build_ubfm(SnxIr* ir, LLVMValueRef function) {
 }
 /* sbfm_(src,immr,imms,ds) */
 static void build_sbfm(SnxIr* ir, LLVMValueRef function) {
-    LLVMValueRef src = P(0), immr = P(1), imms = P(2), ds = P(3), one = ir_i32(ir, 1), r1, r2, top1, top2, phis[2];
-    LLVMValueRef r, top, values[2];
+    LLVMValueRef src = P(0), immr = P(1), imms = P(2), ds = P(3), one = ir_i32(ir, 1), phis[2];
+    LLVMValueRef values[2];
     LLVMBasicBlockRef low = ir_block(ir, "low"), high = ir_block(ir, "high"), join = ir_block(ir, "join"),
                       sign = ir_block(ir, "sign"), done = ir_block(ir, "done"), blocks[2];
     LLVMBuildCondBr(B, LLVMBuildICmp(B, LLVMIntUGE, imms, immr, ""), low, high);
     LLVMPositionBuilderAtEnd(B, low);
-    r1 = LLVMBuildAnd(B, LLVMBuildLShr(B, src, ir_u64(ir, immr), ""),
-                      call_bmask(ir, LLVMBuildAdd(B, LLVMBuildSub(B, imms, immr, ""), one, "")), "");
-    top1 = LLVMBuildSub(B, imms, immr, "");
+    LLVMValueRef r1 = LLVMBuildAnd(B, LLVMBuildLShr(B, src, ir_u64(ir, immr), ""),
+                                   call_bmask(ir, LLVMBuildAdd(B, LLVMBuildSub(B, imms, immr, ""), one, "")), "");
+    LLVMValueRef top1 = LLVMBuildSub(B, imms, immr, "");
     LLVMBuildBr(B, join);
     LLVMPositionBuilderAtEnd(B, high);
-    r2 = LLVMBuildShl(B, LLVMBuildAnd(B, src, call_bmask(ir, LLVMBuildAdd(B, imms, one, "")), ""),
-                      ir_u64(ir, LLVMBuildSub(B, ds, immr, "")), "");
-    top2 = LLVMBuildAdd(B, LLVMBuildSub(B, ds, immr, ""), imms, "");
+    LLVMValueRef r2 = LLVMBuildShl(B, LLVMBuildAnd(B, src, call_bmask(ir, LLVMBuildAdd(B, imms, one, "")), ""),
+                                   ir_u64(ir, LLVMBuildSub(B, ds, immr, "")), "");
+    LLVMValueRef top2 = LLVMBuildAdd(B, LLVMBuildSub(B, ds, immr, ""), imms, "");
     LLVMBuildBr(B, join);
     LLVMPositionBuilderAtEnd(B, join);
     blocks[0] = low;
     blocks[1] = high;
-    r = LLVMBuildPhi(B, ir->t_i64, "");
+    LLVMValueRef r = LLVMBuildPhi(B, ir->t_i64, "");
     values[0] = r1;
     values[1] = r2;
     LLVMAddIncoming(r, values, blocks, 2);
-    top = LLVMBuildPhi(B, ir->t_i32, "");
+    LLVMValueRef top = LLVMBuildPhi(B, ir->t_i32, "");
     values[0] = top1;
     values[1] = top2;
     LLVMAddIncoming(top, values, blocks, 2);
@@ -351,34 +345,30 @@ typedef struct {
     LLVMValueRef values[4];
 } SizeSwitch;
 static void size_switch(SnxIr* ir, LLVMValueRef size, SizeSwitch* s) {
-    LLVMValueRef sw;
-    unsigned i;
-    for (i = 0; i < 4; ++i) s->blocks[i] = ir_block(ir, "size");
+    for (unsigned i = 0; i < 4; ++i) s->blocks[i] = ir_block(ir, "size");
     s->join = ir_block(ir, "join");
-    sw = LLVMBuildSwitch(B, size, s->blocks[3], 3); /* default: the 64-bit case */
-    for (i = 0; i < 3; ++i) LLVMAddCase(sw, ir_i32(ir, i), s->blocks[i]);
+    LLVMValueRef sw = LLVMBuildSwitch(B, size, s->blocks[3], 3); /* default: the 64-bit case */
+    for (unsigned i = 0; i < 3; ++i) LLVMAddCase(sw, ir_i32(ir, i), s->blocks[i]);
 }
 static LLVMValueRef size_join(SnxIr* ir, SizeSwitch* s, LLVMTypeRef type) {
-    LLVMValueRef phi;
     LLVMPositionBuilderAtEnd(B, s->join);
-    phi = LLVMBuildPhi(B, type, "");
+    LLVMValueRef phi = LLVMBuildPhi(B, type, "");
     LLVMAddIncoming(phi, s->values, s->blocks, 4);
     return phi;
 }
 /* ldx(c,M,a,sz) */
 static void build_ldx(SnxIr* ir, LLVMValueRef function) {
-    LLVMValueRef a = P(2), sz = P(3), v;
+    LLVMValueRef a = P(2), sz = P(3);
     SizeSwitch s;
-    unsigned i;
     ir->c = P(0);
     ir->M = P(1);
     size_switch(ir, sz, &s);
-    for (i = 0; i < 4; ++i) {
+    for (unsigned i = 0; i < 4; ++i) {
         LLVMPositionBuilderAtEnd(B, s.blocks[i]);
         s.values[i] = ir_u64(ir, ir_ldacq(ir, a, 8u << i));
         LLVMBuildBr(B, s.join);
     }
-    v = size_join(ir, &s, ir->t_i64);
+    LLVMValueRef v = size_join(ir, &s, ir->t_i64);
     ir_cpu_store(ir, a, offsetof(CPU, excl_addr));
     ir_cpu_store(ir, v, offsetof(CPU, excl_val));
     ir_cpu_store(ir, sz, offsetof(CPU, excl_size));
@@ -397,35 +387,45 @@ static LLVMValueRef cas(SnxIr* ir, LLVMValueRef address, unsigned bits, LLVMValu
     return ir_bool32(ir, LLVMBuildExtractValue(B, x, 1, ""));
 }
 static LLVMValueRef exclusive_match(SnxIr* ir, LLVMValueRef a, LLVMValueRef size) {
+    /* The monitor is armed for an address, and a store-exclusive succeeds when that address is the same and the
+       monitor's range covers the store's: the console allows a store-exclusive at a smaller size than the load that
+       armed it, which games use to change part of a wider counter in place. Requiring the sizes to be equal made
+       such a store never land, so the game's retry loop spun on it for good and it never reached its own game. */
     LLVMValueRef on = ir_cpu_load(ir, ir->t_i32, offsetof(CPU, excl_on));
     LLVMValueRef address = ir_cpu_load(ir, ir->t_i64, offsetof(CPU, excl_addr));
     LLVMValueRef have = ir_cpu_load(ir, ir->t_i32, offsetof(CPU, excl_size));
+    /* the two size bits and the pair's flag: a pair's load sets the flag and its store names it too, so both sides
+       mask it off before the sizes are compared (a pair, 0x13, covers a single's 0x03 and so succeeds) */
+    LLVMValueRef mask = ir_i32(ir, 0x13);
+    LLVMValueRef armed_size =
+        LLVMBuildShl(B, ir_i64(ir, 8), LLVMBuildSExt(B, LLVMBuildAnd(B, have, mask, ""), ir->t_i64, ""), "");
+    LLVMValueRef this_size =
+        LLVMBuildShl(B, ir_i64(ir, 8), LLVMBuildSExt(B, LLVMBuildAnd(B, size, mask, ""), ir->t_i64, ""), "");
     return LLVMBuildAnd(B,
                         LLVMBuildAnd(B, LLVMBuildICmp(B, LLVMIntNE, on, ir_i32(ir, 0), ""),
                                      LLVMBuildICmp(B, LLVMIntEQ, address, a, ""), ""),
-                        LLVMBuildICmp(B, LLVMIntEQ, have, size, ""), "");
+                        LLVMBuildICmp(B, LLVMIntULE, this_size, armed_size, ""), "");
 }
 /* stx(c,M,a,sz,v) */
 static void build_stx(SnxIr* ir, LLVMValueRef function) {
-    LLVMValueRef a = P(2), sz = P(3), v = P(4), ok, values[2], expected;
-    LLVMBasicBlockRef start, attempt = NULL, finish, blocks[2];
+    LLVMValueRef a = P(2), sz = P(3), v = P(4), values[2], expected;
+    LLVMBasicBlockRef attempt = NULL, blocks[2];
     SizeSwitch s;
-    unsigned i;
     ir->c = P(0);
     ir->M = P(1);
-    start = LLVMGetInsertBlock(B);
+    LLVMBasicBlockRef start = LLVMGetInsertBlock(B);
     attempt = ir_block(ir, "attempt");
-    finish = ir_block(ir, "finish");
+    LLVMBasicBlockRef finish = ir_block(ir, "finish");
     LLVMBuildCondBr(B, exclusive_match(ir, a, sz), attempt, finish);
     LLVMPositionBuilderAtEnd(B, attempt);
     size_switch(ir, sz, &s);
-    for (i = 0; i < 4; ++i) {
+    for (unsigned i = 0; i < 4; ++i) {
         LLVMPositionBuilderAtEnd(B, s.blocks[i]);
         expected = ir_cpu_load(ir, ir->t_i64, offsetof(CPU, excl_val));
         s.values[i] = cas(ir, a, 8u << i, expected, v);
         LLVMBuildBr(B, s.join);
     }
-    ok = size_join(ir, &s, ir->t_i32);
+    LLVMValueRef ok = size_join(ir, &s, ir->t_i32);
     LLVMBuildBr(B, finish);
     LLVMPositionBuilderAtEnd(B, finish);
     values[0] = ir_i32(ir, 0);
@@ -440,22 +440,22 @@ static void build_stx(SnxIr* ir, LLVMValueRef function) {
 }
 /* ldxp(c,M,a,sz,&v1,&v2) */
 static void build_ldxp(SnxIr* ir, LLVMValueRef function) {
-    LLVMValueRef a = P(2), sz = P(3), v1 = P(4), v2 = P(5), t, first, second;
+    LLVMValueRef a = P(2), sz = P(3), v1 = P(4), v2 = P(5);
     LLVMBasicBlockRef pair32 = ir_block(ir, "pair32"), pair64 = ir_block(ir, "pair64"), done = ir_block(ir, "done");
     ir->c = P(0);
     ir->M = P(1);
     LLVMBuildCondBr(B, LLVMBuildICmp(B, LLVMIntEQ, sz, ir_i32(ir, 2), ""), pair32, pair64);
     LLVMPositionBuilderAtEnd(B, pair32);
-    t = ir_ldacq(ir, a, 64);
+    LLVMValueRef t = ir_ldacq(ir, a, 64);
     ir_store(ir, ir_u64(ir, ir_u32(ir, t)), v1);
     ir_store(ir, LLVMBuildLShr(B, t, ir_i64(ir, 32), ""), v2);
     ir_cpu_store(ir, t, offsetof(CPU, excl_val));
     ir_cpu_store(ir, ir_i64(ir, 0), offsetof(CPU, excl_val2));
     LLVMBuildBr(B, done);
     LLVMPositionBuilderAtEnd(B, pair64);
-    first = ir_ldacq(ir, a, 64);
+    LLVMValueRef first = ir_ldacq(ir, a, 64);
     ir_store(ir, first, v1);
-    second = ir_ldacq(ir, LLVMBuildAdd(B, a, ir_i64(ir, 8), ""), 64);
+    LLVMValueRef second = ir_ldacq(ir, LLVMBuildAdd(B, a, ir_i64(ir, 8), ""), 64);
     ir_store(ir, second, v2);
     ir_cpu_store(ir, ir_load(ir, ir->t_i64, v1), offsetof(CPU, excl_val));
     ir_cpu_store(ir, ir_load(ir, ir->t_i64, v2), offsetof(CPU, excl_val2));
@@ -468,7 +468,7 @@ static void build_ldxp(SnxIr* ir, LLVMValueRef function) {
 }
 /* stxp(c,M,a,sz,v1,v2) */
 static void build_stxp(SnxIr* ir, LLVMValueRef function) {
-    LLVMValueRef a = P(2), sz = P(3), v1 = P(4), v2 = P(5), ok32, ok128, ok, values[3], args[6], packed;
+    LLVMValueRef a = P(2), sz = P(3), v1 = P(4), v2 = P(5), values[3], args[6];
     LLVMTypeRef params[6];
     LLVMBasicBlockRef start, attempt = ir_block(ir, "attempt"), pair32 = ir_block(ir, "pair32"),
                              pair64 = ir_block(ir, "pair64"), finish = ir_block(ir, "finish"), blocks[3];
@@ -479,8 +479,8 @@ static void build_stxp(SnxIr* ir, LLVMValueRef function) {
     LLVMPositionBuilderAtEnd(B, attempt);
     LLVMBuildCondBr(B, LLVMBuildICmp(B, LLVMIntEQ, sz, ir_i32(ir, 2), ""), pair32, pair64);
     LLVMPositionBuilderAtEnd(B, pair32);
-    packed = LLVMBuildOr(B, ir_u64(ir, ir_u32(ir, v1)), LLVMBuildShl(B, v2, ir_i64(ir, 32), ""), "");
-    ok32 = cas(ir, a, 64, ir_cpu_load(ir, ir->t_i64, offsetof(CPU, excl_val)), packed);
+    LLVMValueRef packed = LLVMBuildOr(B, ir_u64(ir, ir_u32(ir, v1)), LLVMBuildShl(B, v2, ir_i64(ir, 32), ""), "");
+    LLVMValueRef ok32 = cas(ir, a, 64, ir_cpu_load(ir, ir->t_i64, offsetof(CPU, excl_val)), packed);
     LLVMBuildBr(B, finish);
     LLVMPositionBuilderAtEnd(B, pair64);
     params[0] = params[1] = ir->t_ptr;
@@ -491,10 +491,10 @@ static void build_stxp(SnxIr* ir, LLVMValueRef function) {
     args[3] = ir_cpu_load(ir, ir->t_i64, offsetof(CPU, excl_val2));
     args[4] = v1;
     args[5] = v2;
-    ok128 = ir_call(ir, ir_extern(ir, "snx_cas128", ir->t_i32, params, 6), args, 6);
+    LLVMValueRef ok128 = ir_call(ir, ir_extern(ir, "snx_cas128", ir->t_i32, params, 6), args, 6);
     LLVMBuildBr(B, finish);
     LLVMPositionBuilderAtEnd(B, finish);
-    ok = LLVMBuildPhi(B, ir->t_i32, "");
+    LLVMValueRef ok = LLVMBuildPhi(B, ir->t_i32, "");
     values[0] = ir_i32(ir, 0);
     values[1] = ok32;
     values[2] = ok128;
@@ -508,20 +508,22 @@ static void build_stxp(SnxIr* ir, LLVMValueRef function) {
 }
 /* snx_lookup(c,pc) */
 static void build_lookup(SnxIr* ir, LLVMValueRef function) {
-    LLVMValueRef pc = P(1), lo, hi, o, inside, f, index, slot;
+    LLVMValueRef pc = P(1);
     LLVMBasicBlockRef table = ir_block(ir, "table"), found = ir_block(ir, "found"), none = ir_block(ir, "none");
     ir->c = P(0);
-    lo = ir_cpu_load(ir, ir->t_i64, offsetof(CPU, code_lo));
-    hi = ir_cpu_load(ir, ir->t_i64, offsetof(CPU, code_hi));
-    o = LLVMBuildSub(B, pc, lo, "");
-    inside = LLVMBuildAnd(B, LLVMBuildICmp(B, LLVMIntULT, o, LLVMBuildSub(B, hi, lo, ""), ""),
-                          LLVMBuildICmp(B, LLVMIntEQ, LLVMBuildAnd(B, pc, ir_i64(ir, 3), ""), ir_i64(ir, 0), ""), "");
+    LLVMValueRef lo = ir_cpu_load(ir, ir->t_i64, offsetof(CPU, code_lo));
+    LLVMValueRef hi = ir_cpu_load(ir, ir->t_i64, offsetof(CPU, code_hi));
+    LLVMValueRef o = LLVMBuildSub(B, pc, lo, "");
+    LLVMValueRef inside = LLVMBuildAnd(B, LLVMBuildICmp(B, LLVMIntULT, o, LLVMBuildSub(B, hi, lo, ""), ""),
+                                       LLVMBuildICmp(B, LLVMIntEQ, LLVMBuildAnd(B, pc, ir_i64(ir, 3), ""),
+                                                     ir_i64(ir, 0), ""),
+                                       "");
     ir_likely(ir, LLVMBuildCondBr(B, inside, table, none));
     LLVMPositionBuilderAtEnd(B, table);
-    index = LLVMBuildLShr(B, o, ir_i64(ir, 2), "");
+    LLVMValueRef index = LLVMBuildLShr(B, o, ir_i64(ir, 2), "");
     /* __atomic_load_n(&c->disp[o>>2],__ATOMIC_RELAXED): the runtime JIT fills slots while this runs (cpu.h) */
-    slot = LLVMBuildGEP2(B, ir->t_ptr, ir_cpu_load(ir, ir->t_ptr, offsetof(CPU, disp)), &index, 1, "");
-    f = LLVMBuildLoad2(B, ir->t_ptr, slot, "");
+    LLVMValueRef slot = LLVMBuildGEP2(B, ir->t_ptr, ir_cpu_load(ir, ir->t_ptr, offsetof(CPU, disp)), &index, 1, "");
+    LLVMValueRef f = LLVMBuildLoad2(B, ir->t_ptr, slot, "");
     LLVMSetOrdering(f, LLVMAtomicOrderingMonotonic);
     LLVMSetAlignment(f, sizeof(void*));
     ir_likely(ir, LLVMBuildCondBr(B, LLVMBuildIsNotNull(B, f, ""), found, none));
@@ -540,29 +542,28 @@ static void build_dc_zva(SnxIr* ir, LLVMValueRef function) {
     {
         LLVMValueRef a = LLVMBuildAnd(B, P(1), ir_i64(ir, ~(SnxU64)63), ""),
                      zero = LLVMConstNull(LLVMVectorType(ir->t_i8, 16));
-        unsigned i;
-        for (i = 0; i < 4; ++i) ir_wr_bytes(ir, LLVMBuildAdd(B, a, ir_i64(ir, 16 * i), ""), zero);
+        for (unsigned i = 0; i < 4; ++i) ir_wr_bytes(ir, LLVMBuildAdd(B, a, ir_i64(ir, 16 * i), ""), zero);
     }
     LLVMBuildRetVoid(B);
 }
 /* vfp_imm32(i) / vfp_imm64(i) */
 static void build_vfp_imm(SnxIr* ir, LLVMValueRef function, int wide) {
     LLVMTypeRef t = wide ? ir->t_i64 : ir->t_i32;
-    LLVMValueRef i = ir_cast(ir, P(0), t, 0), b6, e, r;
+    LLVMValueRef i = ir_cast(ir, P(0), t, 0);
 #define K(v) LLVMConstInt(t, v, 0)
-    b6 = LLVMBuildAnd(B, LLVMBuildLShr(B, i, K(6), ""), K(1), "");
-    e = LLVMBuildOr(B, LLVMBuildShl(B, LLVMBuildXor(B, b6, K(1), ""), K(wide ? 10 : 7), ""),
-                    LLVMBuildOr(B,
-                                LLVMBuildShl(B,
-                                             LLVMBuildSelect(B, LLVMBuildICmp(B, LLVMIntNE, b6, K(0), ""),
-                                                             K(wide ? 0xFF : 0x1F), K(0), ""),
-                                             K(2), ""),
-                                LLVMBuildAnd(B, LLVMBuildLShr(B, i, K(4), ""), K(3), ""), ""),
-                    "");
-    r = LLVMBuildOr(B, LLVMBuildShl(B, LLVMBuildLShr(B, i, K(7), ""), K(wide ? 63 : 31), ""),
-                    LLVMBuildOr(B, LLVMBuildShl(B, e, K(wide ? 52 : 23), ""),
-                                LLVMBuildShl(B, LLVMBuildAnd(B, i, K(15), ""), K(wide ? 48 : 19), ""), ""),
-                    "");
+    LLVMValueRef b6 = LLVMBuildAnd(B, LLVMBuildLShr(B, i, K(6), ""), K(1), "");
+    LLVMValueRef e = LLVMBuildOr(B, LLVMBuildShl(B, LLVMBuildXor(B, b6, K(1), ""), K(wide ? 10 : 7), ""),
+                                 LLVMBuildOr(B,
+                                             LLVMBuildShl(B,
+                                                          LLVMBuildSelect(B, LLVMBuildICmp(B, LLVMIntNE, b6, K(0), ""),
+                                                                          K(wide ? 0xFF : 0x1F), K(0), ""),
+                                                          K(2), ""),
+                                             LLVMBuildAnd(B, LLVMBuildLShr(B, i, K(4), ""), K(3), ""), ""),
+                                 "");
+    LLVMValueRef r = LLVMBuildOr(B, LLVMBuildShl(B, LLVMBuildLShr(B, i, K(7), ""), K(wide ? 63 : 31), ""),
+                                 LLVMBuildOr(B, LLVMBuildShl(B, e, K(wide ? 52 : 23), ""),
+                                             LLVMBuildShl(B, LLVMBuildAnd(B, i, K(15), ""), K(wide ? 48 : 19), ""), ""),
+                                 "");
 #undef K
     LLVMBuildRet(B, r);
 }

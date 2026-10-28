@@ -4,6 +4,7 @@
    Two real file kinds: the immutable shared RomFS view and read-write host
    files in the sdmc tree. Directory objects share close state only. */
 #include "3ds/runtime/internal.h"
+#include "common/utilities/endian.h"
 #include "3ds/services/file.h"
 #include "3ds/services/fs.h"
 #include "services/file.swipc.inc"
@@ -69,10 +70,9 @@ static bool utf16_name(const char* name, unsigned char out[0x20c]) {
     const unsigned char* s = (const unsigned char*)name;
     unsigned n = 0;
     while (*s) {
-        uint32_t cp;
         unsigned extra = *s < 0x80 ? 0 : (*s & 0xe0) == 0xc0 ? 1 : (*s & 0xf0) == 0xe0 ? 2 : (*s & 0xf8) == 0xf0 ? 3 : 4;
         if (extra > 3) return false;
-        cp = extra ? *s & (0x3f >> extra) : *s;
+        uint32_t cp = extra ? *s & (0x3f >> extra) : *s;
         for (unsigned i = 1; i <= extra; ++i) {
             if ((s[i] & 0xc0) != 0x80) return false;
             cp = cp << 6 | (s[i] & 0x3f);
@@ -119,7 +119,7 @@ static void read_directory(SnxCtrIpc* c, CtrObject* object) {
         entry[0x21d] = child->name[0] == '.';
         entry[0x21e] = !child->is_dir;
         uint64_t size = child->is_dir ? 0 : child->size;
-        for (unsigned i = 0; i < 8; ++i) entry[0x220 + i] = (unsigned char)(size >> (i * 8));
+        snx_st_le64(entry + 0x220, size);
         ok = snx_ctr_write_ram(p->space, address + read * 0x228, entry, sizeof entry) == SNX_CTR_MEM_OK;
     }
     pm_unlock(&p->tree->lock);

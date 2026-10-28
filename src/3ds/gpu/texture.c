@@ -5,6 +5,7 @@
    a4b335e, with the colour expansions of common/color.h. */
 #include "3ds/gpu/texture.h"
 #include "3ds/gpu/transfer.h"
+#include "common/utilities/endian.h"
 
 unsigned snx_ctr_tile_bytes(unsigned format) {
     switch (format) {
@@ -63,11 +64,6 @@ void snx_ctr_etc1(uint64_t b, unsigned x, unsigned y, uint8_t rgb[3]) {
     for (unsigned i = 0; i < 3; ++i) rgb[i] = (uint8_t)clamp255(c[i] + modifier);
 }
 
-static uint64_t le64(const unsigned char* p) {
-    uint64_t v = 0;
-    for (unsigned i = 0; i < 8; ++i) v |= (uint64_t)p[i] << (i * 8);
-    return v;
-}
 
 bool snx_ctr_texel(SnxCtrMemory* memory, uint32_t address, uint32_t width, unsigned format, unsigned x, unsigned y,
                    uint8_t rgba[4]) {
@@ -86,8 +82,8 @@ bool snx_ctr_texel(SnxCtrMemory* memory, uint32_t address, uint32_t width, unsig
             snx_ctr_phys_read(memory, (uint32_t)(base + sub * size), p, size) != SNX_CTR_MEM_OK)
             return false;
         rgba[3] = 255;
-        if (alpha) rgba[3] = c4to8((unsigned)(le64(p) >> (4 * (fx * 4 + fy))) & 15);
-        snx_ctr_etc1(le64(p + (alpha ? 8 : 0)), fx, fy, rgba);
+        if (alpha) rgba[3] = c4to8((unsigned)(snx_ld_le64(p) >> (4 * (fx * 4 + fy))) & 15);
+        snx_ctr_etc1(snx_ld_le64(p + (alpha ? 8 : 0)), fx, fy, rgba);
         return true;
     }
     static const unsigned bytes[12] = {4, 3, 2, 2, 2, 2, 2, 1, 1, 1, 0, 0};

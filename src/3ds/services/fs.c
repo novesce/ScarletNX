@@ -4,6 +4,7 @@
    and libctru services/fs.c. The extracted title directory is the NX-style
    shared tree: romfs/exefs read-only and always open, sdmc read-write. */
 #include "3ds/runtime/internal.h"
+#include "common/utilities/endian.h"
 #include "3ds/services/fs.h"
 #include "services/fs.swipc.inc"
 #include <stdio.h>
@@ -168,7 +169,7 @@ static void open_host(SnxCtrIpc* c, FsNode* root, uint32_t flags, uint32_t fixed
    is loaded */
 static void open_self(SnxCtrIpc* c, const unsigned char path[12]) {
     SnxCtrProcess* p = c->process;
-    uint32_t type = (uint32_t)path[0] | (uint32_t)path[1] << 8 | (uint32_t)path[2] << 16 | (uint32_t)path[3] << 24;
+    uint32_t type = snx_ld_le32(path);
     if (type == 0 || type == 5) {
         if (type == 5 || !p->romfs) {
             snx_ctr_ipc_error_reply(c, 0xc8804464u); /* RomFSNotFound */
@@ -241,12 +242,10 @@ static void open_ncch(SnxCtrIpc* c) {
         c->transport_result = 0xe0e01bf5u;
         return;
     }
-    uint64_t title = 0;
-    for (unsigned i = 0; i < 8; ++i) title |= (uint64_t)archive_path[i] << (i * 8);
+    uint64_t title = snx_ld_le64(archive_path);
     uint32_t words[3];
     for (unsigned i = 0; i < 3; ++i)
-        words[i] = (uint32_t)file_path[i * 4] | (uint32_t)file_path[i * 4 + 1] << 8 |
-                   (uint32_t)file_path[i * 4 + 2] << 16 | (uint32_t)file_path[i * 4 + 3] << 24;
+        words[i] = snx_ld_le32(file_path + i * 4);
     if (title == p->title_id) {
         if (words[0] || words[1] || words[2]) { /* its code or an ExeFS file, or another content */
             c->state = SNX_CTR_IPC_UNSUPPORTED;
@@ -574,7 +573,7 @@ static void control_archive(SnxCtrIpc* c) {
         }
         datetime = unix_ms + 2208988800000ull;
     }
-    for (unsigned i = 0; i < 8; ++i) out[i] = (unsigned char)(datetime >> (i * 8));
+    snx_st_le64(out, datetime);
     if (snx_ctr_write_ram(p->space, c->in[9], out, sizeof out) != SNX_CTR_MEM_OK) {
         c->state = SNX_CTR_IPC_FAULT;
         return;
@@ -601,8 +600,7 @@ static bool extdata_path(SnxCtrIpc* c, uint32_t address, uint32_t words[3]) {
         return false;
     }
     for (unsigned i = 0; i < 3; ++i)
-        words[i] = (uint32_t)raw[i * 4] | (uint32_t)raw[i * 4 + 1] << 8 | (uint32_t)raw[i * 4 + 2] << 16 |
-                   (uint32_t)raw[i * 4 + 3] << 24;
+        words[i] = snx_ld_le32(raw + i * 4);
     return true;
 }
 static void open_archive(SnxCtrIpc* c) {
@@ -690,9 +688,6 @@ static FsTreeResult write_whole(FsTree* tree, FsNode* scope, const char* path, c
     if (fclose(f)) rc = FS_TREE_IO;
     return rc;
 }
-static void le32(unsigned char* out, uint32_t value) {
-    for (unsigned i = 0; i < 4; ++i) out[i] = (unsigned char)(value >> (i * 8));
-}
 /* Create an ExtSaveData, a game's own on the SD card (media 1) or a shared one on the NAND (media 0), as Azahar's
    ArchiveManager::CreateExtSaveData picks: user/ and boss/, the format it was given in metadata and its SMDH icon, as
    ArchiveFactory_ExtSaveData::FormatAsExtData writes them. One that exists is made again over itself, its files
@@ -738,9 +733,9 @@ static void create_extdata(SnxCtrIpc* c, uint32_t media, uint32_t low, uint32_t 
         return;
     }
     unsigned char metadata[16] = {0}; /* ArchiveFormatInfo: total size, directories, files, duplicate data (none) */
-    le32(metadata, total_size);
-    le32(metadata + 4, directories);
-    le32(metadata + 8, files);
+    snx_st_le32(metadata, total_size);
+    snx_st_le32(metadata + 4, directories);
+    snx_st_le32(metadata + 8, files);
     pm_lock(&p->tree->lock);
     FsTreeResult rc = snx_ctr_fs_make_extdata(p, media == 0, high, low, metadata, icon, icon_size);
     pm_unlock(&p->tree->lock);
@@ -781,7 +776,7 @@ static void format_save_data(SnxCtrIpc* c, uint32_t blocks, uint32_t directories
     SnxCtrProcess* p = c->process;
     uint32_t info[5] = {blocks * 512, directories, files, duplicate & 0xff, 1};
     unsigned char bytes[sizeof info];
-    for (unsigned i = 0; i < 5; ++i) le32(bytes + i * 4, info[i]);
+    for (unsigned i = 0; i < 5; ++i) snx_st_le32(bytes + i * 4, info[i]);
     for (unsigned i = 0; i < CTR_SELF_ARCHIVES; ++i) /* an open save data archive goes with what it held */
         if (p->self_archives[i].kind == 2) p->self_archives[i].token = 0;
     pm_lock(&p->tree->lock);
@@ -849,8 +844,7 @@ static void format_info(SnxCtrIpc* c) {
     }
     c->out[0] = 0x08450140;
     for (unsigned i = 0; i < 4; ++i)
-        c->out[2 + i] = (uint32_t)bytes[i * 4] | (uint32_t)bytes[i * 4 + 1] << 8 | (uint32_t)bytes[i * 4 + 2] << 16 |
-                        (uint32_t)bytes[i * 4 + 3] << 24;
+        c->out[2 + i] = snx_ld_le32(bytes + i * 4);
     c->out[5] &= 0xff; /* duplicate data is one byte */
 }
 /* FSUSER GetFreeBytes: what Azahar's archives answer (the RomFS none, the SD card 1 GiB, save data 32 MiB) */

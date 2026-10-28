@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
    Copyright 2026 the ScarletNX contributors */
 #include "3ds/runtime/internal.h"
+#include "common/utilities/endian.h"
 #include "3ds/gpu/pica.h"
 #include "3ds/services/dsp.h"
 #include "3ds/services/ptm.h"
@@ -100,19 +101,17 @@ void snx_ctr_shared_page_time(SnxCtrProcess* p) {
     p->time_update_ns = snx_ctr_now_ns() + UINT64_C(3600000000000);
     unsigned char counter[4];
     if (!local_1900_ms(&rtc) || snx_ctr_phys_read(p->memory, 0x1ff81000, counter, 4) != SNX_CTR_MEM_OK) return;
-    uint32_t count =
-        (uint32_t)counter[0] | (uint32_t)counter[1] << 8 | (uint32_t)counter[2] << 16 | (uint32_t)counter[3] << 24;
+    uint32_t count = snx_ld_le32(counter);
     values[0] = rtc;
     values[1] = ticks;
     values[2] = UINT64_C(268111856);
     values[3] = 0;
     unsigned char entry[32];
-    for (unsigned v = 0; v < 4; ++v)
-        for (unsigned i = 0; i < 8; ++i) entry[v * 8 + i] = (unsigned char)(values[v] >> (i * 8));
+    for (unsigned v = 0; v < 4; ++v) snx_st_le64(entry + v * 8, values[v]);
     if (snx_ctr_phys_write(p->memory, 0x1ff81020 + (count % 2 ? 0 : 0x20), entry, sizeof entry) != SNX_CTR_MEM_OK)
         return;
     ++count;
-    for (unsigned i = 0; i < 4; ++i) counter[i] = (unsigned char)(count >> (i * 8));
+    snx_st_le32(counter, count);
     (void)snx_ctr_phys_write(p->memory, 0x1ff81000, counter, 4);
 }
 void snx_ctr_process_free(SnxCtrProcess* p) {
@@ -346,8 +345,7 @@ static bool mount(SnxCtrProcess* p, const char* directory, const SnxCtrSource* g
     }
     if (icon && smdh_size >= 0x201c && !memcmp(icon, "SMDH", 4)) smdh_title(icon, p->title);
     if (icon && smdh_size >= 0x201c && !memcmp(icon, "SMDH", 4))
-        p->region_lockout = (uint32_t)icon[0x2018] | (uint32_t)icon[0x2019] << 8 | (uint32_t)icon[0x201a] << 16 |
-                            (uint32_t)icon[0x201b] << 24;
+        p->region_lockout = snx_ld_le32(icon + 0x2018);
     /* the save data a run formatted before */
     pm_lock(&tree->lock);
     if (fs_tree_lookup(tree, NULL, "savedata", &p->save) || !p->save->is_dir) p->save = NULL;

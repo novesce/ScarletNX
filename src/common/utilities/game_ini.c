@@ -2,7 +2,7 @@
    Copyright 2026 the ScarletNX contributors */
 #include "common/utilities/game_ini.h"
 #include "common/utilities/ini_lines.h"
-#include <ctype.h>
+#include "common/utilities/ascii.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -123,7 +123,7 @@ size_t snx_addons_parse(const char* text, const char* game, SnxAddon* list, size
         while (*text == ',' || *text == ' ' || *text == '\t') text++;
         for (n = 0; text[n] && text[n] != ',' && text[n] != ' ' && text[n] != '\t'; n++) continue;
         if (n >= 16 && n < sizeof word) {
-            for (i = 0; i < n; i++) word[i] = i < 16 ? (char)toupper((unsigned char)text[i]) : text[i];
+            for (i = 0; i < n; i++) word[i] = i < 16 ? (char)snx_to_upper(text[i]) : text[i];
             word[n] = 0;
             if (snx_addon_entry_id(own, word, &id)) {
                 for (i = 0; i < count && list[i].id != id; i++) continue;
@@ -144,9 +144,8 @@ size_t snx_addons_parse(const char* text, const char* game, SnxAddon* list, size
 }
 char* snx_addons_text(const SnxAddon* list, size_t count) {
     char* text = (char*)snx_alloc(count * 32 + 1);
-    size_t i;
     text[0] = 0;
-    for (i = 0; i < count; i++) {
+    for (size_t i = 0; i < count; i++) {
         if (i) strcat(text, ",");
         strcat(text, list[i].entry);
     }

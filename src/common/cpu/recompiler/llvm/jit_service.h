@@ -39,9 +39,8 @@
 /* instructions a batch discovers beyond the functions at its pcs (snx_codegen_discover's budget) */
 #define SNX_JIT_BUDGET  20000
 /* pcs a batch takes from the misses' queue; a warm batch takes an eighth of it. LLVM's fixed cost per module
-   (context, pass pipeline, code generator, load: about 2 ms at -O2 in tests/jit_service.c, where a small function
-   costs 3 ms more) is shared by the batch, and a start-up burst of misses goes through in a few batches instead of
-   thousands of compiles */
+   (context, pass pipeline, code generator, load) is shared by the batch, and a start-up burst of misses goes through
+   in a few batches instead of thousands of compiles */
 #define SNX_JIT_BATCH   256
 /* compile threads at most */
 #define SNX_JIT_THREADS 4
@@ -80,12 +79,12 @@ typedef struct {
     size_t budget;    /* 0: SNX_JIT_BUDGET */
     size_t batch;     /* 0: SNX_JIT_BATCH */
     unsigned threads; /* compile threads, 0: by the host's CPUs (jit_service.c), at most SNX_JIT_THREADS */
-    char opt;         /* the -O letter, 0: '2' */
+    char opt;         /* the -O letter, 0: '0' */
     /* after each batch, on its compile thread, outside every lock of the service (NULL: none) */
     void (*report)(const SnxJitReport* report);
     /* the JIT's cache (NULL: none): every unit compiled is appended to this file, and a later run loads a unit again
        instead of compiling it when the code it was compiled from is the same, byte for byte, and the file was written
-       by the same ABI, LLVM, runtime library, host CPU and settings */
+       by the same ABI, IR object version, target triple, LLVM, runtime library, host CPU and settings */
     const char* cache_path;
 } SnxJitConfig;
 

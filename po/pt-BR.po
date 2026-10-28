@@ -2034,6 +2034,16 @@ msgid "Pick the file from this computer's storage (%s)."
 msgstr "Escolha o arquivo no armazenamento deste computador (%s)."
 
 #: src/gui/main.c
+#, c-format
+msgid "%s opens with %s: cannot find %s beside ScarletNX or on PATH."
+msgstr "%s abre em %s: não há %s ao lado do ScarletNX nem no PATH."
+
+#: src/gui/main.c
+#, c-format
+msgid "%s opens with %s, not %s."
+msgstr "%s abre em %s, não em %s."
+
+#: src/gui/main.c
 msgid "Drop one local file path, not a list or remote URL."
 msgstr "Solte o caminho de um arquivo local, não uma lista nem uma URL remota."
 

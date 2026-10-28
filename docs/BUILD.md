@@ -221,7 +221,8 @@ brew install cmake ninja
    [Ryujinx MoltenVK release](https://github.com/V380-Ori/Ryujinx.MoltenVK/releases) that
    `.github/workflows/build.yml` pins (`MOLTENVK_RELEASE`, with its SHA-256). **Do not leave it out.** Without it the
    app has no MoltenVK, and on a Mac without Homebrew's it stops at startup with
-   `SDL could not open a Vulkan window: Failed to load Vulkan Portability library`.
+   `SDL could not open a Vulkan window: Failed to load Vulkan Portability library`. A game's folder gets the library
+   beside its copy of the runtime (`snx_deploy_runtime`), which is what the game's own process loads.
 
 CI's `macOS and iOS (arm64)` job builds the app on every push, and its zip, `ScarletNX-macos-arm64-<commit>.zip`,
 already has MoltenVK. The app is signed ad hoc, so a downloaded copy may need *Open* from the Finder's menu the first

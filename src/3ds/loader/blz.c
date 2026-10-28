@@ -8,9 +8,9 @@
 
 bool snx_ctr_blz(const unsigned char* input, size_t size, unsigned char* output, size_t expanded) {
     if (!input || !output || size < 8 || expanded < size || expanded > CTR_CODE_LIMIT) return false;
-    uint32_t footer = ctr_le32(input + size - 8);
+    uint32_t footer = snx_ld_le32(input + size - 8);
     size_t top = footer >> 24, bottom = footer & 0xffffff;
-    if (top < 8 || top > bottom || bottom > size || expanded - size != ctr_le32(input + size - 4)) return false;
+    if (top < 8 || top > bottom || bottom > size || expanded - size != snx_ld_le32(input + size - 4)) return false;
     size_t index = size - top, stop = size - bottom, out = expanded;
     memcpy(output, input, size);
     while (index > stop && out > stop) {
@@ -19,7 +19,7 @@ bool snx_ctr_blz(const unsigned char* input, size_t size, unsigned char* output,
             if (control & 0x80) {
                 if (index - stop < 2) return false;
                 index -= 2;
-                unsigned encoded = ctr_le16(input + index);
+                unsigned encoded = snx_ld_le16(input + index);
                 size_t count = (encoded >> 12) + 3, distance = (encoded & 4095) + 3;
                 if (count > out - stop) return false;
                 while (count--) {

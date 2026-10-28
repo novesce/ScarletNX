@@ -8,6 +8,7 @@
    presents on the GPU thread (gpu/gpu.c), the menu's refresh on the main thread (vkr_refresh), screenshots on the
    thread asking, and shader results landing on whichever thread reads their memory first. Acquiring a swapchain image
    never waits for the display: with every image still on it or queued for it, that frame isn't shown (counted). */
+#include "common/utilities/bits.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -754,7 +755,7 @@ static u64 surf_save(Surf* s, u32 x, u32 y, u32 w, u32 h, u32 transform, const c
     const u8* px = surf_read(s, x, y, w, h, transform, w, h);
     if (!px) return hash;
     /* the pixels as the device wrote them, little-endian words: the hash is the same on every host */
-    for (u64 i = 0; i < (u64)w * h; i++) hash = (hash ^ snx_ld_le32(px + i * 4)) * 1099511628211ull;
+    for (u64 i = 0; i < (u64)w * h; i++) hash = snx_fnv_step(hash, snx_ld_le32(px + i * 4));
     if (path) {
         char fn[1100];
         snprintf(fn, sizeof fn, "%s.ppm", path);

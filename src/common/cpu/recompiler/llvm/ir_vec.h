@@ -29,6 +29,12 @@ void ir_vec_write(SnxIr* ir, unsigned d, LLVMValueRef value);
 void ir_vec_write_high(SnxIr* ir, unsigned d, LLVMValueRef value);
 /* type's value v in every lane (an integer type or a vector of integers) */
 LLVMValueRef ir_vec_k(SnxIr* ir, LLVMTypeRef type, SnxU64 v);
+/* v in every lane of like's type */
+static inline LLVMValueRef ir_vec_like(SnxIr* ir, LLVMValueRef like, SnxU64 v) {
+    return ir_vec_k(ir, LLVMTypeOf(like), v);
+}
+/* the lanes of a vector value */
+static inline unsigned ir_vec_count(LLVMValueRef v) { return LLVMGetVectorSize(LLVMTypeOf(v)); }
 /* <lanes x T> of the scalar value */
 LLVMValueRef ir_vec_splat(SnxIr* ir, LLVMValueRef value, unsigned lanes);
 /* shufflevector(a, b, mask) */

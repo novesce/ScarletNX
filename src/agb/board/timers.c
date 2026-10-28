@@ -23,9 +23,8 @@ static void timer_overflow(AgbBoard* board, int index) {
 
 void agb_timer_write(AgbBoard* board, uint32_t offset, uint16_t value) {
     int index = (int)((offset - 0x100) >> 2), part = (int)(offset & 3);
-    AgbTimer* timer;
     if (index < 0 || index > 3) return;
-    timer = &board->timer[index];
+    AgbTimer* timer = &board->timer[index];
     if (!part) {
         timer->reload = value;
         return;
@@ -52,9 +51,8 @@ uint16_t agb_timer_read(AgbBoard* board, uint32_t offset) {
 void agb_timer_step(AgbBoard* board, uint32_t cycles) {
     for (int index = 0; index < 4; ++index) {
         AgbTimer* timer = &board->timer[index];
-        uint32_t step;
         if (!(timer->control & AGB_TIMER_ENABLE) || (timer->control & AGB_TIMER_CASCADE)) continue;
-        step = prescalers[timer->control & 3];
+        uint32_t step = prescalers[timer->control & 3];
         timer->cycles += cycles;
         while (timer->cycles >= step) {
             timer->cycles -= step;

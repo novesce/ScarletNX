@@ -2,7 +2,6 @@
    Copyright 2026 the ScarletNX contributors */
 #include "common/cpu/arm/arm.h"
 #include "common/cpu/arm/simd.h"
-#include <string.h>
 
 /* VFPv2 recognition. Emission supports scalar mode only and rejects short
    vectors/enabled exceptions before arithmetic. Never silently execute NEON,
@@ -63,7 +62,7 @@ static unsigned a9_thumb(uint16_t h, uint16_t h2, SnxThumb* o) {
     if (len || (h & 0xfe90) != 0xf800 || (h2 & 0x900) != 0x900 || n != t || n == 15) return len;
     len = snx_thumb_decode((uint16_t)((h & ~15u) | other_register(t, 15)), h2, o);
     if (len != TH_F32 || o->shape != TH_STORE || !(o->flags & TH_WB)) {
-        memset(o, 0, sizeof *o);
+        *o = (SnxThumb){0};
         return 0;
     }
     o->rn = n;
@@ -124,7 +123,7 @@ SnxA32Kind snx_a32_decode_profile(SnxArmProfile profile, uint32_t w) {
 unsigned snx_thumb_decode_profile(SnxArmProfile profile, uint16_t h, uint16_t h2, SnxThumb* o) {
     if (profile == SNX_ARM_PROFILE_A57) return snx_thumb_decode(h, h2, o);
     if (profile == SNX_ARM_PROFILE_A9) return a9_thumb(h, h2, o);
-    memset(o, 0, sizeof *o);
+    *o = (SnxThumb){0};
     if (profile != SNX_ARM_PROFILE_ARM11 && profile != SNX_ARM_PROFILE_ARM7TDMI) return 0;
     int v6 = profile == SNX_ARM_PROFILE_ARM11; /* the ARM7TDMI's ARMv4T has none of ARMv5's and ARMv6's additions */
     /* ARMv6K's and ARMv4T's Thumb BL is two separately executable 16-bit instructions. Its
@@ -188,6 +187,6 @@ unsigned snx_thumb_decode_profile(SnxArmProfile profile, uint16_t h, uint16_t h2
     }
     return TH_F16;
 invalid:
-    memset(o, 0, sizeof *o);
+    *o = (SnxThumb){0};
     return 0;
 }

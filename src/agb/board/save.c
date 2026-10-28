@@ -185,9 +185,8 @@ void agb_eeprom_write(AgbBoard* board, uint16_t value, uint32_t left) {
 
 uint16_t agb_eeprom_read(AgbBoard* board) {
     AgbSave* save = &board->save;
-    uint32_t at;
     if (save->eeprom_state != EEPROM_READ) return save->eeprom_busy ? 0 : 1;
-    at = (uint32_t)(EEPROM_READ_BITS - save->eeprom_left--);
+    uint32_t at = (uint32_t)(EEPROM_READ_BITS - save->eeprom_left--);
     if (!save->eeprom_left) save->eeprom_state = EEPROM_IDLE;
     if (at < 4) return 0;
     at -= 4;

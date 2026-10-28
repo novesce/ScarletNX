@@ -21,6 +21,9 @@
 #include "common/cpu/recompiler/llvm/jit_service.h"
 #include "common/cpu/recompiler/llvm/link.h"
 #include "common/cpu/recompiler/llvm/code_loader.h"
+#include "common/cpu/recompiler/llvm/objects_pack.h"
+#include "common/cpu/recompiler/workers.h"
+#include "common/utilities/endian.h"
 #include <llvm-c/Support.h>
 #include <llvm-c/TargetMachine.h>
 #include <stdarg.h>
@@ -174,9 +177,8 @@ int snx_recompiler_has(int flags) {
 unsigned snx_recompiler_abi(void) { return SNX_ABI; }
 
 struct snx_recompiler* snx_recompiler_new(int flags) {
-    struct snx_recompiler* r;
     if (!snx_recompiler_has(flags)) return NULL;
-    r = (struct snx_recompiler*)calloc(1, sizeof(*r));
+    struct snx_recompiler* r = (struct snx_recompiler*)calloc(1, sizeof(*r));
     if (!r) return NULL;
     r->opt = '2';
     r->features = SNX_A64_TARGET_SWITCH;
@@ -274,13 +276,12 @@ static void default_poll(CPU* c) { (void)c; }
    start (a host without the JIT loader) */
 static SnxJitService* module_jit(struct snx_recompiled* m) {
     SnxJitService *s = __atomic_load_n(&m->jit, __ATOMIC_ACQUIRE), *expected = NULL;
-    SnxJitConfig config;
     char error[512];
     if (s) return s == JIT_NONE ? NULL : s;
     if (!m->view_count) return NULL; /* snx_recompile_from's: the caller compiles what the module lacks */
     /* PowerPC64: the units call the module's functions directly (snx_aot_<address>) and share its table, so their
        arena shares the TOC of the module's, near it (jit_service.c's aot_toc) */
-    memset(&config, 0, sizeof(config));
+    SnxJitConfig config = {0};
     config.images = m->views;
     config.image_count = m->view_count;
     config.dispatch = m->dispatch;
@@ -327,7 +328,7 @@ static void default_miss(CPU* c, uint64_t pc) {
 }
 
 void snx_runtime_defaults(RtAPI* rt) {
-    memset(rt, 0, sizeof(*rt));
+    *rt = (RtAPI){0};
     rt->miss = default_miss;
     rt->note_hint = default_note_hint;
     rt->ticks = default_ticks;
@@ -345,21 +346,19 @@ void snx_runtime_defaults(RtAPI* rt) {
    may end on a Thumb halfword */
 static SnxCodeImage* images(struct snx_recompiler* r, const struct snx_code_range* ranges, size_t count, int need_code,
                             uint64_t* lo, uint64_t* hi) {
-    SnxCodeImage* views;
-    size_t i;
     uint64_t align = need_code ? 3 : 1;
     if (!count) {
         fail(r, "no code ranges");
         return NULL;
     }
-    views = (SnxCodeImage*)calloc(count, sizeof(*views));
+    SnxCodeImage* views = (SnxCodeImage*)calloc(count, sizeof(*views));
     if (!views) {
         fail(r, "out of memory");
         return NULL;
     }
     *lo = ~(uint64_t)0;
     *hi = 0;
-    for (i = 0; i < count; ++i) {
+    for (size_t i = 0; i < count; ++i) {
         if (!ranges[i].size || (ranges[i].address & align) || (ranges[i].size & align) ||
             (need_code && !ranges[i].code) || ranges[i].address + ranges[i].size < ranges[i].address) {
             fail(r, "code range %lu: a non-empty, %s aligned range%s is required", (unsigned long)i,
@@ -384,20 +383,20 @@ static SnxCodeImage* images(struct snx_recompiler* r, const struct snx_code_rang
 
 /* chunks of whole functions: units[i] = first function of unit i, units[count] = function_count */
 static size_t* chunks(const SnxCodegen* codegen, unsigned jobs, size_t* count) {
-    size_t *units, first, last, n, instructions, total = 0, unit;
-    units = (size_t*)calloc(codegen->function_count + 2, sizeof(*units));
+    size_t first, last, total = 0;
+    size_t* units = (size_t*)calloc(codegen->function_count + 2, sizeof(*units));
     if (!units) return NULL;
     /* a small program (a just-in-time step) is still split between the jobs, down to units of a few thousand
        instructions, below which a unit's fixed cost is more than its share of the work */
     for (first = 0; first < codegen->function_count; ++first) total += codegen->functions[first].count;
     if (!jobs) jobs = snx_cpu_count();
-    unit = jobs > 1 ? total / jobs + 1 : CHUNK_INSTRUCTIONS;
+    size_t unit = jobs > 1 ? total / jobs + 1 : CHUNK_INSTRUCTIONS;
     if (unit < 4000) unit = 4000;
     if (unit > CHUNK_INSTRUCTIONS) unit = CHUNK_INSTRUCTIONS;
-    n = 0;
+    size_t n = 0;
     for (first = 0; first < codegen->function_count; first = last) {
         last = first;
-        instructions = 0;
+        size_t instructions = 0;
         do {
             instructions += codegen->functions[last++].count;
         } while (last < codegen->function_count && instructions < unit);
@@ -420,22 +419,20 @@ static int compare_entry(const void* a, const void* b) {
     return x->function < y->function ? -1 : x->function > y->function;
 }
 static Entry* entries(const SnxCodegen* codegen, size_t* count) {
-    Entry* e;
-    size_t n, i, j, unique;
-    n = 0;
-    for (i = 0; i < codegen->function_count; ++i) n += codegen->functions[i].leader_count;
-    e = (Entry*)calloc(n ? n : 1, sizeof(*e));
+    size_t n = 0;
+    for (size_t i = 0; i < codegen->function_count; ++i) n += codegen->functions[i].leader_count;
+    Entry* e = (Entry*)calloc(n ? n : 1, sizeof(*e));
     if (!e) return NULL;
     n = 0;
-    for (i = 0; i < codegen->function_count; ++i)
-        for (j = 0; j < codegen->functions[i].count; ++j)
+    for (size_t i = 0; i < codegen->function_count; ++i)
+        for (size_t j = 0; j < codegen->functions[i].count; ++j)
             if (codegen->functions[i].leaders[j]) {
                 e[n].address = snx_function_address(&codegen->functions[i], j);
                 e[n++].function = i;
             }
     if (n) qsort(e, n, sizeof(*e), compare_entry);
-    unique = 0;
-    for (i = 0; i < n; ++i) {
+    size_t unique = 0;
+    for (size_t i = 0; i < n; ++i) {
         if (unique && e[i].address == e[unique - 1].address) continue;
         e[unique++] = e[i];
     }
@@ -465,7 +462,6 @@ static void* open_image(const char* path) { return dlopen(path, RTLD_NOW | RTLD_
    before opening it, and a closed descriptor's number is the next one memfd_create hands out, so two modules
    loaded through the same "/proc/self/fd/N" would be one */
 static int load_image(struct snx_recompiler* r, struct snx_recompiled* m, const unsigned char* data, size_t size) {
-    char *dir = NULL, *path = NULL;
 #ifdef SNX_MEMFD
     {
         int fd = memfd_create("scarletnx-recompiled", MFD_CLOEXEC);
@@ -489,11 +485,11 @@ static int load_image(struct snx_recompiler* r, struct snx_recompiled* m, const 
         }
     }
 #endif
-    dir = snx_temp_dir(NULL);
+    char* dir = snx_temp_dir(NULL);
     if (!dir) {
-        char why[256], *root;
+        char why[256];
         snx_os_error(why, sizeof(why)); /* before snx_temp_root's calls set another */
-        root = snx_temp_root();
+        char* root = snx_temp_root();
         if (root)
             fail(r, "cannot create a folder for the recompiled module in %s: %s", root, why);
         else
@@ -502,9 +498,9 @@ static int load_image(struct snx_recompiler* r, struct snx_recompiled* m, const 
         return -1;
     }
 #ifdef _WIN32
-    path = snx_path_join(dir, "recompiled.dll");
+    char* path = snx_path_join(dir, "recompiled.dll");
 #else
-    path = snx_path_join(dir, "recompiled.so");
+    char* path = snx_path_join(dir, "recompiled.so");
 #endif
     if (snx_write_file(path, data, size)) {
         fail(r, "cannot write the recompiled module to %s", path);
@@ -564,23 +560,21 @@ static void unload_image(struct snx_recompiled* m) {
 
 /* the dispatch table from the descriptor; the interpreter entry comes from a lookup of a pc the table leaves empty */
 static int load_descriptor(struct snx_recompiler* r, struct snx_recompiled* m, const Descriptor* d) {
-    size_t i, slots;
-    void** block;
     if (!d || d->abi != SNX_ABI) {
         fail(r, "the recompiled module's descriptor is missing or of another ABI");
         return -1;
     }
-    slots = (size_t)((m->code_hi - m->code_lo + 3) / 4);
+    size_t slots = (size_t)((m->code_hi - m->code_lo + 3) / 4);
     /* one slot more, in front of the table: the module, for default_miss to find from cpu->disp. Generated code only
        indexes the table from its start */
-    block = (void**)calloc(slots + 1, sizeof(void*));
+    void** block = (void**)calloc(slots + 1, sizeof(void*));
     if (!block) {
         fail(r, "out of memory for the dispatch table (%lu entries)", (unsigned long)slots);
         return -1;
     }
     block[0] = m;
     m->dispatch = (GuestFn*)(block + 1);
-    for (i = 0; i < d->count; ++i) {
+    for (size_t i = 0; i < d->count; ++i) {
         uint64_t a = d->addresses[i];
         if (a < m->code_lo || a >= m->code_hi || (a & 3)) continue;
         m->dispatch[(a - m->code_lo) >> 2] = d->functions[i];
@@ -607,50 +601,19 @@ typedef struct {
     size_t count, next, done;
     int failed;
     char error[1024];
-#ifdef _WIN32
-    CRITICAL_SECTION lock;
-#else
-    pthread_mutex_t lock;
-#endif
+    SnxWorkLock lock;
 } Queue;
-
-static void lock(Queue* q) {
-#ifdef _WIN32
-    EnterCriticalSection(&q->lock);
-#else
-    pthread_mutex_lock(&q->lock);
-#endif
-}
-static void unlock(Queue* q) {
-#ifdef _WIN32
-    LeaveCriticalSection(&q->lock);
-#else
-    pthread_mutex_unlock(&q->lock);
-#endif
-}
-
-/* the unit's IR as <dir>/<name>.ll */
-static int save_ir(SnxIr* ir, const char* dir, const char* name) {
-    char *text = snx_ir_text(ir), *file = snx_format("%s.ll", name), *path = snx_path_join(dir, file);
-    int rc = snx_write_file(path, text, strlen(text));
-    LLVMDisposeMessage(text);
-    free(file);
-    free(path);
-    return rc;
-}
 
 static int llvm_unit(Queue* q, size_t index, char* error, size_t error_size) {
     Unit* u = &q->units[index];
     char name[32];
-    size_t i;
-    SnxIr* ir;
     int rc = 0;
     snprintf(name, sizeof(name), "code_%03lu", (unsigned long)index);
-    ir = snx_ir_new(name, q->r->opt, error, error_size);
+    SnxIr* ir = snx_ir_new(name, q->r->opt, error, error_size);
     if (!ir) return -1;
     if (q->codegen->hook_direct_calls) snx_ir_stale_checks(ir);
-    for (i = u->first; i < u->last; ++i) snx_ir_emit(ir, q->codegen, &q->codegen->functions[i]);
-    if (q->r->keep_ir && save_ir(ir, q->r->keep_ir, name)) {
+    for (size_t i = u->first; i < u->last; ++i) snx_ir_emit(ir, q->codegen, &q->codegen->functions[i]);
+    if (q->r->keep_ir && snx_save_ir(ir, q->r->keep_ir, name)) {
         snprintf(error, error_size, "cannot save the IR of %s in %s", name, q->r->keep_ir);
         rc = -1;
     }
@@ -659,23 +622,21 @@ static int llvm_unit(Queue* q, size_t index, char* error, size_t error_size) {
     return rc;
 }
 
-static void worker(Queue* q) {
+static void worker(void* arg) {
+    Queue* q = (Queue*)arg;
     char error[1024];
     for (;;) {
-        size_t i;
-        int rc;
-        double start;
-        lock(q);
+        snx_work_lock(&q->lock);
         if (q->failed || q->next == q->count) {
-            unlock(q);
+            snx_work_unlock(&q->lock);
             return;
         }
-        i = q->next++;
-        unlock(q);
+        size_t i = q->next++;
+        snx_work_unlock(&q->lock);
         error[0] = 0;
-        start = snx_seconds();
-        rc = llvm_unit(q, i, error, sizeof(error));
-        lock(q);
+        double start = snx_seconds();
+        int rc = llvm_unit(q, i, error, sizeof(error));
+        snx_work_lock(&q->lock);
         ++q->done;
         if (rc && !q->failed) {
             q->failed = 1;
@@ -685,96 +646,49 @@ static void worker(Queue* q) {
             report(q->r, "  compiled unit %lu/%lu: functions %lu-%lu (%.1f s)\n", (unsigned long)q->done,
                    (unsigned long)q->count, (unsigned long)q->units[i].first, (unsigned long)q->units[i].last,
                    snx_seconds() - start);
-        unlock(q);
+        snx_work_unlock(&q->lock);
     }
 }
-#ifdef _WIN32
-static DWORD WINAPI thread_main(LPVOID p) {
-    worker((Queue*)p);
-    return 0;
-}
-#else
-static void* thread_main(void* p) {
-    worker((Queue*)p);
-    return NULL;
-}
-#endif
-
 static void run_queue(Queue* q, unsigned jobs) {
-    unsigned i, created = 0;
-#ifdef _WIN32
-    HANDLE* threads;
-    InitializeCriticalSection(&q->lock);
-#else
-    pthread_t* threads;
-    pthread_mutex_init(&q->lock, NULL);
-#endif
+    snx_work_lock_init(&q->lock);
     if (!jobs) jobs = snx_cpu_count();
     if (jobs > q->count) jobs = (unsigned)q->count;
     if (jobs < 1) jobs = 1;
-    threads = (void*)calloc(jobs, sizeof(*threads));
-    for (i = 1; threads && i < jobs; ++i) {
-#ifdef _WIN32
-        HANDLE h = CreateThread(NULL, 0, thread_main, q, 0, NULL);
-        if (!h) break;
-        threads[created++] = h;
-#else
-        if (pthread_create(&threads[created], NULL, thread_main, q)) break;
-        ++created;
-#endif
-    }
-    worker(q);
-    for (i = 0; i < created; ++i) {
-#ifdef _WIN32
-        WaitForSingleObject(threads[i], INFINITE);
-        CloseHandle(threads[i]);
-#else
-        pthread_join(threads[i], NULL);
-#endif
-    }
-#ifdef _WIN32
-    DeleteCriticalSection(&q->lock);
-#else
-    pthread_mutex_destroy(&q->lock);
-#endif
-    free(threads);
+    snx_run_workers(jobs, worker, q);
+    snx_work_lock_destroy(&q->lock);
 }
 
 /* the descriptor as IR: constant tables, and DESCRIPTOR_SYMBOL filling the Descriptor (generated code's misses go to
    RtAPI.miss since SNX_ABI 8, and default_miss's to the module's JIT) */
 static int llvm_descriptor(SnxIr* ir, const SnxCodegen* codegen, char* error, size_t error_size) {
-    Entry* e;
-    size_t count, n, i;
-    LLVMValueRef *values, addresses, functions, stale, desc, fn;
-    LLVMTypeRef t_addresses, t_functions;
-    LLVMBasicBlockRef block;
-    e = entries(codegen, &count);
+    size_t count;
+    Entry* e = entries(codegen, &count);
     if (!e) {
         snprintf(error, error_size, "out of memory");
         return -1;
     }
-    n = count ? count : 1;
-    values = (LLVMValueRef*)calloc(n, sizeof(*values));
+    size_t n = count ? count : 1;
+    LLVMValueRef* values = (LLVMValueRef*)calloc(n, sizeof(*values));
     if (!values) {
         free(e);
         snprintf(error, error_size, "out of memory");
         return -1;
     }
-    for (i = 0; i < n; ++i) values[i] = ir_i64(ir, i < count ? e[i].address : 0);
-    t_addresses = LLVMArrayType(ir->t_i64, (unsigned)n);
-    addresses = LLVMAddGlobal(ir->mod, t_addresses, "snx_lib_addresses");
+    for (size_t i = 0; i < n; ++i) values[i] = ir_i64(ir, i < count ? e[i].address : 0);
+    LLVMTypeRef t_addresses = LLVMArrayType(ir->t_i64, (unsigned)n);
+    LLVMValueRef addresses = LLVMAddGlobal(ir->mod, t_addresses, "snx_lib_addresses");
     LLVMSetLinkage(addresses, LLVMInternalLinkage);
     LLVMSetInitializer(addresses, LLVMConstArray(ir->t_i64, values, (unsigned)n));
     LLVMSetGlobalConstant(addresses, 1);
-    for (i = 0; i < n; ++i)
+    for (size_t i = 0; i < n; ++i)
         values[i] =
             i < count ? snx_ir_guest_function(ir, codegen->functions[e[i].function].start) : LLVMConstNull(ir->t_ptr);
-    t_functions = LLVMArrayType(ir->t_ptr, (unsigned)n);
-    functions = LLVMAddGlobal(ir->mod, t_functions, "snx_lib_functions");
+    LLVMTypeRef t_functions = LLVMArrayType(ir->t_ptr, (unsigned)n);
+    LLVMValueRef functions = LLVMAddGlobal(ir->mod, t_functions, "snx_lib_functions");
     LLVMSetLinkage(functions, LLVMInternalLinkage);
     LLVMSetInitializer(functions, LLVMConstArray(ir->t_ptr, values, (unsigned)n));
     LLVMSetGlobalConstant(functions, 1);
-    stale = LLVMConstNull(ir->t_ptr);
+    LLVMValueRef stale = LLVMConstNull(ir->t_ptr);
     if (codegen->hook_direct_calls) {
         const size_t stale_count = codegen->function_count ? codegen->function_count : 1;
         const LLVMTypeRef t_stale = LLVMArrayType(ir->t_i8, (unsigned)stale_count);
@@ -785,14 +699,14 @@ static int llvm_descriptor(SnxIr* ir, const SnxCodegen* codegen, char* error, si
     free(values);
     free(e);
     /* static Descriptor DESC, written at run time at the C offsets */
-    desc = LLVMAddGlobal(ir->mod, LLVMArrayType(ir->t_i8, sizeof(Descriptor)), "snx_lib_descriptor");
+    LLVMValueRef desc = LLVMAddGlobal(ir->mod, LLVMArrayType(ir->t_i8, sizeof(Descriptor)), "snx_lib_descriptor");
     LLVMSetLinkage(desc, LLVMInternalLinkage);
     LLVMSetInitializer(desc, LLVMConstNull(LLVMArrayType(ir->t_i8, sizeof(Descriptor))));
     LLVMSetAlignment(desc, 8);
-    fn = LLVMAddFunction(ir->mod, DESCRIPTOR_SYMBOL, LLVMFunctionType(ir->t_ptr, NULL, 0, 0));
+    LLVMValueRef fn = LLVMAddFunction(ir->mod, DESCRIPTOR_SYMBOL, LLVMFunctionType(ir->t_ptr, NULL, 0, 0));
     if (ir->windows) LLVMSetDLLStorageClass(fn, LLVMDLLExportStorageClass);
     ir->fn = fn;
-    block = LLVMAppendBasicBlockInContext(ir->ctx, fn, "entry");
+    LLVMBasicBlockRef block = LLVMAppendBasicBlockInContext(ir->ctx, fn, "entry");
     LLVMPositionBuilderAtEnd(ir->b, block);
 #define FIELD(member, value)                                                                                           \
     do {                                                                                                               \
@@ -821,43 +735,38 @@ typedef struct {
 } CacheKey;
 static void key_bytes(CacheKey* k, const void* data, size_t size) {
     const unsigned char* p = (const unsigned char*)data;
-    size_t i;
-    for (i = 0; i < size; ++i) {
+    for (size_t i = 0; i < size; ++i) {
         k->a = (k->a ^ p[i]) * 0x100000001b3ull;
         k->b = (k->b ^ p[i]) * 0x100000001b3ull;
     }
 }
 static void key_u64(CacheKey* k, uint64_t v) {
     unsigned char bytes[8];
-    int i;
-    for (i = 0; i < 8; ++i) bytes[i] = (unsigned char)(v >> (i * 8));
+    snx_st_le64(bytes, v);
     key_bytes(k, bytes, sizeof(bytes));
 }
 static char* cache_path(struct snx_recompiler* r, SnxCodegen* codegen) {
-    CacheKey k;
-    char *cpu, *features, name[64];
-    size_t i, j;
-    SnxU32 word;
-    k.a = 0xcbf29ce484222325ull;
-    k.b = 0x84222325cbf29ce4ull;
+    char name[64];
+    CacheKey k = {0xcbf29ce484222325ull, 0x84222325cbf29ce4ull};
     key_bytes(&k, "snx-module-cache-3", 18);
     key_u64(&k, SNX_ABI);
     key_u64(&k, (uint64_t)(unsigned char)r->opt);
     key_u64(&k, snx_a64_decoder_hash()); /* what each word decodes to: the decoder and the guest's features */
     key_u64(&k, r->features);
     key_u64(&k, (uint64_t)codegen->hook_direct_calls);
-    cpu = LLVMGetHostCPUName();
-    features = LLVMGetHostCPUFeatures();
+    char* cpu = LLVMGetHostCPUName();
+    char* features = LLVMGetHostCPUFeatures();
     key_bytes(&k, cpu, strlen(cpu) + 1);
     key_bytes(&k, features, strlen(features) + 1);
     LLVMDisposeMessage(cpu);
     LLVMDisposeMessage(features);
     key_u64(&k, codegen->function_count);
-    for (i = 0; i < codegen->function_count; ++i) {
+    for (size_t i = 0; i < codegen->function_count; ++i) {
         const SnxFunction* f = &codegen->functions[i];
         key_u64(&k, f->start);
         key_u64(&k, f->count);
-        for (j = 0; j < f->count; ++j) {
+        for (size_t j = 0; j < f->count; ++j) {
+            SnxU32 word;
             uint64_t a = snx_function_address(f, j);
             if (!snx_codegen_word(codegen, a, &word)) word = 0;
             key_u64(&k, a);
@@ -892,16 +801,14 @@ static void save_cached(const char* path, const unsigned char* data, size_t size
 /* the cache's copy of the compiled runtime library: a short-lived process (a just-in-time compiler's, which a
    program's every execve starts again) would spend most of its first compile on it */
 static char* rtlib_cache_path(const char* cache, char opt) {
-    CacheKey k;
-    char *cpu, *features, name[80];
-    k.a = 0xcbf29ce484222325ull;
-    k.b = 0x84222325cbf29ce4ull;
+    char name[80];
+    CacheKey k = {0xcbf29ce484222325ull, 0x84222325cbf29ce4ull};
     key_bytes(&k, "snx-rtlib-cache-1", 17);
     key_u64(&k, SNX_ABI);
     key_u64(&k, (uint64_t)(unsigned char)opt);
     key_bytes(&k, snx_rtlib_bitcode, snx_rtlib_bitcode_size);
-    cpu = LLVMGetHostCPUName();
-    features = LLVMGetHostCPUFeatures();
+    char* cpu = LLVMGetHostCPUName();
+    char* features = LLVMGetHostCPUFeatures();
     key_bytes(&k, cpu, strlen(cpu) + 1);
     key_bytes(&k, features, strlen(features) + 1);
     LLVMDisposeMessage(cpu);
@@ -945,11 +852,10 @@ static int rtlib_object(const char* cache, char opt, const unsigned char** data,
 static int load_cached(struct snx_recompiler* r, struct snx_recompiled* m, const char* path) {
     size_t size = 0;
     unsigned char* data = snx_read_file(path, &size);
-    DescriptorFn describe;
     int rc = -1;
     if (!data) return -1;
     if (!load_image(r, m, data, size)) {
-        describe = (DescriptorFn)(uintptr_t)image_symbol(m, DESCRIPTOR_SYMBOL);
+        DescriptorFn describe = (DescriptorFn)(uintptr_t)image_symbol(m, DESCRIPTOR_SYMBOL);
         rc = describe ? load_descriptor(r, m, describe()) : -1;
         if (rc) {
             free(m->dispatch);
@@ -983,9 +889,8 @@ static int arena_load(struct snx_recompiler* r, struct snx_recompiled* m, const 
     SnxU64 address = 0;
     char error[1024];
     if (!r->arena) {
-        SnxLinkInput rtlib;
         r->arena = snx_code_loader_new((size_t)1 << 31, error, sizeof(error));
-        memset(&rtlib, 0, sizeof(rtlib));
+        SnxLinkInput rtlib = {0};
         rtlib.name = "rtlib";
         if (!r->arena || rtlib_object(r->cache, r->opt, &rtlib.data, &rtlib.size, error, sizeof(error)) ||
             snx_code_load(r->arena, &rtlib, 1, NULL, 0, NULL, error, sizeof(error))) {
@@ -1005,49 +910,13 @@ static int arena_load(struct snx_recompiler* r, struct snx_recompiled* m, const 
     return load_descriptor(r, m, ((DescriptorFn)(uintptr_t)address)());
 }
 
-/* The module's objects in the cache, in one file of the guest's byte order: "snx-objs", their count, then each one's
-   size and bytes, sizes as 8-byte little-endian numbers */
-static unsigned char* objects_pack(const SnxLinkInput* inputs, size_t count, size_t* size) {
-    size_t i, total = 16, at;
-    unsigned char* data;
-    for (i = 0; i < count; ++i) total += 8 + inputs[i].size;
-    data = (unsigned char*)malloc(total);
-    if (!data) return NULL;
-    memcpy(data, "snx-objs", 8);
-    snx_link_put64(data + 8, count);
-    for (i = 0, at = 16; i < count; ++i) {
-        snx_link_put64(data + at, inputs[i].size);
-        memcpy(data + at + 8, inputs[i].data, inputs[i].size);
-        at += 8 + inputs[i].size;
-    }
-    *size = total;
-    return data;
-}
-static uint64_t objects_word(const unsigned char* p) {
-    uint64_t v = 0;
-    int i;
-    for (i = 7; i >= 0; --i) v = v << 8 | p[i];
-    return v;
-}
 /* the cached module's objects at path, loaded; nonzero when there are none or they can't be (then made again) */
 static int load_cached_objects(struct snx_recompiler* r, struct snx_recompiled* m, const char* path) {
-    size_t size = 0, count, i, at = 16;
+    size_t size = 0, count = 0;
     unsigned char* data = snx_read_file(path, &size);
-    SnxLinkInput* inputs = NULL;
+    SnxLinkInput* inputs = data ? snx_objects_unpack(data, size, "cached object", &count) : NULL;
     int rc = -1;
-    if (!data || size < 16 || memcmp(data, "snx-objs", 8)) goto done;
-    count = (size_t)objects_word(data + 8);
-    if (!count || count > size / 8) goto done;
-    inputs = (SnxLinkInput*)calloc(count, sizeof(*inputs));
     if (!inputs) goto done;
-    for (i = 0; i < count; ++i) {
-        uint64_t n;
-        if (size - at < 8 || (n = objects_word(data + at)) > size - at - 8) goto done;
-        inputs[i].data = data + at + 8;
-        inputs[i].size = (size_t)n;
-        inputs[i].name = "cached object";
-        at += 8 + (size_t)n;
-    }
     rc = arena_load(r, m, inputs, count);
     if (rc) {
         free(m->dispatch);
@@ -1065,16 +934,13 @@ static int recompile_llvm(struct snx_recompiler* r, struct snx_recompiled* m, Sn
     Queue q;
     SnxIr* ir = NULL;
     SnxLinkInput* inputs = NULL;
-    SnxLinkOutput linked;
+    SnxLinkOutput linked = {0};
     unsigned char* descriptor_object = NULL;
-    const unsigned char* rtlib = NULL;
-    size_t descriptor_size = 0, rtlib_size = 0, *units = NULL, count = 0, i, n = 0;
-    const char* exports[1];
+    size_t descriptor_size = 0, *units = NULL, count = 0, i, n = 0;
     char error[1024];
     int rc = -1;
     char* cached = NULL;
     memset(&q, 0, sizeof(q));
-    memset(&linked, 0, sizeof(linked));
     error[0] = 0;
     if (llvm_init(error, sizeof(error))) {
         fail(r, "%s", error);
@@ -1117,11 +983,13 @@ static int recompile_llvm(struct snx_recompiler* r, struct snx_recompiled* m, Sn
     }
     ir = snx_ir_new("module", r->opt, error, sizeof(error));
     if (!ir || llvm_descriptor(ir, codegen, error, sizeof(error)) ||
-        (r->keep_ir && save_ir(ir, r->keep_ir, "module")) ||
+        (r->keep_ir && snx_save_ir(ir, r->keep_ir, "module")) ||
         snx_ir_object(ir, r->opt, &descriptor_object, &descriptor_size, error, sizeof(error))) {
         fail(r, "LLVM backend: %s", error[0] ? error : "cannot save the descriptor's IR");
         goto done;
     }
+    const unsigned char* rtlib = NULL;
+    size_t rtlib_size = 0;
     if (rtlib_object(r->cache, r->opt, &rtlib, &rtlib_size, error, sizeof(error))) {
         fail(r, "LLVM backend: %s", error);
         goto done;
@@ -1143,6 +1011,7 @@ static int recompile_llvm(struct snx_recompiler* r, struct snx_recompiled* m, Sn
         inputs[n].size = q.units[i].size;
         inputs[n++].name = "code unit";
     }
+    const char* exports[1];
     exports[0] = DESCRIPTOR_SYMBOL;
 #if defined(__powerpc64__)
     /* into the arena instead of a module file of its own (arena_load): the cache keeps the objects */
@@ -1150,7 +1019,7 @@ static int recompile_llvm(struct snx_recompiler* r, struct snx_recompiled* m, Sn
     if (arena_load(r, m, inputs + 1, n - 1)) goto done;
     if (cached) {
         size_t packed_size;
-        unsigned char* packed = objects_pack(inputs + 1, n - 1, &packed_size);
+        unsigned char* packed = snx_objects_pack(inputs + 1, n - 1, &packed_size);
         if (packed) save_cached(cached, packed, packed_size);
         free(packed);
     }
@@ -1194,9 +1063,8 @@ done:
 /* the module's own copy of the code ranges, for its JIT: the views and the bytes in one block. 0, or -1 */
 static int keep_code(struct snx_recompiler* r, struct snx_recompiled* m, const struct snx_code_range* ranges,
                      size_t count) {
-    size_t i, total = 0, at;
-    unsigned char* bytes;
-    for (i = 0; i < count; ++i) {
+    size_t total = 0;
+    for (size_t i = 0; i < count; ++i) {
         if (ranges[i].size > SIZE_MAX / 2 - total) {
             fail(r, "the code ranges are too large");
             return -1;
@@ -1212,8 +1080,9 @@ static int keep_code(struct snx_recompiler* r, struct snx_recompiled* m, const s
         fail(r, "out of memory for a copy of the code");
         return -1;
     }
-    bytes = (unsigned char*)(m->views + count);
-    for (i = 0, at = 0; i < count; ++i) {
+    unsigned char* bytes = (unsigned char*)(m->views + count);
+    size_t at = 0;
+    for (size_t i = 0; i < count; ++i) {
         memcpy(bytes + at, ranges[i].code, ranges[i].size);
         m->views[i].image = bytes + at;
         m->views[i].image_size = ranges[i].size;
@@ -1256,7 +1125,7 @@ static size_t lower_entry(const struct snx_recompiled* m, uint64_t address) {
    multiple leaders, and its entry need not be its start (for example after function splitting). */
 static int keep_invalidation_map(struct snx_recompiler* r, struct snx_recompiled* m,
                                  const SnxCodegen* codegen) {
-    size_t i, j, count = 0;
+    size_t count = 0;
     uint64_t prefix_end = 0;
     if (!m->hook_direct_calls || !codegen->function_count) return 0;
     if (!m->stale) {
@@ -1269,18 +1138,18 @@ static int keep_invalidation_map(struct snx_recompiler* r, struct snx_recompiled
         fail(r, "out of memory for guest code invalidation metadata");
         return -1;
     }
-    for (i = 0; i < m->entry_count; ++i) {
+    for (size_t i = 0; i < m->entry_count; ++i) {
         m->entry_aliases[i].code = (uintptr_t)m->entry_functions[i];
         m->entry_aliases[i].entry = i;
     }
     m->entry_alias_count = m->entry_count;
     qsort(m->entry_aliases, m->entry_alias_count, sizeof(*m->entry_aliases), compare_entry_alias);
-    for (i = 0; i < codegen->function_count; ++i) {
+    for (size_t i = 0; i < codegen->function_count; ++i) {
         const SnxFunction* function = &codegen->functions[i];
         uint64_t start = UINT64_MAX, last = 0;
         size_t first_entry = m->entry_count;
         if (!function->count) continue;
-        for (j = 0; j < function->count; ++j) {
+        for (size_t j = 0; j < function->count; ++j) {
             uint64_t address = snx_function_address(function, j);
             if (address < start) start = address;
             if (address > last) last = address;
@@ -1301,7 +1170,7 @@ static int keep_invalidation_map(struct snx_recompiler* r, struct snx_recompiled
        or tail-merged function). snx_recompiled_invalidate stops its scan at the first span starting past the changed
        range, so the spans must be ordered by their own start before prefix_max_end is made */
     qsort(m->compiled_functions, count, sizeof(*m->compiled_functions), compare_compiled_function);
-    for (i = 0; i < count; ++i) {
+    for (size_t i = 0; i < count; ++i) {
         if (m->compiled_functions[i].end > prefix_end) prefix_end = m->compiled_functions[i].end;
         m->compiled_functions[i].prefix_max_end = prefix_end;
     }
@@ -1311,13 +1180,12 @@ static int keep_invalidation_map(struct snx_recompiler* r, struct snx_recompiled
 
 /* the backend's half of snx_recompile_ranges and snx_recompile_from, for the functions codegen found; frees codegen */
 static struct snx_recompiled* recompile(struct snx_recompiler* r, struct snx_recompiled* m, SnxCodegen* codegen) {
-    int rc;
     m->functions = codegen->function_count;
     /* A module that keeps its code has a JIT, and its units go in one file of the cache folder that the modules and
        processes using the folder share. Without the memory for the path there is no file, and the JIT still works */
     if (r->cache && m->view_count) m->jit_cache_path = snx_path_join(r->cache, "library-jit.cache");
     m->hook_direct_calls = codegen->hook_direct_calls;
-    rc = recompile_llvm(r, m, codegen);
+    int rc = recompile_llvm(r, m, codegen);
     if (!rc) rc = keep_invalidation_map(r, m, codegen);
     snx_codegen_free(codegen);
     if (rc) {
@@ -1337,14 +1205,11 @@ struct snx_recompiled* snx_recompile(struct snx_recompiler* r, uint64_t address,
 
 struct snx_recompiled* snx_recompile_ranges(struct snx_recompiler* r, const struct snx_code_range* ranges,
                                             size_t range_count, const uint64_t* hints, size_t hint_count) {
-    struct snx_recompiled* m;
-    SnxCodeImage* views;
-    SnxCodegen codegen;
     uint64_t lo, hi;
     r->error[0] = 0;
-    views = images(r, ranges, range_count, 1, &lo, &hi);
+    SnxCodeImage* views = images(r, ranges, range_count, 1, &lo, &hi);
     if (!views) return NULL;
-    m = (struct snx_recompiled*)calloc(1, sizeof(*m));
+    struct snx_recompiled* m = (struct snx_recompiled*)calloc(1, sizeof(*m));
     if (!m) {
         fail(r, "out of memory");
         free(views);
@@ -1360,7 +1225,7 @@ struct snx_recompiled* snx_recompile_ranges(struct snx_recompiler* r, const stru
         free(m);
         return NULL;
     }
-    memset(&codegen, 0, sizeof(codegen));
+    SnxCodegen codegen = {0};
     if (snx_codegen_analyze(&codegen, views, range_count, hints, hint_count, !r->verbose, r->features)) {
         fail(r, "function discovery failed in 0x%llx-0x%llx", (unsigned long long)ranges[0].address,
              (unsigned long long)(ranges[range_count - 1].address + ranges[range_count - 1].size));
@@ -1379,13 +1244,10 @@ struct snx_recompiled* snx_recompile_ranges(struct snx_recompiler* r, const stru
 struct snx_recompiled* snx_recompile_from(struct snx_recompiler* r, const struct snx_code_range* ranges,
                                           size_t range_count, const uint64_t* hints, size_t hint_count, size_t limit,
                                           int (*skip)(void* context, uint64_t address), void* context) {
-    struct snx_recompiled* m;
-    SnxCodeImage* views;
     SnxCodegen codegen;
     uint64_t lo, hi;
-    size_t i;
     r->error[0] = 0;
-    views = images(r, ranges, range_count, 1, &lo, &hi);
+    SnxCodeImage* views = images(r, ranges, range_count, 1, &lo, &hi);
     if (!views) return NULL;
     if (snx_codegen_analyze_from(&codegen, views, range_count, hints, hint_count, limit, skip, context, r->features)) {
         fail(r, "no code at the starting addresses");
@@ -1397,7 +1259,7 @@ struct snx_recompiled* snx_recompile_from(struct snx_recompiler* r, const struct
     free(views);
     report(r, "from 0x%llx: %lu functions, %lu instructions\n", (unsigned long long)hints[0],
            (unsigned long)codegen.function_count, (unsigned long)codegen.instruction_count);
-    m = (struct snx_recompiled*)calloc(1, sizeof(*m));
+    struct snx_recompiled* m = (struct snx_recompiled*)calloc(1, sizeof(*m));
     if (!m) {
         fail(r, "out of memory");
         snx_codegen_free(&codegen);
@@ -1409,7 +1271,7 @@ struct snx_recompiled* snx_recompile_from(struct snx_recompiler* r, const struct
     /* the table covers what was found, not the ranges: they may be a whole program's code */
     m->code_lo = ~(uint64_t)0;
     m->code_hi = 0;
-    for (i = 0; i < codegen.function_count; ++i) {
+    for (size_t i = 0; i < codegen.function_count; ++i) {
         const SnxFunction* f = &codegen.functions[i];
         uint64_t first = snx_function_address(f, 0), last = snx_function_address(f, f->count - 1) + 4;
         if (first < m->code_lo) m->code_lo = first;
@@ -1469,12 +1331,11 @@ void snx_recompiled_set_fallback(struct snx_recompiled* m, GuestFn fallback) {
 
 size_t snx_recompiled_invalidate(struct snx_recompiled* m, uint64_t addr, uint64_t size,
                                  snx_recompiled_invalidate_callback callback, void* context) {
-    uint64_t end;
-    size_t lo = 0, hi, i, count = 0;
+    size_t lo = 0, count = 0;
     if (!m || !size || size > UINT64_MAX - addr) return 0;
-    end = addr + size;
+    uint64_t end = addr + size;
     /* prefix_max_end skips function intervals ending before addr */
-    hi = m->compiled_function_count;
+    size_t hi = m->compiled_function_count;
     while (lo < hi) {
         size_t mid = lo + (hi - lo) / 2;
         if (m->compiled_functions[mid].prefix_max_end <= addr)
@@ -1482,7 +1343,7 @@ size_t snx_recompiled_invalidate(struct snx_recompiled* m, uint64_t addr, uint64
         else
             hi = mid;
     }
-    for (i = lo; i < m->compiled_function_count && m->compiled_functions[i].start < end; ++i) {
+    for (size_t i = lo; i < m->compiled_function_count && m->compiled_functions[i].start < end; ++i) {
         const SnxCompiledFunction* function = &m->compiled_functions[i];
         size_t alias_lo = 0, alias_hi = m->entry_alias_count;
         uintptr_t code = (uintptr_t)function->code;
@@ -1546,20 +1407,17 @@ struct snx_recompiled32* snx_recompile32(struct snx_recompiler* r, uint64_t addr
 
 struct snx_recompiled32* snx_recompile32_ranges(struct snx_recompiler* r, const struct snx_code_range* ranges,
                                                 size_t range_count) {
-    struct snx_recompiled32* m;
-    SnxCodeImage* views;
     uint64_t lo, hi;
-    size_t i;
     char error[256];
     r->error[0] = 0;
-    views = images(r, ranges, range_count, 0, &lo, &hi);
+    SnxCodeImage* views = images(r, ranges, range_count, 0, &lo, &hi);
     if (!views) return NULL;
     free(views);
     if (hi > ((uint64_t)1 << 32)) {
         fail(r, "A32 code lives below 4 GiB");
         return NULL;
     }
-    m = (struct snx_recompiled32*)calloc(1, sizeof(*m));
+    struct snx_recompiled32* m = (struct snx_recompiled32*)calloc(1, sizeof(*m));
     if (!m) {
         fail(r, "out of memory");
         return NULL;
@@ -1570,7 +1428,7 @@ struct snx_recompiled32* snx_recompile32_ranges(struct snx_recompiler* r, const 
         free(m);
         return NULL;
     }
-    for (i = 0; i < range_count; ++i) {
+    for (size_t i = 0; i < range_count; ++i) {
         m->ranges[i].address = ranges[i].address;
         m->ranges[i].data = NULL; /* blocks decode from the CPU's memory (exec.c) */
         m->ranges[i].size = ranges[i].size;

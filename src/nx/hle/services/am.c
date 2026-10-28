@@ -10,14 +10,15 @@
    SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project (GPL-2.0-or-later) */
 /* appletOE and appletAE: the applet manager as the one application sees it. It is in focus from the start, with the
    focus message queued. Library applets answer what the game asked with the console's one user, the connected
-   players, or the host's text dialog: at once, but for the inline software keyboard, which lives until the game
-   finalizes it and answers its requests through the interactive channels */
+   players, or the player's text in the software keyboard's box over the game: at once, but for the software keyboard,
+   whose game waits for the box, and the inline one, which lives until the game finalizes it and answers its requests
+   through the interactive channels */
 #include <ctype.h>
 #include "nx/hle/services/services_int.h"
 #include "nx/hle/hle.h"
 #include "nx/hle/services/hid.h"
 #include "nx/hle/filesystem/fs.h"
-#include "nx/runtime/platform/unattended.h"
+#include "nx/runtime/platform/backend.h"
 
 #include "hle/services/am.swipc.inc"
 
@@ -55,6 +56,7 @@ const u64 g_user_id[2] = {SNX_USERS_FIRST_UID0, SNX_USERS_FIRST_UID1};
 
 void am_init(void) {
     pm_init(&g_host.am.lock);
+    pc_init(&g_host.am.kb_cv);
     g_hle.am.msg_event = owned_event("am:message");
     g_hle.am.sleep_lock_event = owned_event("am:sleep lock");
     g_hle.am.launchable_event = owned_event("am:library applet launchable");
@@ -830,9 +832,20 @@ static int nn_am_service_IApplicationFunctions_GetUnknownEvent210(SvcObj* self, 
 static int am_is_inline(const LibApplet* a) {
     return a->applet_id == AM_APPLET_SWKBD && (a->mode == 1 || a->mode == 3); /* PartialForeground(IndirectDisplay) */
 }
+/* the keyboard's box taken away unanswered when it is for a's inline keyboard, which the game took away (Disappear,
+   Finalize, the applet closed). Under the lock */
+static void am_kb_drop(const LibApplet* a) {
+    if (!g_host.am.kb_open || g_host.am.kb_inline != (u32)(a - g_hle.am.applets) + 1) return;
+    backend_keyboard_hide(g_host.am.kb_ticket);
+    g_host.am.kb_open = 0;
+    g_host.am.kb_inline = 0;
+}
 static void am_applet_destroy(SvcObj* o) {
     LibApplet* a = (LibApplet*)o->data;
     int i;
+    pm_lock(&g_host.am.lock);
+    am_kb_drop(a);
+    pm_unlock(&g_host.am.lock);
     for (i = 0; i < a->nin; i++) svcobj_unref(a->in[i]);
     for (i = 0; i < a->nout; i++) svcobj_unref(a->out[i]);
     kobj_unref(kobj_at(a->state_ev));
@@ -1007,71 +1020,128 @@ static u32 am_utf8_to_16(const char* in, u16* out, u32 max) {
     return n;
 }
 
-/* The text the software keyboard answers without the host's dialog: swkbd_text, else in a run nobody is at (seconds or
-   frames given) the game's own initial text, as a player accepting it would. A dialog there would wait for nobody and
-   outlive the run, holding whatever the run's parent left open. NULL: ask the dialog */
-static const char* kb_preset(const char* initial) {
-    if (g_settings.keyboard_text[0]) return g_settings.keyboard_text;
-    return unattended_active() ? initial : NULL;
+/* ------------------------------------------------------------ the software keyboard's box */
+/* The box over the game asks the player (backend_keyboard_show), and its answer comes on the main thread
+   (am_keyboard_answered); g_host.am says who the box shown last is for */
+/* a new box's ticket, for applet a's inline keyboard or (a NULL) a whole applet's waiting thread. Under the lock */
+static u32 am_kb_ticket(const LibApplet* a) {
+    if (!++g_host.am.kb_ticket) ++g_host.am.kb_ticket; /* 0 is none */
+    g_host.am.kb_open = 1;
+    g_host.am.kb_inline = a ? (u32)(a - g_hle.am.applets) + 1 : 0;
+    g_host.am.kb_obj = a ? a->obj : 0;
+    return g_host.am.kb_ticket;
+}
+/* a least above the most is the most, said */
+static void am_kb_least(OverlayKeyboard* k) {
+    if (k->min <= k->max) return;
+    WARN("am: the software keyboard asks for %u to %u characters, %u it is\n", k->min, k->max, k->max);
+    k->min = k->max;
+}
+/* the game's UTF-16 text of at most chars units at p (little-endian, stopping at a 0) into out, UTF-8 */
+static void am_kb_text(const u8* p, u32 chars, char* out, size_t size) {
+    u16 wide[256];
+    u32 i;
+    for (i = 0; i < chars && i < 256; i++) wide[i] = snx_ld_le16(p + 2 * i);
+    am_utf16_to_8(wide, i, out, size);
+}
+/* text answered in the player's place, from where (swkbd_text, the game's text, the user's nickname): cut to the
+   most, and cancelled short of the least, each said. 0 with the answer in out, 1 cancelled */
+static int am_kb_given(const char* where, const char* text, u32 min, u32 max, char* out, size_t size) {
+    u16 wide[OVERLAY_KB_UNITS];
+    u32 all = am_utf8_to_16(text, wide, OVERLAY_KB_UNITS), n = am_utf8_to_16(text, wide, max);
+    if (n < min) {
+        WARN("am: the software keyboard is cancelled: %s \"%s\" is %u character%s, the game asks for %u at least\n",
+             where, text, n, n == 1 ? "" : "s", min);
+        return 1;
+    }
+    am_utf16_to_8(wide, n, out, size);
+    if (n < all)
+        LOG("am: the software keyboard answers \"%s\" (%s \"%s\", cut to the game's %u character%s)\n", out, where,
+            text, max, max == 1 ? "" : "s");
+    return 0;
+}
+/* with no window for the box of what (headless): the game's text, else the nickname of the user playing, as
+   am_kb_given takes it. 0 with the answer in out, 1 cancelled */
+static int am_kb_unasked(const char* what, const OverlayKeyboard* k, char* out, size_t size) {
+    const char* where = k->text[0] ? "the game's text" : "the user's nickname";
+    const char* text = k->text[0] ? k->text : snx_users_selected()->nickname;
+    LOG("am: no window to show the %s's box in: it answers %s \"%s\"\n", what, where, text);
+    return am_kb_given(where, text, k->min, k->max, out, size);
+}
+/* the box for k, its answer waited for on the game's thread, as the console's applet holds the game until it is done:
+   a game pause counts the thread as stopped, and a save state's load makes the request again. 0 with the text in
+   out, 1 cancelled, -1 when no box can show (no window) */
+static int am_kb_wait(OverlayKeyboard* k, char* out, size_t size) {
+    int r;
+    pm_lock(&g_host.am.lock);
+    k->ticket = am_kb_ticket(NULL);
+    pm_unlock(&g_host.am.lock);
+    if (backend_keyboard_show(k)) return -1;
+    LOG("am: the software keyboard asks in its box, %u to %u characters\n", k->min, k->max);
+    pm_lock(&g_host.am.lock);
+    while (g_host.am.kb_answered != k->ticket && g_host.am.kb_ticket == k->ticket)
+        kthread_wait(&g_host.am.kb_cv, &g_host.am.lock, -1);
+    if (g_host.am.kb_answered != k->ticket) {
+        WARN("am: another software keyboard took the box: this one is cancelled\n");
+        r = 1;
+    } else {
+        r = g_host.am.kb_cancelled;
+        if (!r) snprintf(out, size, "%s", g_host.am.kb_text);
+    }
+    pm_unlock(&g_host.am.lock);
+    return r;
 }
 
-/* the software keyboard as a whole applet: the host's text dialog with the game's initial text, or kb_preset's. KeyboardConfig (SwkbdConfigCommon, the second storage) gives the
-   length limits, whether the answer is UTF-8, and where the initial text is in the work buffer (the third). The
-   dialog is asked again until the text is long enough, or cancelled */
+/* the software keyboard as a whole applet: swkbd_text's answer (--swkbd_text=, for scripted runs), else the box's
+   (am_kb_unasked's without a window). KeyboardConfig (SwkbdConfigCommon, the second storage, as Eden's
+   applet_software_keyboard_types.h lays it out) gives the texts, the kind, the length limits, whether the answer is
+   UTF-8, and where the initial text is in the work buffer (the third) */
 #define AM_SWKBD_OUT   0x7d8                       /* SwkbdResult and the 0x7d4 byte string buffer */
 #define AM_SWKBD_UNITS ((AM_SWKBD_OUT - 4) / 2 - 1) /* the UTF-16 text that fits with its terminator */
 static SvcObj* am_swkbd(LibApplet* a) {
-    char text[SWKBD_UTF8_SIZE], initial[SWKBD_UTF8_SIZE];
+    OverlayKeyboard k = {0};
+    char text[OVERLAY_KB_TEXT];
     u16 wide[AM_SWKBD_UNITS + 1];
-    u32 max = AM_SWKBD_UNITS, min = 0, off = 0, len = 0, n = 0, v;
+    u32 off = 0, len = 0, n = 0, v;
     int utf8 = 0, r;
+    const char* env = g_settings.keyboard_text[0] ? g_settings.keyboard_text : NULL;
     SvcObj* out;
     u8* d;
-    initial[0] = 0;
+    k.max = AM_SWKBD_UNITS;
     if (a->nin > 1) {
         u64 size = ((StorageData*)a->in[1]->data)->size;
         const u8* cfg = am_storage_bytes(a->in[1]);
         if (size >= 0x3b4) {
+            k.numbers = snx_ld_le32(cfg) == 1; /* SwkbdType NumberPad */
+            am_kb_text(cfg + 0x4, 8, k.ok, sizeof k.ok);
+            am_kb_text(cfg + 0x24, 64, k.header, sizeof k.header);
+            am_kb_text(cfg + 0xa6, 128, k.sub, sizeof k.sub);
+            am_kb_text(cfg + 0x1a8, 256, k.guide, sizeof k.guide);
             v = snx_ld_le32(cfg + 0x3ac); /* max_text_length: 0 for no limit */
-            if (v && v < max) max = v;
-            min = snx_ld_le32(cfg + 0x3b0); /* min_text_length */
+            if (v && v < k.max) k.max = v;
+            k.min = snx_ld_le32(cfg + 0x3b0); /* min_text_length */
         }
         if (size >= 0x3d4) {
+            k.password = snx_ld_le32(cfg + 0x3b4) != 0; /* password_mode */
             utf8 = cfg[0x3bd];
             off = snx_ld_le32(cfg + 0x3c0); /* initial_string_offset and _length, in the work buffer */
             len = snx_ld_le32(cfg + 0x3c4);
         }
     }
-    if (min > max) {
-        WARN("am: the software keyboard asks for %u to %u characters, %u it is\n", min, max, max);
-        min = max;
-    }
+    am_kb_least(&k);
     if (len && a->nin > 2) {
         u64 size = ((StorageData*)a->in[2]->data)->size;
         if (off < size && len <= (size - off) / 2 && len <= AM_SWKBD_UNITS) {
             memcpy(wide, am_storage_bytes(a->in[2]) + off, (size_t)len * 2);
             snx_le16_array(wide, len);
-            am_utf16_to_8(wide, len, initial, sizeof initial);
+            am_utf16_to_8(wide, len, k.text, sizeof k.text);
         }
     }
-    const char* preset = kb_preset(initial);
-    if (preset) {
-        n = am_utf8_to_16(preset, wide, max);
-        r = n < min; /* too short: cancelled, as a player can't send it */
-    } else
-        for (;;) {
-            r = plat_text_input(text, sizeof text, initial);
-            if (r < 0) {
-                WARN_LIMIT(1, "am: no text dialog on this host (zenity or kdialog), the software keyboard is "
-                              "cancelled\n");
-                r = 1;
-            }
-            if (r) break;
-            n = am_utf8_to_16(text, wide, max);
-            if (n >= min) break;
-            LOG("am: the software keyboard needs %u characters or more, it asks again\n", min);
-            am_utf16_to_8(wide, n, initial, sizeof initial);
-        }
+    if (env)
+        r = am_kb_given("swkbd_text", env, k.min, k.max, text, sizeof text);
+    else if ((r = am_kb_wait(&k, text, sizeof text)) < 0)
+        r = am_kb_unasked("software keyboard", &k, text, sizeof text);
+    if (!r) n = am_utf8_to_16(text, wide, k.max);
     out = am_storage_new(AM_SWKBD_OUT, NULL);
     d = am_storage_bytes(out);
     am_put32(d, r ? 1 : 0); /* SwkbdResult: Ok, Cancel */
@@ -1126,24 +1196,9 @@ static void kb_text_reply(LibApplet* a, int decided) {
         am_put32(d + text + 12, (u32)a->kb_cursor);
     }
 }
-/* Appear: shown, then the host's dialog decides at once, and the keyboard hides again */
-static void kb_appear(LibApplet* a) {
-    char text[SWKBD_UTF8_SIZE], initial[SWKBD_UTF8_SIZE];
-    int r;
-    kb_show(a, SWKBD_SHOWN);
-    am_utf16_to_8(a->kb_text, a->kb_len, initial, sizeof initial);
-    const char* preset = kb_preset(initial);
-    if (preset) {
-        snprintf(text, sizeof text, "%s", preset);
-        r = 0;
-    } else
-        r = plat_text_input(text, sizeof text, initial);
-    if (r < 0) {
-        LOG("am: no text dialog on this host, the inline keyboard answers \"%s\"\n", initial);
-        memcpy(text, initial, sizeof text);
-        r = 0;
-    }
-    if (r)
+/* the inline keyboard's answer: the text given (NULL: cancelled), its replies, and the keyboard hidden. Under the lock */
+static void kb_decide(LibApplet* a, const char* text) {
+    if (!text)
         kb_reply(a, SWKBD_CANCEL, 8);
     else {
         a->kb_len = am_utf8_to_16(text, a->kb_text, a->kb_max);
@@ -1152,12 +1207,41 @@ static void kb_appear(LibApplet* a) {
         kb_text_reply(a, 1);
     }
     kb_show(a, SWKBD_HIDDEN);
+    LOG("am: the inline keyboard %s with %u UTF-16 code units\n", text ? "decided" : "cancelled", text ? a->kb_len : 0);
+}
+/* Appear, its SwkbdAppearArg at arg (the kind, the OK's label, the limits): shown, and answered by swkbd_text at once,
+   by the player in the box over the game (kb_decide once am_keyboard_answered has it, the game going on meanwhile),
+   or without a window as am_kb_unasked answers. Under the lock */
+static void kb_appear(LibApplet* a, const u8* arg) {
+    OverlayKeyboard k = {0};
+    char text[OVERLAY_KB_TEXT];
+    const char* env = g_settings.keyboard_text[0] ? g_settings.keyboard_text : NULL;
+    u32 max = snx_ld_le32(arg + 0x20); /* max_text_length */
+    kb_show(a, SWKBD_SHOWN);
+    a->kb_max = max && max < SWKBD_TEXT_CHARS - 1 ? max : SWKBD_TEXT_CHARS - 1;
+    k.max = a->kb_max;
+    k.min = snx_ld_le32(arg + 0x24); /* min_text_length */
+    am_kb_least(&k);
+    k.numbers = snx_ld_le32(arg) == 1; /* SwkbdType NumberPad */
+    am_kb_text(arg + 0x4, 8, k.ok, sizeof k.ok);
+    am_utf16_to_8(a->kb_text, a->kb_len, k.text, sizeof k.text);
+    if (env) {
+        kb_decide(a, am_kb_given("swkbd_text", env, k.min, k.max, text, sizeof text) ? NULL : text);
+        return;
+    }
+    k.ticket = am_kb_ticket(a);
+    if (!backend_keyboard_show(&k)) {
+        LOG("am: the inline keyboard asks in its box, %u to %u characters\n", k.min, k.max);
+        return;
+    }
+    g_host.am.kb_open = 0;
+    kb_decide(a, am_kb_unasked("inline keyboard", &k, text, sizeof text) ? NULL : text);
 }
 /* Calc: the SwkbdCalcArg after the command word, either layout */
 static void kb_calc(LibApplet* a, const u8* req, u64 size) {
     const u8* arg = req + 4;
     u64 flags;
-    u32 appear, cursor, text, max, i;
+    u32 appear, cursor, text, i;
     if (size < 4 + 0x18) return;
     flags = snx_ld_le64(arg + 8);
     if (size >= 4 + SWKBD_CALC_NEW_SIZE) {
@@ -1185,12 +1269,12 @@ static void kb_calc(LibApplet* a, const u8* req, u64 size) {
     }
     if (!(flags & SWKBD_SET_INIT) && (flags & (SWKBD_SET_TEXT | SWKBD_SET_CURSOR)) && a->kb_state != SWKBD_NOT_INITIALIZED)
         kb_text_reply(a, 0);
-    if (a->kb_state == SWKBD_HIDDEN && (flags & SWKBD_APPEAR)) {
-        max = snx_ld_le32(arg + appear + 0x20); /* max_text_length */
-        a->kb_max = max && max < SWKBD_TEXT_CHARS - 1 ? max : SWKBD_TEXT_CHARS - 1;
-        kb_appear(a);
-    } else if (a->kb_state == SWKBD_SHOWN && (flags & SWKBD_DISAPPEAR))
+    if (a->kb_state == SWKBD_HIDDEN && (flags & SWKBD_APPEAR))
+        kb_appear(a, arg + appear);
+    else if (a->kb_state == SWKBD_SHOWN && (flags & SWKBD_DISAPPEAR)) {
+        am_kb_drop(a);
         kb_show(a, SWKBD_HIDDEN);
+    }
 }
 static int nn_am_service_ILibraryAppletAccessor_PushInteractiveInData(SvcObj* self, SvcObj* storage) {
     LibApplet* a = (LibApplet*)self->data;
@@ -1205,6 +1289,7 @@ static int nn_am_service_ILibraryAppletAccessor_PushInteractiveInData(SvcObj* se
     pm_lock(&g_host.am.lock);
     switch (cmd) {
     case SWKBD_REQ_FINALIZE:
+        am_kb_drop(a);
         a->kb_state = SWKBD_NOT_INITIALIZED;
         am_applet_finish(a);
         break;
@@ -1215,6 +1300,48 @@ static int nn_am_service_ILibraryAppletAccessor_PushInteractiveInData(SvcObj* se
     }
     pm_unlock(&g_host.am.lock);
     R_SUCCEED();
+}
+void am_keyboard_answered(u32 ticket, int cancelled, const char* text) {
+    pm_lock(&g_host.am.lock);
+    if (!g_host.am.kb_open || ticket != g_host.am.kb_ticket)
+        LOG_LIMIT(4,
+                  "am: the software keyboard's box %u answered after the game took it away: the game has no answer\n",
+                  ticket);
+    else if (g_host.am.kb_inline) {
+        LibApplet* a = &g_hle.am.applets[g_host.am.kb_inline - 1];
+        if (a->obj == g_host.am.kb_obj && a->kb_state == SWKBD_SHOWN) kb_decide(a, cancelled ? NULL : text);
+        g_host.am.kb_open = 0;
+        g_host.am.kb_inline = 0;
+    } else {
+        g_host.am.kb_open = 0;
+        g_host.am.kb_answered = ticket;
+        g_host.am.kb_cancelled = cancelled;
+        snprintf(g_host.am.kb_text, sizeof g_host.am.kb_text, "%s", cancelled ? "" : text);
+        pc_broadcast(&g_host.am.kb_cv);
+    }
+    pm_unlock(&g_host.am.lock);
+}
+void am_state_loaded(void) {
+    int i;
+    pm_lock(&g_host.am.lock);
+    if (g_host.am.kb_open) backend_keyboard_hide(g_host.am.kb_ticket);
+    g_host.am.kb_open = 0;
+    g_host.am.kb_inline = 0;
+    for (i = 0; i < AM_APPLETS; i++) { /* its least isn't in the state: the box gives any line */
+        LibApplet* a = &g_hle.am.applets[i];
+        OverlayKeyboard k = {0};
+        char text[OVERLAY_KB_TEXT];
+        if (!a->obj || !am_is_inline(a) || a->kb_state != SWKBD_SHOWN) continue;
+        k.max = a->kb_max;
+        am_utf16_to_8(a->kb_text, a->kb_len, k.text, sizeof k.text);
+        k.ticket = am_kb_ticket(a);
+        if (backend_keyboard_show(&k)) {
+            g_host.am.kb_open = 0;
+            kb_decide(a, am_kb_unasked("inline keyboard", &k, text, sizeof text) ? NULL : text);
+        }
+        break;
+    }
+    pm_unlock(&g_host.am.lock);
 }
 
 /* the Mii editor (nn::mii::AppletInput, 0x100 bytes: version, mode, then a v4's special key code and CharInfo), with
@@ -1393,7 +1520,6 @@ static int nn_am_service_ILibraryAppletAccessor_PopOutData(SvcObj* self, SvcObj*
     int popped;
     pm_lock(&g_host.am.lock);
     popped = a->out_popped || am_is_inline(a);
-    a->out_popped = 1;
     pm_unlock(&g_host.am.lock);
     R_UNLESS(!popped, AM_NO_DATA);
     switch (a->applet_id) {
@@ -1448,6 +1574,10 @@ static int nn_am_service_ILibraryAppletAccessor_PopOutData(SvcObj* self, SvcObj*
         *storage = am_storage_new(0x10, NULL);
         break;
     }
+    /* given once, from here only: the keyboard's thread waits above, and a save state taken meanwhile pops again */
+    pm_lock(&g_host.am.lock);
+    a->out_popped = 1;
+    pm_unlock(&g_host.am.lock);
     ev_clear(a->out_ev);
     R_SUCCEED();
 }

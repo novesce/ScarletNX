@@ -21,9 +21,8 @@ static int fail(char* error, size_t error_size, const char* what) {
 
 int agb_cartridge_load(AgbCartridge* cartridge, const void* image, size_t size, char* error, size_t error_size) {
     const uint8_t* bytes = (const uint8_t*)image;
-    uint8_t* copy;
     if (error_size) error[0] = 0;
-    memset(cartridge, 0, sizeof(*cartridge));
+    *cartridge = (AgbCartridge){0};
     if (size < AGB_ROM_MIN) {
         snprintf(error, error_size, "ROM image is %zu bytes: too small for a GBA header", size);
         return -1;
@@ -40,7 +39,7 @@ int agb_cartridge_load(AgbCartridge* cartridge, const void* image, size_t size, 
     if (bytes[0xB2] != 0x96) return fail(error, error_size, "ROM header is missing the fixed 0x96 byte");
     if (header_checksum(bytes) != bytes[0xBD])
         return fail(error, error_size, "ROM header checksum does not match its title block");
-    copy = (uint8_t*)malloc(size);
+    uint8_t* copy = (uint8_t*)malloc(size);
     if (!copy) return fail(error, error_size, "out of memory for the ROM image");
     memcpy(copy, image, size);
     cartridge->data = copy;
@@ -59,5 +58,5 @@ int agb_cartridge_load(AgbCartridge* cartridge, const void* image, size_t size, 
 
 void agb_cartridge_unload(AgbCartridge* cartridge) {
     free(cartridge->data);
-    memset(cartridge, 0, sizeof(*cartridge));
+    *cartridge = (AgbCartridge){0};
 }

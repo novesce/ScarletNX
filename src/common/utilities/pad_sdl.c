@@ -18,8 +18,7 @@ typedef char snx_pad_labels_sdl[SDL_GAMEPAD_BUTTON_LABEL_TRIANGLE == SNX_PAD_LAB
                                     : -1];
 
 int snx_pad_of_button(int button) {
-    int c;
-    for (c = 0; c < SNX_PAD_CONTROLS; ++c)
+    for (int c = 0; c < SNX_PAD_CONTROLS; ++c)
         if (BUTTONS[c] != SDL_GAMEPAD_BUTTON_INVALID && (int)BUTTONS[c] == button) return c;
     return -1;
 }
@@ -30,8 +29,7 @@ int snx_pad_held(SDL_Gamepad* g, int control) {
     return control >= 0 && control < SNX_PAD_CONTROLS && SDL_GetGamepadButton(g, BUTTONS[control]);
 }
 void snx_pad_labels(SDL_Gamepad* g, int labels[4]) {
-    int c;
-    for (c = SNX_PAD_SOUTH; c <= SNX_PAD_NORTH; ++c) labels[c] = (int)SDL_GetGamepadButtonLabel(g, BUTTONS[c]);
+    for (int c = SNX_PAD_SOUTH; c <= SNX_PAD_NORTH; ++c) labels[c] = (int)SDL_GetGamepadButtonLabel(g, BUTTONS[c]);
 }
 int snx_pad_symmetric(SDL_Gamepad* g) {
     switch (SDL_GetGamepadType(g)) {
@@ -43,14 +41,13 @@ int snx_pad_symmetric(SDL_Gamepad* g) {
 }
 int snx_pad_slot(const char* guid, int alike, const char* const* players, int count, unsigned taken) {
     char want[48];
-    int i;
     if (alike)
         snprintf(want, sizeof want, "%s/%d", guid, alike + 1);
     else
         snprintf(want, sizeof want, "%s", guid);
-    for (i = 0; i < count; i++)
+    for (int i = 0; i < count; i++)
         if (!(taken >> i & 1u) && players[i] && !SDL_strcasecmp(players[i], want)) return i;
-    for (i = 0; i < count; i++)
+    for (int i = 0; i < count; i++)
         if (!(taken >> i & 1u) && (!players[i] || !players[i][0])) return i;
     return -1;
 }

@@ -20,14 +20,14 @@ static V reg_pointer(SnxIr* ir, unsigned n) { return ir_cpu(ir, ir_off_v(n)); }
 /* helpers/crypto.c's v_aes(d, k, dec) and v_aesmc(d, s, inv), on the registers in the CPU structure */
 static void aes_helper(SnxIr* ir, const char* name, unsigned d, unsigned s, unsigned flag) {
     LLVMTypeRef params[3];
-    V args[3], fn;
+    V args[3];
     params[0] = ir->t_ptr;
     params[1] = ir->t_ptr;
     params[2] = ir->t_i32;
     args[0] = reg_pointer(ir, d);
     args[1] = reg_pointer(ir, s);
     args[2] = ir_i32(ir, flag);
-    fn = ir_extern(ir, name, ir->t_void, params, 3);
+    V fn = ir_extern(ir, name, ir->t_void, params, 3);
     ir_argmem(ir, fn);
     ir_state_invalidate(ir);
     LLVMBuildCall2(B, LLVMFunctionType(ir->t_void, params, 3, 0), fn, args, 3, "");
@@ -102,14 +102,14 @@ static void pmull64(SnxIr* ir, const SnxA64Args* a) {
         ir_vec_write(ir, (unsigned)a->rd, ir_intrinsic(ir, "llvm.x86.pclmulqdq", NULL, args, 3));
     } else {
         LLVMTypeRef params[4];
-        V args[4], fn;
+        V args[4];
         params[0] = params[1] = params[2] = ir->t_ptr;
         params[3] = ir->t_i32;
         args[0] = reg_pointer(ir, (unsigned)a->rd);
         args[1] = reg_pointer(ir, (unsigned)a->rn);
         args[2] = reg_pointer(ir, (unsigned)a->rm);
         args[3] = ir_i32(ir, hi);
-        fn = ir_extern(ir, "v_pmull", ir->t_void, params, 4);
+        V fn = ir_extern(ir, "v_pmull", ir->t_void, params, 4);
         ir_argmem(ir, fn);
         ir_state_invalidate(ir);
         LLVMBuildCall2(B, LLVMFunctionType(ir->t_void, params, 4, 0), fn, args, 4, "");
@@ -127,9 +127,9 @@ static V rotate_right(SnxIr* ir, V x, unsigned s) {
 /* SM3SS1: ROR(ROR(Vn.S[3], 20) + Vm.S[3] + Va.S[3], 25) into Vd.S[3], the rest zeroed */
 static void sm3ss1(SnxIr* ir, const SnxA64Args* a) {
     V n = ir_vec_read(ir, (unsigned)a->rn, 2, 3, 1), m = ir_vec_read(ir, (unsigned)a->rm, 2, 3, 1);
-    V x = ir_vec_read(ir, (unsigned)a->ra, 2, 3, 1), r;
+    V x = ir_vec_read(ir, (unsigned)a->ra, 2, 3, 1);
     unsigned mask[4] = {1, 1, 1, 0};
-    r = rotate_right(ir, LLVMBuildAdd(B, LLVMBuildAdd(B, rotate_right(ir, n, 20), m, ""), x, ""), 25);
+    V r = rotate_right(ir, LLVMBuildAdd(B, LLVMBuildAdd(B, rotate_right(ir, n, 20), m, ""), x, ""), 25);
     ir_vec_write(ir, (unsigned)a->rd, ir_vec_shuffle(ir, r, LLVMConstNull(LLVMTypeOf(r)), mask, 4));
 }
 

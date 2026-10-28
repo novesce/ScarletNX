@@ -255,9 +255,8 @@ const uint16_t gui_codepage[256] = {
 };
 
 unsigned char gui_glyph(uint32_t codepoint) {
-    int i;
     if (codepoint < 128) return (unsigned char)codepoint;
-    for (i = 1; i < 256; ++i)
+    for (int i = 1; i < 256; ++i)
         if (gui_codepage[i] == codepoint) return (unsigned char)i;
     return '?';
 }

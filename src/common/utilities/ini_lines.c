@@ -4,9 +4,8 @@
 #include <string.h>
 
 static char* trim(char* s) {
-    size_t n;
     while (*s == ' ' || *s == '\t') ++s;
-    n = strlen(s);
+    size_t n = strlen(s);
     while (n && (s[n - 1] == ' ' || s[n - 1] == '\t' || s[n - 1] == '\r')) s[--n] = 0;
     return s;
 }
@@ -19,7 +18,6 @@ void snx_ini_start(SnxIni* ini, char* text) {
 int snx_ini_next(SnxIni* ini, char** key, char** value) {
     while (ini->at) {
         char* s = ini->at;
-        char* equals;
         ini->at = strchr(s, '\n');
         if (ini->at) *ini->at++ = 0;
         s = trim(s);
@@ -32,7 +30,7 @@ int snx_ini_next(SnxIni* ini, char** key, char** value) {
             ini->section[n] = 0;
             continue;
         }
-        equals = strchr(s, '=');
+        char* equals = strchr(s, '=');
         if (!equals) continue;
         *equals = 0;
         *key = trim(s);

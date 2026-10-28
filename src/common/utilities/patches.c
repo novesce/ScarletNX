@@ -4,7 +4,8 @@
    record it cannot use and goes on, this refuses the patch and says which */
 #include "common/utilities/patches.h"
 #include "common/utilities/mods.h"
-#include <ctype.h>
+#include "common/utilities/ascii.h"
+#include "common/utilities/bits.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,38 +18,25 @@ static int fail(char* error, size_t size, const char* fmt, ...) {
     va_end(ap);
     return 1;
 }
-static int by_name(const void* a, const void* b) { return strcmp(*(char* const*)a, *(char* const*)b); }
-/* 1 when name ends with ending, in any case */
-static int ends_with(const char* name, const char* ending) {
-    size_t n = strlen(name), e = strlen(ending), i;
-    if (n < e) return 0;
-    for (i = 0; i < e; ++i)
-        if (tolower((unsigned char)name[n - e + i]) != tolower((unsigned char)ending[i])) return 0;
-    return 1;
-}
 static const char* leaf(const char* path) {
     const char* at = path + strlen(path);
-    while (at > path && at[-1] != '/' && at[-1] != '\\') --at;
+    while (at > path && !snx_is_any_separator(at[-1])) --at;
     return at;
-}
-static int nibble(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    c = (char)tolower((unsigned char)c);
-    return c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
 }
 
 size_t snx_mods_patches(const char* folder, const char* off, char*** paths) {
     char** exefs;
-    size_t count = snx_mods_played(folder, off, "exefs", &exefs), n = 0, i, j;
+    size_t count = snx_mods_played(folder, off, "exefs", &exefs), n = 0;
     *paths = NULL;
-    for (i = 0; i < count; ++i) {
+    for (size_t i = 0; i < count; ++i) {
         char** files = NULL;
         size_t found = 0;
         if (snx_list_dir(exefs[i], &files, &found)) continue;
-        if (found) qsort(files, found, sizeof *files, by_name);
-        for (j = 0; j < found; ++j) {
+        if (found) qsort(files, found, sizeof *files, snx_compare_strings);
+        for (size_t j = 0; j < found; ++j) {
             char* path = snx_path_join(exefs[i], files[j]);
-            if (files[j][0] == '.' || !(ends_with(files[j], ".ips") || ends_with(files[j], ".pchtxt")) ||
+            if (files[j][0] == '.' ||
+                !(snx_ends_with_nocase(files[j], ".ips") || snx_ends_with_nocase(files[j], ".pchtxt")) ||
                 !snx_is_file(path)) {
                 free(path);
                 continue;
@@ -81,36 +69,33 @@ static int place(unsigned char* image, size_t size, unsigned long long at, const
     return 0;
 }
 static unsigned big_endian(const unsigned char* p, unsigned n) {
-    unsigned v = 0, i;
-    for (i = 0; i < n; ++i) v = v << 8 | p[i];
+    unsigned v = 0;
+    for (unsigned i = 0; i < n; ++i) v = v << 8 | p[i];
     return v;
 }
 
 int snx_ips_apply(const unsigned char* ips, size_t ips_size, unsigned char* image, size_t size, char* error,
                   size_t error_size) {
-    unsigned wide, w;
+    unsigned wide;
     size_t at = 5, record;
-    const char *kind, *close;
     if (ips_size >= 5 && !memcmp(ips, "PATCH", 5))
         wide = 0;
     else if (ips_size >= 5 && !memcmp(ips, "IPS32", 5))
         wide = 1;
     else
         return fail(error, error_size, "no IPS patch: it starts with neither PATCH nor IPS32");
-    w = wide ? 4 : 3;
-    kind = wide ? "IPS32" : "IPS";
-    close = wide ? "EEOF" : "EOF";
+    unsigned w = wide ? 4 : 3;
+    const char* kind = wide ? "IPS32" : "IPS";
+    const char* close = wide ? "EEOF" : "EOF";
     for (record = 1;; ++record) {
-        unsigned long long offset;
-        unsigned n;
         if (at + w > ips_size)
             return fail(error, error_size, "the %s patch ends at its byte %zu, before the %s that closes it", kind,
                         ips_size, close);
         if (!memcmp(ips + at, close, w)) return 0;
-        offset = big_endian(ips + at, w);
+        unsigned long long offset = big_endian(ips + at, w);
         at += w;
         if (at + 2 > ips_size) break;
-        n = big_endian(ips + at, 2);
+        unsigned n = big_endian(ips + at, 2);
         at += 2;
         if (!n) { /* a run of one byte */
             if (at + 3 > ips_size) break;
@@ -154,9 +139,8 @@ typedef struct {
 } Text;
 
 static void text_free(Text* t) {
-    size_t i, j;
-    for (i = 0; i < t->count; ++i) {
-        for (j = 0; j < t->patches[i].count; ++j) free(t->patches[i].records[j].data);
+    for (size_t i = 0; i < t->count; ++i) {
+        for (size_t j = 0; j < t->patches[i].count; ++j) free(t->patches[i].records[j].data);
         free(t->patches[i].records);
     }
     free(t->patches);
@@ -164,18 +148,18 @@ static void text_free(Text* t) {
 /* the next line of text from *at, with its spaces around it and its comment (from a / or a # outside quotes) taken
    out, into out (a buffer of the line's size and one); its number from the line feeds before it. 0 at the end */
 static int next_line(const char* text, size_t size, size_t* at, int* number, char** out) {
-    size_t start, end, p, last;
+    size_t end, p, last;
     char quote = 0;
     if (*at >= size) return 0;
-    start = *at;
+    size_t start = *at;
     for (end = start; end < size && text[end] != '\n' && text[end] != '\r'; ++end) continue;
     *at = end + 1;
     if (end < size && text[end] == '\r' && end + 1 < size && text[end + 1] == '\n') ++*at;
     ++*number;
-    for (p = start; p < end && isspace((unsigned char)text[p]); ++p) continue;
+    for (p = start; p < end && snx_is_space(text[p]); ++p) continue;
     start = last = p;
     while (p < end) {
-        if (isspace((unsigned char)text[p]))
+        if (snx_is_space(text[p]))
             ++p;
         else if (!quote && (text[p] == '/' || text[p] == '#'))
             break;
@@ -194,11 +178,11 @@ static int next_line(const char* text, size_t size, size_t* at, int* number, cha
 }
 /* @nsobid-'s hex, up to 64 digits, zeros after it: 0, else nonzero */
 static int build_id_of(const char* hex, unsigned char id[32]) {
-    size_t n = strlen(hex), i;
+    size_t n = strlen(hex);
     if (!n || n > 64) return 1;
     memset(id, 0, 32);
-    for (i = 0; i < n; ++i) {
-        int v = nibble(hex[i]);
+    for (size_t i = 0; i < n; ++i) {
+        int v = snx_hex_value(hex[i]);
         if (v < 0) return 1;
         id[i / 2] |= (unsigned char)(i % 2 ? v : v << 4);
     }
@@ -232,11 +216,11 @@ static int string_value(const char* s, unsigned char** data, size_t* n) {
 }
 /* hex digits' bytes, in the order written (as Eden writes them, @little or @big): 0, else nonzero */
 static int hex_value(const char* s, unsigned char** data, size_t* n) {
-    size_t len = strlen(s), i;
+    size_t len = strlen(s);
     if (!len || len % 2) return 1;
     *data = (unsigned char*)snx_alloc(len / 2);
-    for (i = 0; i < len; i += 2) {
-        int hi = nibble(s[i]), lo = nibble(s[i + 1]);
+    for (size_t i = 0; i < len; i += 2) {
+        int hi = snx_hex_value(s[i]), lo = snx_hex_value(s[i + 1]);
         if (hi < 0 || lo < 0) {
             free(*data);
             return 1;
@@ -250,16 +234,14 @@ static int hex_value(const char* s, unsigned char** data, size_t* n) {
 static int take_line(Text* t, const char* line, int number, char* error, size_t error_size) {
     size_t len = strlen(line);
     unsigned long long offset;
-    long long at;
     char* end;
     unsigned char* data = NULL;
     size_t n = 0, i;
-    const char* quote;
     Patch* patch;
     if (line[0] == '@' && len > 2) {
         static const char directives[] =
             "the directives are @nsobid-, @enabled, @disabled, @flag, @little, @big and @stop";
-        switch (tolower((unsigned char)line[1])) {
+        switch (snx_to_lower(line[1])) {
             case 'n':
                 if (len <= 8 || build_id_of(line + 8, t->build_id))
                     return fail(error, error_size, "line %d: %s: the build ID is up to 64 hex digits after @nsobid-",
@@ -270,8 +252,8 @@ static int take_line(Text* t, const char* line, int number, char* error, size_t 
             case 'e':
             case 'd':
                 t->patches = (Patch*)snx_realloc(t->patches, (t->count + 1) * sizeof *t->patches);
-                memset(&t->patches[t->count], 0, sizeof *t->patches);
-                t->patches[t->count++].enabled = tolower((unsigned char)line[1]) == 'e';
+                t->patches[t->count] = (Patch){0};
+                t->patches[t->count++].enabled = snx_to_lower(line[1]) == 'e';
                 return 0;
             case 'f':
                 if (strncmp(line, "@flag ", 6))
@@ -293,14 +275,14 @@ static int take_line(Text* t, const char* line, int number, char* error, size_t 
     if (!t->count)
         return fail(error, error_size, "line %d: %s: a value outside any patch, with no @enabled or @disabled above it",
                     number, line);
-    if (nibble(line[0]) < 0)
+    if (snx_hex_value(line[0]) < 0)
         return fail(error, error_size, "line %d: %s: a value line starts with its offset in hex", number, line);
     offset = strtoull(line, &end, 16);
-    at = (long long)offset + t->shift;
+    long long at = (long long)offset + t->shift;
     if (offset > 0x7fffffffffffffffULL || at < 0)
         return fail(error, error_size, "line %d: %s: offset 0x%llX with offset_shift %lld is below 0", number, line,
                     offset, t->shift);
-    quote = strpbrk(end, "\"'");
+    const char* quote = strpbrk(end, "\"'");
     if (quote) {
         if (string_value(quote, &data, &n))
             return fail(error, error_size, "line %d: %s: a string with no closing %c", number, line, *quote);
@@ -330,7 +312,7 @@ static int read_text(const char* text, size_t size, Text* t, char* error, size_t
     size_t at = 0;
     int number = 0, rc = 0;
     char* line;
-    memset(t, 0, sizeof *t);
+    *t = (Text){0};
     while (!rc && next_line(text, size, &at, &number, &line)) {
         if (line[0]) rc = take_line(t, line, number, error, error_size);
         free(line);
@@ -357,10 +339,9 @@ int snx_pchtxt_build_id(const char* text, size_t text_size, unsigned char build_
 int snx_pchtxt_apply(const char* text, size_t text_size, unsigned char* image, size_t size, char* error,
                      size_t error_size) {
     Text t;
-    size_t i, j;
     int rc = read_text(text, text_size, &t, error, error_size);
-    for (i = 0; !rc && i < t.count; ++i)
-        for (j = 0; !rc && t.patches[i].enabled && j < t.patches[i].count; ++j) {
+    for (size_t i = 0; !rc && i < t.count; ++i)
+        for (size_t j = 0; !rc && t.patches[i].enabled && j < t.patches[i].count; ++j) {
             const Record* r = &t.patches[i].records[j];
             if (place(image, size, r->at, r->data, 0, r->n))
                 rc = fail(error, error_size, "line %d: 0x%zX bytes at 0x%llX end past the module's end at 0x%llX",
@@ -372,11 +353,11 @@ int snx_pchtxt_apply(const char* text, size_t text_size, unsigned char* image, s
 
 /* 1 when name (a .ips) is named after build_id: its stem the hex of the ID's first bytes, the rest zeros */
 static int ips_named(const char* name, const unsigned char build_id[32]) {
-    size_t stem = strcspn(name, "."), i;
+    size_t stem = strcspn(name, ".");
     if (!stem || stem > 64) return 0;
-    for (i = 0; i < 64; ++i) {
+    for (size_t i = 0; i < 64; ++i) {
         int want = i % 2 ? build_id[i / 2] & 15 : build_id[i / 2] >> 4;
-        int got = i < stem ? nibble(name[i]) : 0;
+        int got = i < stem ? snx_hex_value(name[i]) : 0;
         if (got != want) return 0;
     }
     return 1;
@@ -385,26 +366,23 @@ static int ips_named(const char* name, const unsigned char build_id[32]) {
 int snx_patch_for(const char* path, const unsigned char build_id[32], char* error, size_t error_size) {
     const char* name = leaf(path);
     unsigned char id[32];
-    unsigned char* data;
     size_t size = 0;
-    int is;
-    if (ends_with(name, ".ips")) return ips_named(name, build_id);
-    if (!ends_with(name, ".pchtxt")) return 0;
-    data = snx_read_file(path, &size);
+    if (snx_ends_with_nocase(name, ".ips")) return ips_named(name, build_id);
+    if (!snx_ends_with_nocase(name, ".pchtxt")) return 0;
+    unsigned char* data = snx_read_file(path, &size);
     if (!data) {
         char why[256];
         fail(error, error_size, "cannot read %s: %s", path, snx_os_error(why, sizeof why));
         return -1;
     }
-    is = snx_pchtxt_build_id((const char*)data, size, id) && !memcmp(id, build_id, 32);
+    int is = snx_pchtxt_build_id((const char*)data, size, id) && !memcmp(id, build_id, 32);
     free(data);
     return is;
 }
 
 int snx_patch_module(unsigned char* image, size_t size, const unsigned char build_id[32], char* const* paths,
                      size_t count, unsigned char* applied, char* error, size_t error_size) {
-    size_t i;
-    for (i = 0; i < count; ++i) {
+    for (size_t i = 0; i < count; ++i) {
         int is = snx_patch_for(paths[i], build_id, error, error_size);
         if (is < 0 || (is && snx_patch_apply(paths[i], image, size, error, error_size))) return 1;
         if (applied) applied[i] = (unsigned char)is;
@@ -417,8 +395,8 @@ int snx_patch_apply(const char* path, unsigned char* image, size_t size, char* e
     unsigned char* data = snx_read_file(path, &n);
     int rc;
     if (!data) return fail(error, error_size, "cannot read %s: %s", path, snx_os_error(why, sizeof why));
-    rc = ends_with(path, ".pchtxt") ? snx_pchtxt_apply((const char*)data, n, image, size, why, sizeof why)
-                                    : snx_ips_apply(data, n, image, size, why, sizeof why);
+    rc = snx_ends_with_nocase(path, ".pchtxt") ? snx_pchtxt_apply((const char*)data, n, image, size, why, sizeof why)
+                                               : snx_ips_apply(data, n, image, size, why, sizeof why);
     free(data);
     if (rc) fail(error, error_size, "%s: %s", path, why);
     return rc;

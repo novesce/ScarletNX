@@ -84,10 +84,9 @@ static void rt_call(ArmIR* a, const char* name, LLVMValueRef* args, unsigned cou
     LLVMTypeRef params[3] = {a->ptr, a->i32, a->i32};
     LLVMTypeRef type = LLVMFunctionType(LLVMVoidTypeInContext(a->ctx), params, count + 1, 0);
     LLVMValueRef fn = LLVMGetNamedFunction(a->mod, name), all[3];
-    unsigned i;
     if (!fn) fn = LLVMAddFunction(a->mod, name, type);
     all[0] = a->cpu;
-    for (i = 0; i < count; ++i) all[i + 1] = args[i];
+    for (unsigned i = 0; i < count; ++i) all[i + 1] = args[i];
     LLVMBuildCall2(a->b, type, fn, all, count + 1, "");
 }
 /* after a runtime library call: the block ends here when it set an exit */
@@ -285,11 +284,10 @@ static void data(ArmIR* a) {
 }
 
 static void bounds(ArmIR* a, LLVMValueRef addr, unsigned bytes, unsigned alignment) {
-    LLVMValueRef end, size;
     if (alignment > 1)
         require(a, cmp(a, LLVMIntEQ, band(a, addr, c32(a, alignment - 1)), c32(a, 0)), SNX_ARM_ALIGNMENT, addr);
-    end = add(a, z64(a, addr), c64(a, bytes));
-    size = get(a, offsetof(SnxArmCPU, mem_size), a->i64);
+    LLVMValueRef end = add(a, z64(a, addr), c64(a, bytes));
+    LLVMValueRef size = get(a, offsetof(SnxArmCPU, mem_size), a->i64);
     /* the AGB board's window runs past 4 GiB by a guard (agb/cpu/memmap.c): an access the console's bus wraps, an LDM
        from 0xFFFFFFE8, lands in it instead of aborting */
     if (arm7tdmi(a))
@@ -387,10 +385,9 @@ static LLVMValueRef code_at(ArmIR* a, uint32_t addr, unsigned bytes) {
 }
 static LLVMValueRef open_bus(ArmIR* a) {
     uint32_t region = (a->pc + 4) >> 24;
-    LLVMValueRef h2, h4;
     if (!a->thumb) return code_at(a, a->pc + 8, 4);
-    h2 = code_at(a, a->pc + 2, 2);
-    h4 = code_at(a, a->pc + 4, 2);
+    LLVMValueRef h2 = code_at(a, a->pc + 2, 2);
+    LLVMValueRef h4 = code_at(a, a->pc + 4, 2);
     if (region == 0x00 || region == 0x07 || (region == 0x03 && ((a->pc + 4) & 2))) return bor(a, shl(a, h4, 16), h2);
     return bor(a, h4, shl(a, region == 0x03 ? h2 : h4, 16));
 }
@@ -456,9 +453,8 @@ static LLVMValueRef readmem(ArmIR* a, LLVMValueRef addr, unsigned bytes, int sig
 static void writemem(ArmIR* a, LLVMValueRef addr, unsigned bytes, LLVMValueRef value) {
     LLVMTypeRef type = LLVMIntTypeInContext(a->ctx, bytes * 8);
     if (!arm7tdmi(a)) {
-        LLVMValueRef store;
         if (bytes < 4) value = LLVMBuildTrunc(a->b, value, type, "");
-        store = LLVMBuildStore(a->b, host_order(a, value, bytes), memptr(a, addr));
+        LLVMValueRef store = LLVMBuildStore(a->b, host_order(a, value, bytes), memptr(a, addr));
         LLVMSetAlignment(store, 1);
         /* A local ordinary store may clear the monitor. Clearing on every local
            store is a permitted spurious exclusive failure. */
@@ -548,7 +544,7 @@ static void memory(ArmIR* a, SnxA32Kind kind) {
     int wb = !pre || !!(w & (1u << 21)), load = !!(w & (1u << 20));
     unsigned bytes = 4;
     int sign = 0, pair = 0;
-    LLVMValueRef base = reg(a, n), offset, adjusted, addr, value, second = NULL, unused;
+    LLVMValueRef base = reg(a, n), offset, value, second = NULL, unused;
     if (kind == SNX_A32_SINGLE) {
         bytes = w & (1u << 22) ? 1 : 4;
         offset =
@@ -563,8 +559,8 @@ static void memory(ArmIR* a, SnxA32Kind kind) {
             sign = op >= 2;
         }
     }
-    adjusted = up ? add(a, base, offset) : sub(a, base, offset);
-    addr = pre ? adjusted : base;
+    LLVMValueRef adjusted = up ? add(a, base, offset) : sub(a, base, offset);
+    LLVMValueRef addr = pre ? adjusted : base;
     /* With unaligned support on (ARMv6 SCTLR.U, the model ordinary transfers follow), LDRD and STRD need word
        alignment only. Doubleword alignment is the legacy U=0 rule, and libctru's file code loads 64-bit offsets
        from word-aligned structures */
@@ -591,17 +587,17 @@ static void memory(ArmIR* a, SnxA32Kind kind) {
 }
 static void multiple(ArmIR* a) {
     uint32_t w = a->word;
-    unsigned n = (w >> 16) & 15, count = 0, i, index = 0;
+    unsigned n = (w >> 16) & 15, count = 0, index = 0;
     int pre = !!(w & (1u << 24)), up = !!(w & (1u << 23)), load = !!(w & (1u << 20));
     int quirks = arm7tdmi(a);
-    LLVMValueRef base = reg(a, n), start, adjusted, values[16] = {0};
-    for (i = 0; i < 16; ++i) count += (w >> i) & 1;
-    adjusted = up ? add(a, base, c32(a, count * 4)) : sub(a, base, c32(a, count * 4));
-    start = up ? add(a, base, c32(a, pre ? 4 : 0)) : add(a, adjusted, c32(a, pre ? 0 : 4));
+    LLVMValueRef base = reg(a, n), values[16] = {0};
+    for (unsigned i = 0; i < 16; ++i) count += (w >> i) & 1;
+    LLVMValueRef adjusted = up ? add(a, base, c32(a, count * 4)) : sub(a, base, c32(a, count * 4));
+    LLVMValueRef start = up ? add(a, base, c32(a, pre ? 4 : 0)) : add(a, adjusted, c32(a, pre ? 0 : 4));
     /* The GBA's ARM7TDMI transfers at an unaligned base instead of faulting */
     transfer_begin(a, start, count * 4, quirks ? 1 : 4, !load, 1);
     /* Snapshot all sources before updates, particularly SP and the PC. */
-    for (i = 0; i < 16; ++i)
+    for (unsigned i = 0; i < 16; ++i)
         if (w & (1u << i)) {
             /* the ARM7TDMI stores the written back base when the base is not the first in the list */
             int first = !(w & ((1u << i) - 1));
@@ -614,7 +610,7 @@ static void multiple(ArmIR* a) {
         }
     if (load && values[15]) branch_exchange(a, values[15]);
     index = 0;
-    for (i = 0; i < 16; ++i)
+    for (unsigned i = 0; i < 16; ++i)
         if (values[i]) {
             if (load) {
                 if (i != 15) setreg(a, i, values[i]);
@@ -702,9 +698,9 @@ static void exclusive(ArmIR* a) {
     static const unsigned widths[] = {4, 8, 1, 2};
     unsigned bytes = widths[op >> 1];
     LLVMTypeRef type = LLVMIntTypeInContext(a->ctx, bytes * 8);
-    LLVMValueRef addr = add(a, reg(a, n), c32(a, a->offset)), p, value;
+    LLVMValueRef addr = add(a, reg(a, n), c32(a, a->offset)), value;
     bounds(a, addr, bytes, bytes);
-    p = memptr(a, addr);
+    LLVMValueRef p = memptr(a, addr);
     if (op & 1) {
         value = LLVMBuildLoad2(a->b, type, p, "");
         LLVMSetOrdering(value, LLVMAtomicOrderingSequentiallyConsistent);
@@ -722,7 +718,7 @@ static void exclusive(ArmIR* a) {
     } else {
         LLVMBasicBlockRef attempt = block(a, "exclusive.try"), fail = block(a, "exclusive.fail"),
                           join = block(a, "exclusive.end");
-        LLVMValueRef valid = cmp(a, LLVMIntNE, GET(a, exclusive_valid), c32(a, 0)), expected, pair, result;
+        LLVMValueRef valid = cmp(a, LLVMIntNE, GET(a, exclusive_valid), c32(a, 0));
         LLVMValueRef incoming[2];
         LLVMBasicBlockRef from[2];
         valid = band(a, valid, cmp(a, LLVMIntEQ, GET(a, exclusive_address), addr));
@@ -736,11 +732,11 @@ static void exclusive(ArmIR* a) {
                         LLVMBuildShl(a->b, z64(a, reg(a, a->pair ? a->pair - 1 : t + 1)), c64(a, 32), ""));
         else if (bytes < 4)
             value = LLVMBuildTrunc(a->b, value, type, "");
-        expected = get(a, offsetof(SnxArmCPU, exclusive_value), a->i64);
+        LLVMValueRef expected = get(a, offsetof(SnxArmCPU, exclusive_value), a->i64);
         if (bytes < 8) expected = LLVMBuildTrunc(a->b, expected, type, "");
-        pair = LLVMBuildAtomicCmpXchg(a->b, p, host_order(a, expected, bytes), host_order(a, value, bytes),
-                                      LLVMAtomicOrderingSequentiallyConsistent,
-                                      LLVMAtomicOrderingSequentiallyConsistent, 0);
+        LLVMValueRef pair = LLVMBuildAtomicCmpXchg(a->b, p, host_order(a, expected, bytes), host_order(a, value, bytes),
+                                                   LLVMAtomicOrderingSequentiallyConsistent,
+                                                   LLVMAtomicOrderingSequentiallyConsistent, 0);
         LLVMSetAlignment(pair, bytes);
         incoming[0] = bxor(a, z32(a, LLVMBuildExtractValue(a->b, pair, 1, "")), c32(a, 1));
         from[0] = LLVMGetInsertBlock(a->b);
@@ -750,7 +746,7 @@ static void exclusive(ArmIR* a) {
         from[1] = fail;
         LLVMBuildBr(a->b, join);
         LLVMPositionBuilderAtEnd(a->b, join);
-        result = LLVMBuildPhi(a->b, a->i32, "");
+        LLVMValueRef result = LLVMBuildPhi(a->b, a->i32, "");
         LLVMAddIncoming(result, incoming, from, 2);
         setreg(a, d, result);
     }
@@ -884,14 +880,14 @@ static void set_rdhi_rdlo(ArmIR* a, unsigned hi, unsigned lo, LLVMValueRef v) {
    modular forms set GE: a lane's sum or difference >= 0, an unsigned sum's carry out */
 static void parallel(ArmIR* a) {
     uint32_t w = a->word;
-    unsigned form = (w >> 20) & 3, u = (w >> 22) & 1, op = (w >> 5) & 7, bits = op >= 4 ? 8 : 16, lanes = 32 / bits, i;
+    unsigned form = (w >> 20) & 3, u = (w >> 22) & 1, op = (w >> 5) & 7, bits = op >= 4 ? 8 : 16, lanes = 32 / bits;
     LLVMValueRef x = reg(a, (w >> 16) & 15), y = reg(a, w & 15), r = c32(a, 0), ge = c32(a, 0), unused;
-    for (i = 0; i < lanes; ++i) {
+    for (unsigned i = 0; i < lanes; ++i) {
         /* ASX: the low lane subtracts Rm's high halfword, the high lane adds its low one. SAX the other way */
         unsigned from = op == 1 || op == 2 ? lanes - 1 - i : i;
         int subtract = op == 3 || op == 7 || (op == 1 && i == 0) || (op == 2 && i == 1);
-        LLVMValueRef p = lane(a, x, i * bits, bits, !u), q = lane(a, y, from * bits, bits, !u), v;
-        v = subtract ? sub(a, p, q) : add(a, p, q);
+        LLVMValueRef p = lane(a, x, i * bits, bits, !u), q = lane(a, y, from * bits, bits, !u);
+        LLVMValueRef v = subtract ? sub(a, p, q) : add(a, p, q);
         if (form == 1) {
             LLVMValueRef set = u && !subtract ? cmp(a, LLVMIntUGE, v, c32(a, 1u << bits))
                                               : cmp(a, LLVMIntSGE, v, c32(a, 0));
@@ -908,7 +904,7 @@ static void parallel(ArmIR* a) {
 }
 static void media(ArmIR* a, SnxA32Kind kind) {
     uint32_t w = a->word;
-    unsigned n = (w >> 16) & 15, d = (w >> 12) & 15, s = (w >> 8) & 15, op, i;
+    unsigned n = (w >> 16) & 15, d = (w >> 12) & 15, s = (w >> 8) & 15, op;
     LLVMValueRef x = reg(a, w & 15), r, v, saturated, unused;
     switch (kind) {
         case SNX_A32_SATURATE: {
@@ -920,7 +916,7 @@ static void media(ArmIR* a, SnxA32Kind kind) {
                 lo = u ? 0 : -((int64_t)1 << (bits - 1));
                 hi = u ? ((int64_t)1 << bits) - 1 : ((int64_t)1 << (bits - 1)) - 1;
                 r = c32(a, 0);
-                for (i = 0; i < 2; ++i) {
+                for (unsigned i = 0; i < 2; ++i) {
                     v = clamp(a, lane(a, x, i * 16, 16, 1), lo, hi, &saturated);
                     any = LLVMBuildOr(a->b, any, saturated, "");
                     r = bor(a, r, shl(a, band(a, v, c32(a, 0xffff)), i * 16));
@@ -945,7 +941,7 @@ static void media(ArmIR* a, SnxA32Kind kind) {
             return;
         case SNX_A32_SELECT: { /* each byte from Rn where its GE bit is set, else from Rm */
             LLVMValueRef ge = lsr(a, GET(a, cpsr), 16), mask = c32(a, 0);
-            for (i = 0; i < 4; ++i)
+            for (unsigned i = 0; i < 4; ++i)
                 mask = bor(a, mask,
                            choose(a, cmp(a, LLVMIntNE, band(a, ge, c32(a, 1u << i)), c32(a, 0)), c32(a, 0xffu << (8 * i)),
                                   c32(a, 0)));
@@ -1015,7 +1011,7 @@ static void media(ArmIR* a, SnxA32Kind kind) {
         case SNX_A32_ABS_DIFF: { /* USAD8, USADA8: Rd n, Ra d, Rm s, Rn the low field */
             LLVMValueRef m = reg(a, s);
             r = d != 15 ? reg(a, d) : c32(a, 0);
-            for (i = 0; i < 4; ++i) {
+            for (unsigned i = 0; i < 4; ++i) {
                 v = sub(a, lane(a, x, i * 8, 8, 0), lane(a, m, i * 8, 8, 0));
                 r = add(a, r, choose(a, cmp(a, LLVMIntSLT, v, c32(a, 0)), sub(a, c32(a, 0), v), v));
             }
@@ -1026,7 +1022,7 @@ static void media(ArmIR* a, SnxA32Kind kind) {
             unsigned bits = 8u << ((w >> 21) & 3);
             LLVMValueRef poly = c32(a, w & 0x200 ? 0x82f63b78u : 0xedb88320u);
             r = bxor(a, reg(a, n), bits == 32 ? x : band(a, x, c32(a, (1u << bits) - 1)));
-            for (i = 0; i < bits; ++i)
+            for (unsigned i = 0; i < bits; ++i)
                 r = bxor(a, lsr(a, r, 1), band(a, poly, sub(a, c32(a, 0), band(a, r, c32(a, 1)))));
             setreg(a, d, r);
             return;
@@ -1120,6 +1116,27 @@ static void miscellaneous(ArmIR* a, SnxA32Kind kind) {
     setreg(a, d, r);
 }
 static int instruction(ArmIR* a, SnxA32Kind kind); /* Thumb32 runs A32 twins through it (TH_A32) */
+/* what the A32 and Thumb block functions start with: the builder and types in the module's context, the function and
+   its entry block, the exit and syndrome cleared, and the PC checked against the block's */
+static void block_begin(ArmIR* a, LLVMModuleRef module, const char* name, uint32_t pc) {
+    a->ctx = LLVMGetModuleContext(module);
+    a->mod = module;
+    a->b = LLVMCreateBuilderInContext(a->ctx);
+    a->i1 = LLVMInt1TypeInContext(a->ctx);
+    a->i8 = LLVMInt8TypeInContext(a->ctx);
+    a->i16 = LLVMInt16TypeInContext(a->ctx);
+    a->i32 = LLVMInt32TypeInContext(a->ctx);
+    a->i64 = LLVMInt64TypeInContext(a->ctx);
+    a->ptr = LLVMPointerTypeInContext(a->ctx, 0);
+    LLVMTypeRef ft = LLVMFunctionType(LLVMVoidTypeInContext(a->ctx), &a->ptr, 1, 0);
+    a->fn = LLVMAddFunction(module, name, ft);
+    a->cpu = LLVMGetParam(a->fn, 0);
+    LLVMPositionBuilderAtEnd(a->b, block(a, "entry"));
+    PUT(a, exit, c32(a, SNX_ARM_OK));
+    PUT(a, syndrome, c32(a, 0));
+    require(a, cmp(a, LLVMIntEQ, get(a, offsetof(SnxArmCPU, r) + 60, a->i32), c32(a, pc)), SNX_ARM_BAD_ENTRY,
+            c32(a, pc));
+}
 #include "common/cpu/arm/llvm_vector.inc"
 #include "common/cpu/arm/llvm_thumb.inc"
 
@@ -1219,7 +1236,6 @@ LLVMValueRef snx_arm_llvm_block(LLVMModuleRef module, const char* name, const ui
 LLVMValueRef snx_arm_llvm_block_ex(LLVMModuleRef module, const char* name, const uint32_t* words, size_t count,
                                    uint32_t pc, size_t* consumed, const SnxArmCodegenOptions* options) {
     ArmIR a = {0};
-    LLVMTypeRef ft;
     size_t i;
     if (consumed) *consumed = 0;
     if (!options_valid(options) || !module || !name || !*name || !words || !count || count > 65536 || (pc & 3) ||
@@ -1229,23 +1245,7 @@ LLVMValueRef snx_arm_llvm_block_ex(LLVMModuleRef module, const char* name, const
         a.profile = options->profile;
         a.memory = options->memory;
     }
-    a.ctx = LLVMGetModuleContext(module);
-    a.mod = module;
-    a.b = LLVMCreateBuilderInContext(a.ctx);
-    a.i1 = LLVMInt1TypeInContext(a.ctx);
-    a.i8 = LLVMInt8TypeInContext(a.ctx);
-    a.i16 = LLVMInt16TypeInContext(a.ctx);
-    a.i32 = LLVMInt32TypeInContext(a.ctx);
-    a.i64 = LLVMInt64TypeInContext(a.ctx);
-    a.ptr = LLVMPointerTypeInContext(a.ctx, 0);
-    ft = LLVMFunctionType(LLVMVoidTypeInContext(a.ctx), &a.ptr, 1, 0);
-    a.fn = LLVMAddFunction(module, name, ft);
-    a.cpu = LLVMGetParam(a.fn, 0);
-    LLVMPositionBuilderAtEnd(a.b, block(&a, "entry"));
-    PUT(&a, exit, c32(&a, SNX_ARM_OK));
-    PUT(&a, syndrome, c32(&a, 0));
-    require(&a, cmp(&a, LLVMIntEQ, get(&a, offsetof(SnxArmCPU, r) + 60, a.i32), c32(&a, pc)), SNX_ARM_BAD_ENTRY,
-            c32(&a, pc));
+    block_begin(&a, module, name, pc);
     require(&a, cmp(&a, LLVMIntEQ, band(&a, GET(&a, cpsr), c32(&a, SNX_ARM_T)), c32(&a, 0)), SNX_ARM_BAD_ENTRY,
             c32(&a, words[0]));
     require(&a, cmp(&a, LLVMIntEQ, band(&a, GET(&a, cpsr), c32(&a, SNX_ARM_E)), c32(&a, 0)), SNX_ARM_ENDIAN_UNSUPPORTED,
@@ -1253,7 +1253,6 @@ LLVMValueRef snx_arm_llvm_block_ex(LLVMModuleRef module, const char* name, const
     memory_entry(&a);
     for (i = 0; i < count; ++i) {
         LLVMBasicBlockRef execute = block(&a, "execute"), skip = block(&a, "skip"), next = block(&a, "next");
-        int stop;
         a.pc = pc + (uint32_t)i * 4;
         a.next = a.pc + 4;
         a.word = words[i];
@@ -1261,7 +1260,7 @@ LLVMValueRef snx_arm_llvm_block_ex(LLVMModuleRef module, const char* name, const
         instruction_fetch(&a, a.word, 4);
         LLVMBuildCondBr(a.b, condition(&a, a.word >> 28), execute, skip);
         LLVMPositionBuilderAtEnd(a.b, execute);
-        stop = instruction(&a, snx_a32_decode_profile(a.profile, a.word));
+        int stop = instruction(&a, snx_a32_decode_profile(a.profile, a.word));
         if (!LLVMGetBasicBlockTerminator(LLVMGetInsertBlock(a.b))) {
             if (!stop) setreg(&a, 15, c32(&a, a.pc + 4));
             LLVMBuildBr(a.b, next);

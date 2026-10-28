@@ -39,8 +39,8 @@ SnxCtrExtractResult snx_ctr_unzstd(const char* input, const char* output, char* 
         ctr_fail(&r, SNX_CTR_EXTRACT_UNSUPPORTED, "unsupported z3ds version %u", header[8]);
         goto done;
     }
-    uint64_t header_size = ctr_le16(header + 0xA), metadata_size = ctr_le32(header + 0xC),
-             compressed = ctr_le64(header + 0x10), uncompressed = ctr_le64(header + 0x18);
+    uint64_t header_size = snx_ld_le16(header + 0xA), metadata_size = snx_ld_le32(header + 0xC),
+             compressed = snx_ld_le64(header + 0x10), uncompressed = snx_ld_le64(header + 0x18);
     /* the stream lies whole after the header and its metadata, and the game is no larger than a card is */
     if (header_size < Z3DS_HEADER || !ctr_fits(r.size, header_size, metadata_size) ||
         header_size + metadata_size + compressed != r.size || !uncompressed || uncompressed > CTR_CARD_LIMIT) {

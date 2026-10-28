@@ -92,16 +92,12 @@ static void put(Out* o, const void* v, size_t n) {
 static void put8(Out* o, uint8_t v) { put(o, &v, 1); }
 static void put16(Out* o, uint16_t v) {
     uint8_t b[2];
-    b[0] = (uint8_t)(v >> 8);
-    b[1] = (uint8_t)v;
+    snx_st_be16(b, v);
     put(o, b, 2);
 }
 static void put32(Out* o, uint32_t v) {
     uint8_t b[4];
-    b[0] = (uint8_t)(v >> 24);
-    b[1] = (uint8_t)(v >> 16);
-    b[2] = (uint8_t)(v >> 8);
-    b[3] = (uint8_t)v;
+    snx_st_be32(b, v);
     put(o, b, 4);
 }
 static void put64(Out* o, uint64_t v) {
@@ -120,12 +116,11 @@ typedef struct In {
     int bad;
 } In;
 static const uint8_t* get(In* i, size_t n) {
-    const uint8_t* v;
     if (i->bad || n > i->n - i->at) {
         i->bad = 1;
         return NULL;
     }
-    v = i->p + i->at;
+    const uint8_t* v = i->p + i->at;
     i->at += n;
     return v;
 }
@@ -135,11 +130,11 @@ static uint8_t get8(In* i) {
 }
 static uint16_t get16(In* i) {
     const uint8_t* v = get(i, 2);
-    return v ? (uint16_t)(v[0] << 8 | v[1]) : 0;
+    return v ? snx_ld_be16(v) : 0;
 }
 static uint32_t get32(In* i) {
     const uint8_t* v = get(i, 4);
-    return v ? (uint32_t)v[0] << 24 | (uint32_t)v[1] << 16 | (uint32_t)v[2] << 8 | v[3] : 0;
+    return v ? snx_ld_be32(v) : 0;
 }
 static void get_ip(In* i, uint8_t ip[4]) {
     const uint8_t* v = get(i, 4);
@@ -278,16 +273,15 @@ const char* snx_room_why_text(int why) {
 }
 void snx_room_fake_ip(const SnxRoom* r, uint8_t ip[4]) { memcpy(ip, r->fake_ip, 4); }
 int snx_room_state(SnxRoom* r) {
-    int s;
     snx_lock(&r->lk);
-    s = r->state;
+    int s = r->state;
     snx_unlock(&r->lk);
     return s;
 }
 int snx_room_has_member(SnxRoom* r, const uint8_t ip[4]) {
-    int i, found = 0;
+    int found = 0;
     snx_lock(&r->lk);
-    for (i = 0; i < r->nmembers && !found; i++) found = !memcmp(r->members[i].ip, ip, 4);
+    for (int i = 0; i < r->nmembers && !found; i++) found = !memcmp(r->members[i].ip, ip, 4);
     snx_unlock(&r->lk);
     return found;
 }
@@ -358,9 +352,6 @@ void snx_room_clear_ldn(SnxRoom* r, void* arg) {
 int snx_room_send_ldn(SnxRoom* r, uint8_t type, const uint8_t remote_ip[4], int broadcast, const void* data,
                       size_t size) {
     SnxRoomLdn p;
-    uint8_t* buf;
-    size_t n;
-    int e;
     p.type = type;
     memcpy(p.local_ip, r->fake_ip, 4);
     if (remote_ip)
@@ -370,10 +361,10 @@ int snx_room_send_ldn(SnxRoom* r, uint8_t type, const uint8_t remote_ip[4], int 
     p.broadcast = broadcast;
     p.data = data;
     p.size = size;
-    buf = malloc(size + 32);
+    uint8_t* buf = malloc(size + 32);
     if (!buf) return -SNX_ENOMEM;
-    n = snx_room_pack_ldn(buf, size + 32, &p);
-    e = n ? queue(r, buf, n) : -SNX_EMSGSIZE;
+    size_t n = snx_room_pack_ldn(buf, size + 32, &p);
+    int e = n ? queue(r, buf, n) : -SNX_EMSGSIZE;
     free(buf);
     return e;
 }
@@ -423,8 +414,7 @@ static void sock_destroy(SnxSocket* s) {
     free(k);
 }
 static int port_taken(SnxRoom* r, const RoomSock* k, uint16_t port, int reuse) {
-    const RoomSock* o;
-    for (o = r->socks; o; o = o->next)
+    for (const RoomSock* o = r->socks; o; o = o->next)
         if (o != k && o->port == port && !(reuse && o->reuse)) return 1;
     return 0;
 }
@@ -463,9 +453,8 @@ static int sock_bind(SnxSocket* s, const SnxSockAddr* a) {
 }
 static int bound(RoomSock* k) {
     static const uint8_t any[4] = {0, 0, 0, 0};
-    int b;
     snx_lock(&k->lk);
-    b = k->port != 0;
+    int b = k->port != 0;
     snx_unlock(&k->lk);
     return b || !sock_bind_to(k, any, 0) || k->port;
 }
@@ -499,7 +488,7 @@ static int64_t sock_send(SnxSocket* s, const void* data, size_t size, int flags,
     RoomSock* k = s->impl;
     SnxRoom* r = k->room;
     SnxRoomDatagram d;
-    size_t bound_size, n, head;
+    size_t head;
     RoomOut* o;
     uint8_t protocol;
     int e;
@@ -529,7 +518,7 @@ static int64_t sock_send(SnxSocket* s, const void* data, size_t size, int flags,
     snx_unlock(&k->lk);
     if (e) return e;
     /* the message's head with an empty vector, then the zstd frame where the vector's bytes go, then its length */
-    bound_size = ZSTD_compressBound(size);
+    size_t bound_size = ZSTD_compressBound(size);
     d.data = NULL;
     d.size = 0;
     head = ROOM_DATAGRAM_HEAD;
@@ -539,15 +528,12 @@ static int64_t sock_send(SnxSocket* s, const void* data, size_t size, int flags,
         free(o);
         return -SNX_EIO;
     }
-    n = ZSTD_compress(o->data + head, bound_size, data, size, ZSTD_CLEVEL_DEFAULT);
+    size_t n = ZSTD_compress(o->data + head, bound_size, data, size, ZSTD_CLEVEL_DEFAULT);
     if (ZSTD_isError(n)) {
         free(o);
         return -SNX_EIO;
     }
-    o->data[head - 4] = (uint8_t)(n >> 24);
-    o->data[head - 3] = (uint8_t)(n >> 16);
-    o->data[head - 2] = (uint8_t)(n >> 8);
-    o->data[head - 1] = (uint8_t)n;
+    snx_st_be32(o->data + head - 4, (uint32_t)n);
     o->size = head + n;
     e = queue_owned(r, o);
     return e ? e : (int64_t)size;
@@ -557,10 +543,8 @@ static int64_t sock_recv(SnxSocket* s, void* data, size_t size, int flags, SnxSo
     int64_t deadline = snx_net_deadline(s->rcvtimeo_us);
     if (out_flags) *out_flags = 0;
     for (;;) {
-        RoomDatagramIn* d;
-        int r;
         snx_lock(&k->lk);
-        d = k->head;
+        RoomDatagramIn* d = k->head;
         if (d) {
             size_t n = d->size < size ? d->size : size;
             int64_t got = (flags & SNX_MSG_TRUNC) ? (int64_t)d->size : (int64_t)n;
@@ -585,7 +569,7 @@ static int64_t sock_recv(SnxSocket* s, void* data, size_t size, int flags, SnxSo
             snx_unlock(&k->lk);
             return got;
         }
-        r = k->shut_rd;
+        int r = k->shut_rd;
         snx_unlock(&k->lk);
         if (r) return 0;
         if (s->nonblocking || (flags & SNX_MSG_DONTWAIT)) return -SNX_EAGAIN;
@@ -695,12 +679,11 @@ static const SnxSocketOps g_room_sock_ops = {.destroy = sock_destroy,
 int snx_room_socket_open(SnxRoom* r, SnxSocket** out, int domain, int type, int protocol) {
     RoomSock* k;
     SnxSocket* s;
-    int e;
     if (domain != SNX_AF_INET || type != SNX_SOCK_DGRAM) return -SNX_EPROTONOSUPPORT;
     if (protocol != 0 && protocol != SNX_IPPROTO_UDP) return -SNX_EPROTONOSUPPORT;
     k = calloc(1, sizeof *k);
     if (!k) return -SNX_ENOMEM;
-    e = snx_notifier_open(k->notify);
+    int e = snx_notifier_open(k->notify);
     if (e) {
         free(k);
         return e;
@@ -734,27 +717,23 @@ int snx_room_socket(const SnxSocket* s) { return s->ops == &g_room_sock_ops; }
    broadcast with SO_BROADCAST */
 static void datagram_in(SnxRoom* r, const uint8_t* msg, size_t size) {
     SnxRoomDatagram d;
-    unsigned long long plain;
-    uint8_t* buf;
     uint8_t protocol;
-    size_t n;
-    RoomSock* k;
     if (!parse_datagram(msg, size, &d, &protocol)) {
         snx_net_log("room: a datagram message that isn't one (%zu bytes)", size);
         return;
     }
-    plain = ZSTD_getFrameContentSize(d.data, d.size);
+    unsigned long long plain = ZSTD_getFrameContentSize(d.data, d.size);
     if (plain == ZSTD_CONTENTSIZE_ERROR || plain == ZSTD_CONTENTSIZE_UNKNOWN || plain > SNX_ROOM_DATAGRAM_MAX) {
         snx_net_log("room: a datagram from %u.%u.%u.%u:%u isn't a zstd frame of a datagram's size", d.local_ip[0],
                     d.local_ip[1], d.local_ip[2], d.local_ip[3], d.local_port);
         return;
     }
-    buf = malloc(plain ? (size_t)plain : 1);
+    uint8_t* buf = malloc(plain ? (size_t)plain : 1);
     if (!buf) {
         snx_net_log("room: a datagram of %llu bytes dropped: out of memory", plain);
         return;
     }
-    n = ZSTD_decompress(buf, (size_t)plain, d.data, d.size);
+    size_t n = ZSTD_decompress(buf, (size_t)plain, d.data, d.size);
     if (ZSTD_isError(n) || n != plain) {
         snx_net_log("room: a datagram from %u.%u.%u.%u:%u doesn't decompress", d.local_ip[0], d.local_ip[1],
                     d.local_ip[2], d.local_ip[3], d.local_port);
@@ -762,7 +741,7 @@ static void datagram_in(SnxRoom* r, const uint8_t* msg, size_t size) {
         return;
     }
     snx_lock(&r->lk);
-    for (k = r->socks; k; k = k->next) {
+    for (RoomSock* k = r->socks; k; k = k->next) {
         RoomDatagramIn* in;
         snx_lock(&k->lk);
         if (k->protocol != protocol || !k->port || k->port != d.remote_port || k->shut_rd ||
@@ -808,9 +787,8 @@ static void datagram_in(SnxRoom* r, const uint8_t* msg, size_t size) {
 /* ============================================================ the room's messages */
 /* the room went away (why): said once, and the ldn handler told */
 static void went_away(SnxRoom* r, int why) {
-    int was;
     snx_lock(&r->lk);
-    was = r->state;
+    int was = r->state;
     if (was == SNX_ROOM_IN) r->state = why;
     snx_unlock(&r->lk);
     if (was != SNX_ROOM_IN) return;
@@ -820,10 +798,9 @@ static void went_away(SnxRoom* r, int why) {
 static void room_information(SnxRoom* r, const uint8_t* msg, size_t size) {
     char text[64];
     uint8_t ip[4];
-    uint32_t i, count;
     In in;
     RoomMember m[ROOM_MEMBERS];
-    int n = 0, k;
+    int n = 0;
     in.p = msg;
     in.n = size;
     in.at = 1;
@@ -834,8 +811,8 @@ static void room_information(SnxRoom* r, const uint8_t* msg, size_t size) {
     get16(&in);                       /* port */
     get_text(&in, text, sizeof text); /* preferred game */
     get_text(&in, text, sizeof text); /* host username */
-    count = get32(&in);
-    for (i = 0; i < count && !in.bad; i++) {
+    uint32_t count = get32(&in);
+    for (uint32_t i = 0; i < count && !in.bad; i++) {
         char nickname[SNX_ROOM_NICKNAME_MAX + 1];
         get_text(&in, nickname, sizeof nickname);
         get_ip(&in, ip);
@@ -856,26 +833,24 @@ static void room_information(SnxRoom* r, const uint8_t* msg, size_t size) {
         return;
     }
     snx_lock(&r->lk);
-    for (k = 0; k < n; k++) r->members[k] = m[k];
+    for (int k = 0; k < n; k++) r->members[k] = m[k];
     r->nmembers = n;
     snx_unlock(&r->lk);
 }
 static void status_message(const uint8_t* msg, size_t size) {
     static const char* const what[] = {"?", "joined", "left", "was kicked", "was banned", "is unbanned"};
     char nickname[64];
-    uint8_t type;
     In in;
     in.p = msg;
     in.n = size;
     in.at = 1;
     in.bad = 0;
-    type = get8(&in);
+    uint8_t type = get8(&in);
     get_text(&in, nickname, sizeof nickname);
     if (!in.bad) snx_net_log("room: %s %s", nickname, type < 6 ? what[type] : "did something unknown");
 }
 static void chat_message(const uint8_t* msg, size_t size) {
     char nickname[64], username[64], text[512];
-    size_t i;
     In in;
     in.p = msg;
     in.n = size;
@@ -884,7 +859,7 @@ static void chat_message(const uint8_t* msg, size_t size) {
     get_text(&in, nickname, sizeof nickname);
     get_text(&in, username, sizeof username);
     get_text(&in, text, sizeof text);
-    for (i = 0; text[i]; i++)
+    for (size_t i = 0; text[i]; i++)
         if ((unsigned char)text[i] < 0x20) text[i] = ' '; /* one line in the log */
     if (!in.bad) snx_net_log("room: %s says: %s", nickname, text);
 }
@@ -938,14 +913,13 @@ static void room_thread(void* arg) {
     SnxRoom* r = arg;
     int64_t next_report = 0;
     for (;;) {
-        RoomOut* o;
         ENetEvent ev;
-        int k, stop, in, service_ms;
+        int k, stop;
         snx_lock(&r->lk);
         stop = r->stop;
-        in = r->state == SNX_ROOM_IN;
-        service_ms = r->low_latency ? 1 : ROOM_SERVICE_MS;
-        o = r->out;
+        int in = r->state == SNX_ROOM_IN;
+        int service_ms = r->low_latency ? 1 : ROOM_SERVICE_MS;
+        RoomOut* o = r->out;
         r->out = r->out_tail = NULL;
         snx_unlock(&r->lk);
         while (o) {
@@ -1005,9 +979,8 @@ void snx_room_ref(SnxRoom* r) {
     snx_unlock(&r->lk);
 }
 void snx_room_unref(SnxRoom* r) {
-    int last;
     snx_lock(&r->lk);
-    last = --r->refs == 0;
+    int last = --r->refs == 0;
     snx_unlock(&r->lk);
     if (last) room_free(r);
 }
@@ -1025,13 +998,10 @@ int snx_room_join(SnxRoom** out, const char* host, uint16_t port, const char* ni
     ENetAddress address;
     ENetEvent ev;
     SnxRoom* r;
-    uint8_t* msg;
-    size_t n, max;
-    int64_t deadline;
-    int answer = -1, e;
+    int answer = -1;
     *out = NULL;
     *why = SNX_ROOM_LOCAL;
-    e = snx_net_init();
+    int e = snx_net_init();
     if (e) return e;
     if (enet_initialize()) return -SNX_ENETDOWN;
     r = calloc(1, sizeof *r);
@@ -1060,12 +1030,11 @@ int snx_room_join(SnxRoom** out, const char* host, uint16_t port, const char* ni
     }
     /* an ENet error (k < 0) ends either wait as this computer's failure, not the room's silence */
     *why = SNX_ROOM_UNREACHABLE;
-    deadline = snx_net_now_us() + (int64_t)SNX_ROOM_JOIN_MS * 1000;
+    int64_t deadline = snx_net_now_us() + (int64_t)SNX_ROOM_JOIN_MS * 1000;
     for (;;) {
         int64_t left = (deadline - snx_net_now_us()) / 1000;
-        int k;
         if (left <= 0) break;
-        k = enet_host_service(r->host, &ev, (enet_uint32)left);
+        int k = enet_host_service(r->host, &ev, (enet_uint32)left);
         if (k < 0) {
             *why = SNX_ROOM_LOCAL;
             e = -SNX_EIO;
@@ -1084,15 +1053,15 @@ int snx_room_join(SnxRoom** out, const char* host, uint16_t port, const char* ni
         return e ? e : -SNX_ETIMEDOUT;
     }
     /* the join and the game, as Eden's member sends them one after the other */
-    max = 64 + strlen(nickname) + strlen(password) + strlen(game_name) + strlen(game_version);
-    msg = malloc(max);
+    size_t max = 64 + strlen(nickname) + strlen(password) + strlen(game_name) + strlen(game_version);
+    uint8_t* msg = malloc(max);
     if (!msg) {
         *why = SNX_ROOM_LOCAL;
         enet_peer_reset(r->peer);
         room_free(r);
         return -SNX_ENOMEM;
     }
-    n = snx_room_pack_join(msg, max, nickname, password);
+    size_t n = snx_room_pack_join(msg, max, nickname, password);
     e = send_now(r, msg, n);
     n = pack_game_info(msg, max, game_name, game_id, game_version);
     if (!e) e = send_now(r, msg, n);
@@ -1103,9 +1072,8 @@ int snx_room_join(SnxRoom** out, const char* host, uint16_t port, const char* ni
     deadline = snx_net_now_us() + (int64_t)SNX_ROOM_JOIN_MS * 1000;
     while (!e && answer < 0) {
         int64_t left = (deadline - snx_net_now_us()) / 1000;
-        int k;
         if (left <= 0) break;
-        k = enet_host_service(r->host, &ev, (enet_uint32)left);
+        int k = enet_host_service(r->host, &ev, (enet_uint32)left);
         if (k < 0) {
             *why = SNX_ROOM_LOCAL;
             e = -SNX_EIO;
@@ -1143,7 +1111,6 @@ int snx_room_join(SnxRoom** out, const char* host, uint16_t port, const char* ni
 void snx_room_leave(SnxRoom* r) {
     ENetEvent ev;
     int64_t deadline;
-    int was;
     if (!r) return;
     snx_lock(&r->lk);
     r->stop = 1;
@@ -1157,7 +1124,7 @@ void snx_room_leave(SnxRoom* r) {
         snx_net_sleep_us(1000);
     }
     snx_lock(&r->lk);
-    was = r->state;
+    int was = r->state;
     if (was == SNX_ROOM_IN) r->state = SNX_ROOM_CLOSED;
     snx_unlock(&r->lk);
     /* a polite leave, so the room tells the others at once rather than at ENet's timeout, after what was queued: the

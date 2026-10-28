@@ -9,6 +9,7 @@
 #include "nx/runtime/state.h"
 #include "nx/hle/hle.h" /* g_hle.hid: the players and the touch screen hid samples */
 #include "nx/hle/services/hid.h"
+#include "nx/hle/services/services.h" /* am_keyboard_answered: the keyboard's box's answer */
 #include "nx/hle/kernel/kernel.h"
 #include "nx/runtime/platform/backend.h"
 #include "nx/runtime/platform/log.h"
@@ -33,6 +34,9 @@
 #include "common/utilities/window_icon.h"
 #include "nx/runtime/platform/controls_png.h"
 #include "common/utilities/build_info.h"
+#ifdef __APPLE__
+#include <dlfcn.h>
+#endif
 #ifdef __ANDROID__
 #include <jni.h>
 #endif
@@ -48,6 +52,13 @@ static u64 g_menu_held_extra[SNX_GAMEPADS - 1];
 static int g_fullscreen;
 static void set_fullscreen(int on);
 static int g_shot_req;
+/* SDL's text input for the keyboard's box (overlay.h): the box it is on for (0: off), the system's keyboard asked for
+   again (a tap on the box's line), and the box's line SDL was last given, in window points */
+static struct {
+    u32 ticket;
+    int again;
+    SDL_Rect area;
+} g_typing;
 static int g_audio_ready;
 static int g_hidden;      /* the app is in the background (Android) */
 static int g_given_up;    /* the window went to a fatal error's screen: the renderer presents nothing more */
@@ -288,6 +299,18 @@ void backend_window_size(int* w, int* h) {
     *w = (int)(u32)s;
     *h = (int)(u32)(s >> 32);
 }
+int backend_keyboard_show(const OverlayKeyboard* k) {
+    if (g_opt_headless || !g_win) return -1;
+    ui_lock();
+    overlay_keyboard_show(k);
+    ui_unlock();
+    return 0;
+}
+void backend_keyboard_hide(u32 ticket) {
+    ui_lock();
+    overlay_keyboard_hide(ticket);
+    ui_unlock();
+}
 
 /* the on-screen controls' sprites, decoded from the PNG compiled in, to the atlas the renderer uploads */
 static void controls_atlas(void) {
@@ -341,16 +364,15 @@ void video_init(const char* title, const char* addons) {
     SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
     SDL_SetHint(SDL_HINT_PEN_MOUSE_EVENTS, "0");
 #ifdef __APPLE__
-    { /* the apps carry their MoltenVK (cmake/apple_package.cmake), in the bundle's Frameworks, which SDL does not search:
-         macOS's beside Resources/ (SDL's base folder), iOS's in the bundle itself. Elsewhere the system's loader */
-        const char* base = SDL_GetBasePath();
-        const char* const own[] = {"../Frameworks/libMoltenVK.dylib", "Frameworks/MoltenVK.framework/MoltenVK"};
-        size_t i;
-        for (i = 0; base && !SDL_GetHint(SDL_HINT_VULKAN_LIBRARY) && i < sizeof own / sizeof *own; i++) {
-            char* path = snx_format("%s%s", base, own[i]);
-            if (snx_is_file(path)) SDL_SetHint(SDL_HINT_VULKAN_LIBRARY, path);
-            free(path);
+    { /* the app's MoltenVK, or the copy deployed beside a game's runtime, which is outside the bundle: SDL's own search
+         finds neither there, and the system may have no loader (docs/APPLE.md). Elsewhere the system's loader */
+        char* self = snx_executable(NULL), *driver = self ? snx_vulkan_driver(self) : NULL;
+        if (driver && !SDL_GetHint(SDL_HINT_VULKAN_LIBRARY)) {
+            SDL_SetHint(SDL_HINT_VULKAN_LIBRARY, driver);
+            LOG("vulkan: the Vulkan driver at %s\n", driver);
         }
+        free(self);
+        free(driver);
     }
 #endif
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) fatal("SDL could not start its video: %s", SDL_GetError());
@@ -395,6 +417,26 @@ void video_init(const char* title, const char* addons) {
 }
 
 void* backend_vk_loader(void) { return (void*)SDL_Vulkan_GetVkGetInstanceProcAddr(); }
+void* backend_vk_driver(void) {
+#ifdef __APPLE__
+    /* The library the program's folders carry (snx_vulkan_driver), for a run with no window: SDL's own search of the
+       bundle needs its video subsystem, and a game's runtime copy is outside the bundle. It stays loaded for the run,
+       as SDL's does */
+    static void* module;
+    static int looked;
+    if (!looked) {
+        char* self = snx_executable(NULL), *driver = self ? snx_vulkan_driver(self) : NULL;
+        looked = 1;
+        if (driver && (module = dlopen(driver, RTLD_NOW | RTLD_LOCAL)) != NULL)
+            LOG("vulkan: the Vulkan driver at %s\n", driver);
+        free(self);
+        free(driver);
+    }
+    return module ? (void*)dlsym(module, "vkGetInstanceProcAddr") : NULL;
+#else
+    return NULL;
+#endif
+}
 const char* const* backend_vk_extensions(u32* n) {
     Uint32 c = 0;
     const char* const* e = SDL_Vulkan_GetInstanceExtensions(&c);
@@ -882,9 +924,9 @@ static void hotkey(SDL_Keycode k) {
     }
 }
 
-/* The game's menu takes the keys, the buttons, the fingers and the mouse while it is open. Back, Home and F2 open
-   and close it, and they and Esc end the on-screen controls' edit mode. Under ui_lock: the renderer draws them on its
-   thread */
+/* The game's menu takes the keys, the buttons, the fingers and the mouse while it is open, and the keyboard's box
+   while it shows and the menu doesn't. Back, Home and F2 open and close the menu, and they and Esc end the on-screen
+   controls' edit mode. Under ui_lock: the renderer draws them on its thread */
 /* a finger's id, the pen's apart: SDL gives a pen's touch the id 1 on every platform, the id Android and Wayland
    give a first finger and any finger may have, and no real finger's id sets bit 63 */
 static u64 finger_id(const SDL_TouchFingerEvent* f) {
@@ -899,6 +941,7 @@ static void menu_open(int open) {
 }
 static void overlay_do(int action) {
     if (action == OVERLAY_EXIT) g_quit = 1;
+    if (action == OVERLAY_TYPE) g_typing.again = 1; /* a tap on the box's line: the system's keyboard again */
     if (action == OVERLAY_CLOSE) menu_open(0);
     /* the frontend's loop does them (state_poll), the menu closed first for a load: the game it goes back to shows */
     if (action == OVERLAY_SAVE) state_ask(STATE_SAVE, overlay_slot());
@@ -911,6 +954,34 @@ static void overlay_do(int action) {
         menu_open(0);
         vpad_edit(1);
     }
+}
+/* the keyboard's box, under no menu: the text typed, Backspace, Return and Esc, a paste (Ctrl+V, the system key's V
+   on a Mac), and no other key, which would reach the game or a hotkey; Alt+Return still switches fullscreen */
+static int keyboard_event(const SDL_Event* e) {
+    if (e->type == SDL_EVENT_TEXT_INPUT) {
+        overlay_keyboard_type(e->text.text);
+        return 1;
+    }
+    switch (e->key.key) {
+        case SDLK_BACKSPACE: overlay_keyboard_key(OVERLAY_KEY_BACKSPACE); break;
+        case SDLK_RETURN:
+        case SDLK_KP_ENTER:
+            if (e->key.mod & SDL_KMOD_ALT) return 0;
+            if (!e->key.repeat) overlay_keyboard_key(OVERLAY_KEY_ENTER);
+            break;
+        case SDLK_ESCAPE:
+            if (!e->key.repeat) overlay_keyboard_key(OVERLAY_KEY_CANCEL);
+            break;
+        case SDLK_V:
+            if (e->key.mod & (SDL_KMOD_CTRL | SDL_KMOD_GUI)) {
+                char* paste = SDL_GetClipboardText();
+                if (paste) overlay_keyboard_type(paste);
+                SDL_free(paste);
+            }
+            break;
+        default: break;
+    }
+    return 1;
 }
 static int menu_event(const SDL_Event* e) {
     int w, h;
@@ -927,7 +998,9 @@ static int menu_event(const SDL_Event* e) {
         vpad_edit(0);
         return 1;
     }
-    if (!overlay_shown()) return 0;
+    if (!overlay_shown() && !overlay_keyboard_shown()) return 0;
+    if (!overlay_shown() && (e->type == SDL_EVENT_KEY_DOWN || e->type == SDL_EVENT_TEXT_INPUT))
+        return keyboard_event(e);
     if (e->type == SDL_EVENT_KEY_DOWN) {
         switch (e->key.key) {
             case SDLK_UP: overlay_move(-1); break;
@@ -952,7 +1025,7 @@ static int menu_event(const SDL_Event* e) {
                (e->gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER || e->gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER)) {
         overlay_press(e->gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER ? SNX_PAD_LT : SNX_PAD_RT);
     } else if (e->type == SDL_EVENT_MOUSE_WHEEL) { /* a notch up is a row up, as the system turns the wheel */
-        overlay_scroll(-e->wheel.integer_y);
+        if (overlay_shown()) overlay_scroll(-e->wheel.integer_y);
     } else if (e->type == SDL_EVENT_FINGER_DOWN || e->type == SDL_EVENT_FINGER_MOTION ||
                e->type == SDL_EVENT_FINGER_UP) {
         /* a finger on an on-screen control stays the controls': their presses move the menu */
@@ -1180,6 +1253,51 @@ static int press_event(const SDL_Event* e) {
     }
     return 0;
 }
+/* SDL's text input on while the keyboard's box shows with no menu over it, for the kind of text it asks, at its line:
+   where an input method puts its window, and what the system's keyboard leaves in view (Android and iOS move the
+   window for it). The box's answer goes to am once no lock of the UI's is held, as am shows the box under its own */
+static void keyboard_sync(void) {
+    char text[OVERLAY_KB_TEXT];
+    OverlayTyping t;
+    u32 ticket = 0;
+    int shown, answer, w, h;
+    backend_window_size(&w, &h);
+    ui_lock();
+    shown = !overlay_shown() && overlay_keyboard_typing(w, h, &t);
+    answer = overlay_keyboard_take(&ticket, text, sizeof text);
+    ui_unlock();
+    if (shown) {
+        float d = SDL_GetWindowPixelDensity(g_win);
+        SDL_Rect r;
+        if (d <= 0) d = 1;
+        r.x = (int)(t.line.x / d);
+        r.y = (int)(t.line.y / d);
+        r.w = (int)(t.line.w / d);
+        r.h = (int)(t.line.h / d);
+        if (r.x != g_typing.area.x || r.y != g_typing.area.y || r.w != g_typing.area.w || r.h != g_typing.area.h) {
+            SDL_SetTextInputArea(g_win, &r, 0);
+            g_typing.area = r;
+        }
+    }
+    if (shown && (t.ticket != g_typing.ticket || g_typing.again)) {
+        SDL_PropertiesID props = SDL_CreateProperties();
+        SDL_TextInputType type = t.numbers && t.password ? SDL_TEXTINPUT_TYPE_NUMBER_PASSWORD_HIDDEN
+                                 : t.numbers             ? SDL_TEXTINPUT_TYPE_NUMBER
+                                 : t.password            ? SDL_TEXTINPUT_TYPE_TEXT_PASSWORD_HIDDEN
+                                                         : SDL_TEXTINPUT_TYPE_TEXT;
+        SDL_SetNumberProperty(props, SDL_PROP_TEXTINPUT_TYPE_NUMBER, type);
+        SDL_SetBooleanProperty(props, SDL_PROP_TEXTINPUT_MULTILINE_BOOLEAN, false); /* Return gives the line */
+        if (!SDL_StartTextInputWithProperties(g_win, props))
+            WARN_LIMIT(4, "input: SDL could not start text input for the keyboard's box: %s\n", SDL_GetError());
+        SDL_DestroyProperties(props);
+        g_typing.ticket = t.ticket;
+        g_typing.again = 0;
+    } else if (!shown && g_typing.ticket) {
+        SDL_StopTextInput(g_win);
+        g_typing.ticket = 0;
+    }
+    if (answer >= 0) am_keyboard_answered(ticket, answer, text);
+}
 void video_poll(void) {
     SDL_Event e;
     char* left = __atomic_load_n(&g_fatal_left, __ATOMIC_ACQUIRE);
@@ -1188,8 +1306,9 @@ void video_poll(void) {
         if (!fatal_screen(left)) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "ScarletNX", left, g_win);
         plat_exit_now(1);
     }
-    /* the menu had the controls when this poll began: the press that closes it (B) is in this poll's state */
-    int menu_had = overlay_shown() || vpad_editing();
+    /* the menu, or the keyboard's box, had the controls when this poll began: the press that closes it (B, or A that
+       gives the box's line) is in this poll's state */
+    int menu_had = overlay_shown() || vpad_editing() || overlay_keyboard_shown();
     while (!g_opt_headless && SDL_PollEvent(&e)) {
         if (press_event(&e)) continue;
         if (overlay_event(&e)) continue;
@@ -1354,7 +1473,8 @@ void video_poll(void) {
         g_menu_held_pad0 |= g_hle.hid.pad1.buttons;
         for (int i = 0; i < SNX_GAMEPADS - 1; i++) g_menu_held_extra[i] |= g_hle.hid.pad_extra[i].buttons;
     }
-    if (menu_had || overlay_shown() || vpad_editing()) { /* the game's menu, or the controls' edit mode, has them */
+    /* the game's menu, the controls' edit mode or the keyboard's box has them */
+    if (menu_had || overlay_shown() || vpad_editing() || overlay_keyboard_shown()) {
         g_menu_held = nonpad;
         g_menu_held_pad0 = g_hle.hid.pad1.buttons;
         b = 0;
@@ -1389,6 +1509,7 @@ void video_poll(void) {
         ui_unlock();
     }
     pm_unlock(&g_host.hid.input_lock);
+    keyboard_sync();
 }
 
 char* backend_launcher_folder(void) {
@@ -1426,9 +1547,10 @@ void frontend_frame(void) {
     g_press.kind = PRESS_NONE;
     /* the controls and the menu stay on the window while the game shows nothing new, and so does its last frame while
        it is paused */
-    if (g_renderer->refresh && (overlay_shown() || vpad_shown() || game_paused() || overlay_toasting(plat_ns()) ||
-                                __atomic_load_n(&g_settings.showcase, __ATOMIC_RELAXED) ||
-                                __atomic_load_n(&g_settings.stats, __ATOMIC_RELAXED)))
+    if (g_renderer->refresh &&
+        (overlay_shown() || overlay_keyboard_shown() || vpad_shown() || game_paused() || overlay_toasting(plat_ns()) ||
+         __atomic_load_n(&g_settings.showcase, __ATOMIC_RELAXED) ||
+         __atomic_load_n(&g_settings.stats, __ATOMIC_RELAXED)))
         g_renderer->refresh();
     if (g_shot_req) {
         g_shot_req = 0;

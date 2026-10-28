@@ -12,6 +12,7 @@
    memory a member owns goes into the HEAP section beside it, and what the host's side keeps of the game (caches, the
    file tree, the decoders) stays the running process's. */
 #include "nx/runtime/state.h"
+#include "common/utilities/bits.h"
 #include "common/utilities/build_info.h"
 #include "common/utilities/endian.h"
 #include "nx/gpu/gpu.h"
@@ -92,8 +93,8 @@ static int section_write(StateWriter* w, const char* tag, u64 schema, const Buf*
    Clang's walk of each struct (hle_walk.h): a state whose types had other fields isn't read as this runtime's. The
    values the walk prints aren't part of it */
 static void hash_str(u64* h, const char* s) {
-    for (; *s; s++) *h = (*h ^ (u8)*s) * 1099511628211ull;
-    *h = (*h ^ 0x1F) * 1099511628211ull;
+    for (; *s; s++) *h = snx_fnv_step(*h, (u8)*s);
+    *h = snx_fnv_step(*h, 0x1F);
 }
 static int schema_out(u64* h, const char* fmt, ...) {
     va_list ap;
@@ -104,7 +105,7 @@ static int schema_out(u64* h, const char* fmt, ...) {
         int longs = 0;
         if (*f == '=') before = 0;
         if (*f != '%') {
-            if (before) *h = (*h ^ (u8)*f) * 1099511628211ull;
+            if (before) *h = snx_fnv_step(*h, (u8)*f);
             continue;
         }
         f++;
@@ -1329,6 +1330,7 @@ int state_load(const char* path, char* why, size_t whysize) {
         if (cur_host[i] && cur_host[i] != plan.host[i]) mem_pool_host_free(cur_host[i], cur_off[i], cur_size[i]);
     fs_state_install(fss);
     audio_state_rebuild();
+    am_state_loaded();
     video_install(&vs);
     /* the renderer forgets the old memory, and the state's channels and queue take the old ones' place */
     if (g_renderer->reset) g_renderer->reset();

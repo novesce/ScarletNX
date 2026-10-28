@@ -4,6 +4,9 @@
 #define SNX_CTR_LOADER_INTERNAL_H
 #include "3ds/loader/ctr_loader.h"
 #include "common/utilities/common.h"
+#include "common/utilities/ascii.h"
+#include "common/utilities/bits.h"
+#include "common/utilities/endian.h"
 #include <openssl/evp.h>
 #include <stdio.h>
 #define CTR_METADATA_LIMIT (16u * 1024u * 1024u)
@@ -71,16 +74,15 @@ typedef struct {
     size_t chunks, body;
     CtrNcch base, over;
 } CtrSource;
-static inline uint16_t ctr_le16(const unsigned char* p) { return (uint16_t)(p[0] | p[1] << 8); }
-static inline uint32_t ctr_le32(const unsigned char* p) {
-    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+/* where a ticket's or TMD's body starts after its signature type, signature and padding: 0 for an unknown type */
+static inline size_t ctr_signed_body(uint32_t signature) {
+    switch (signature) {
+        case 0x10000: case 0x10003: return 0x240;
+        case 0x10001: case 0x10004: return 0x140;
+        case 0x10002: case 0x10005: return 0x40;
+        default: return 0;
+    }
 }
-static inline uint64_t ctr_le64(const unsigned char* p) { return ctr_le32(p) | (uint64_t)ctr_le32(p + 4) << 32; }
-static inline uint16_t ctr_be16(const unsigned char* p) { return (uint16_t)(p[1] | p[0] << 8); }
-static inline uint32_t ctr_be32(const unsigned char* p) {
-    return (uint32_t)p[3] | (uint32_t)p[2] << 8 | (uint32_t)p[1] << 16 | (uint32_t)p[0] << 24;
-}
-static inline uint64_t ctr_be64(const unsigned char* p) { return ctr_be32(p + 4) | (uint64_t)ctr_be32(p) << 32; }
 static inline bool ctr_fits(uint64_t total, uint64_t at, uint64_t size) { return at <= total && size <= total - at; }
 /* an update title's ID from the base game's, as Azahar's UPDATE_TID_HIGH makes it: a cartridge's update partition
    and an installed update both hold this one */

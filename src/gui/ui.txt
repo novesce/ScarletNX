@@ -6,8 +6,8 @@
 		attr = callback
 		# every entry where they fit: a list shows 8 rows at most by default
 		max_rows = 64
-		# a finger's (main.c's GUI_FINGER_ROW): a phone held wide gets 3x, so 144 pixels, Android's 48dp touch target at
-		# a density of 3 and more under it, iOS's 44pt at its 3x (#589)
+		# a finger's (main.c's GUI_FINGER_ROW): 96 pixels at a phone's default 2x, about 37dp at a density of 2.6; 144 at
+		# 3x, Android's 48dp touch target (#589)
 		android.row_height = 48px
 		[button]"Load Switch NSP/XCI/NRO" {
 			icon = gamepad-2

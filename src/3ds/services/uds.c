@@ -9,6 +9,7 @@
 #include "3ds/runtime/internal.h"
 #include "common/network/net_room.h"
 #include "common/utilities/common.h"
+#include "common/utilities/endian.h"
 #include "common/utilities/ini_lines.h"
 #include "common/utilities/users.h"
 #include "snx_settings.h"
@@ -118,22 +119,6 @@ struct SnxCtrUds {
     uint64_t found_session[16], found_at[16];
     Binding binds[16];
 };
-static uint16_t rd16(const uint8_t* b) { return (uint16_t)(b[0] | b[1] << 8); }
-static uint32_t rd32(const uint8_t* b) {
-    return (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24;
-}
-static uint64_t rd64(const uint8_t* b) { return rd32(b) | (uint64_t)rd32(b + 4) << 32; }
-static void wr16(uint8_t* b, uint16_t v) {
-    b[0] = (uint8_t)v;
-    b[1] = (uint8_t)(v >> 8);
-}
-static void wr32(uint8_t* b, uint32_t v) {
-    for (unsigned i = 0; i < 4; i++) b[i] = (uint8_t)(v >> (8 * i));
-}
-static void wr64(uint8_t* b, uint64_t v) {
-    wr32(b, (uint32_t)v);
-    wr32(b + 4, (uint32_t)(v >> 32));
-}
 static unsigned population(uint16_t m) {
     unsigned n = 0;
     while (m) {
@@ -201,7 +186,7 @@ static int output_buffer(SnxCtrIpc* c, const void* data, uint32_t size, unsigned
         snx_ctr_ipc_bad(c);
         return 0;
     }
-    uint32_t desc = rd32(d), address = rd32(d + 4);
+    uint32_t desc = snx_ld_le32(d), address = snx_ld_le32(d + 4);
     if ((desc & 0x3fff) != 2 || (desc >> 14) < size ||
         (size && snx_ctr_write_ram(c->process->space, address, data, size) != SNX_CTR_MEM_OK)) {
         snx_ctr_ipc_bad(c);
@@ -221,8 +206,8 @@ static int send_message(struct SnxCtrUds* u, unsigned type, const uint8_t* ip, c
     uint8_t wire[2048] = {'S', 'N', 'U', 'D', 1, 0, 0, 0};
     if (size > sizeof wire - 16) return 0;
     wire[5] = (uint8_t)type;
-    wr16(wire + 6, (uint16_t)size);
-    wr64(wire + 8, u->session);
+    snx_st_le16(wire + 6, (uint16_t)size);
+    snx_st_le64(wire + 8, u->session);
     if (size) memcpy(wire + 16, data, size);
     SnxSockAddr a;
     const uint8_t broadcast[4] = {192, 168, 255, 255};
@@ -256,8 +241,8 @@ static void finish_join(SnxCtrProcess* p, uint32_t result) {
     CtrThread* t = &p->objects[id].data.thread;
     if (!t->dead) {
         uint8_t out[256] = {0};
-        wr32(out, u->join_header);
-        wr32(out + 4, result);
+        snx_st_le32(out, u->join_header);
+        snx_st_le32(out + 4, result);
         uint32_t transport = snx_ctr_write_ram(p->space, t->context.tpidruro + 0x80, out, sizeof out) == SNX_CTR_MEM_OK
                                  ? 0
                                  : 0xe0e01bf5u;
@@ -316,11 +301,11 @@ void snx_ctr_uds_poll(SnxCtrProcess* p) {
         SnxSockAddr from;
         int64_t got = snx_socket_recv(u->socket, b, sizeof b, SNX_MSG_DONTWAIT, &from, NULL);
         if (got < 0) break;
-        if (got < 16 || memcmp(b, "SNUD", 4) || b[4] != 1 || rd16(b + 6) != (unsigned)got - 16 ||
+        if (got < 16 || memcmp(b, "SNUD", 4) || b[4] != 1 || snx_ld_le16(b + 6) != (unsigned)got - 16 ||
             !memcmp(from.addr, u->ip, 4) || !snx_room_has_member(u->room, from.addr))
             continue;
         unsigned type = b[5], size = (unsigned)got - 16;
-        uint64_t session = rd64(b + 8);
+        uint64_t session = snx_ld_le64(b + 8);
         uint8_t* v = b + 16;
         if (type == MSG_BEACON && size == 936 && v[29] >= 2 && v[29] <= 16 && v[63] <= 200 && v[0] == 2 &&
             v[1] == 0x53 && !memcmp(v + 2, from.addr, 4)) {
@@ -354,7 +339,7 @@ void snx_ctr_uds_poll(SnxCtrProcess* p) {
                 }
                 memcpy(u->peer, from.addr, 4);
                 memcpy(u->nodes[1].bytes, v, 40);
-                wr16(u->nodes[1].bytes + 32, 2);
+                snx_st_le16(u->nodes[1].bytes + 32, 2);
                 u->mask = 3;
                 u->changed |= 2;
                 u->reason = 1;
@@ -385,14 +370,14 @@ void snx_ctr_uds_poll(SnxCtrProcess* p) {
             u->peer_seen = now;
             if (type == MSG_PING) {
                 send_message(u, MSG_PONG, u->peer, v, 8);
-            } else if (u->ping_sent && rd64(v) == u->ping_sent && now >= u->ping_sent) {
+            } else if (u->ping_sent && snx_ld_le64(v) == u->ping_sent && now >= u->ping_sent) {
                 u->rtt_ns = now - u->ping_sent;
                 ++u->rtt_samples;
                 u->ping_sent = 0;
             }
         } else if (type == MSG_DATA && size >= 6 && (u->status == 6 || u->status == 9) && u->mask == 3 &&
                    session == u->session && !memcmp(from.addr, u->peer, 4)) {
-            uint16_t src = rd16(v), dest = rd16(v + 2);
+            uint16_t src = snx_ld_le16(v), dest = snx_ld_le16(v + 2);
             unsigned payload = size - 6;
             if (src != (u->own == 1 ? 2 : 1) || (dest != u->own && dest != 65535) || payload > UDS_DATA) continue;
             u->peer_seen = now;
@@ -431,7 +416,7 @@ void snx_ctr_uds_poll(SnxCtrProcess* p) {
     if (u->mask == 3 && (u->status == 6 || u->status == 9)) {
         if (now >= u->next_ping && (!u->ping_sent || now - u->ping_sent >= 5000000000ull)) {
             uint8_t ping[8];
-            wr64(ping, now);
+            snx_st_le64(ping, now);
             if (send_message(u, MSG_PING, u->peer, ping, sizeof ping)) u->ping_sent = now;
             u->next_ping = now + 1000000000ull;
         }
@@ -451,8 +436,8 @@ void snx_ctr_uds_poll(SnxCtrProcess* p) {
         }
         if (u->mask == 3 && (u->status == 6 || u->status == 9)) {
             uint8_t ping[6];
-            wr16(ping, u->own);
-            wr16(ping + 2, 65535);
+            snx_st_le16(ping, u->own);
+            snx_st_le16(ping + 2, 65535);
             ping[4] = 0;
             ping[5] = 0;
             send_message(u, MSG_DATA, u->peer, ping, 6);
@@ -571,9 +556,9 @@ static size_t beacon(const Network* net, const Node* nodes, uint8_t out[1200]) {
         !cipher(net, crypt, length))
         return 0;
     memset(out, 0, 1200);
-    wr64(out, 900000000);
-    wr16(out + 8, 100);
-    wr16(out + 10, 0x0431);
+    snx_st_le64(out, 900000000);
+    snx_st_le16(out + 8, 100);
+    snx_st_le16(out + 10, 0x0431);
     size_t at = 12;
     out[at++] = 0;
     out[at++] = 8;
@@ -632,7 +617,7 @@ static void initialize(SnxCtrIpc* c) {
     c->process->uds = u;
     snx_ctr_ipc_get_bytes(c, 2, u->me.bytes, 40);
     u->status = 3;
-    if (!rd64(u->me.bytes) && RAND_bytes(u->me.bytes, 8) != 1) {
+    if (!snx_ld_le64(u->me.bytes) && RAND_bytes(u->me.bytes, 8) != 1) {
         snx_ctr_uds_close(c->process);
         reply(c, 1, 0, UDS_NETWORK);
         return;
@@ -685,7 +670,7 @@ static void host_network(SnxCtrIpc* c) {
     u->changed = 1;
     memset(u->nodes, 0, sizeof u->nodes);
     u->nodes[0] = u->me;
-    wr16(u->nodes[0].bytes + 32, 1);
+    snx_st_le16(u->nodes[0].bytes + 32, 1);
     status_changed(c->process);
     reply(c, 1, 0, 0);
     fprintf(stderr, "3ds uds: hosting network\n");
@@ -768,18 +753,18 @@ static void scan(SnxCtrIpc* c) {
         size_t bytes = beacon(n, u->found_nodes[i], frame);
         if (!bytes || bytes + 28 > limit - used) continue;
         uint8_t* v = out + used;
-        wr32(v, (uint32_t)bytes + 28);
+        snx_st_le32(v, (uint32_t)bytes + 28);
         v[5] = n->bytes[6];
         memcpy(v + 8, n->bytes, 6);
-        wr32(v + 20, (uint32_t)bytes + 28);
-        wr32(v + 24, 28);
+        snx_st_le32(v + 20, (uint32_t)bytes + 28);
+        snx_st_le32(v + 24, 28);
         memcpy(v + 28, frame, bytes);
         used += 28 + bytes;
         ++count;
     }
-    wr32(out, limit);
-    wr32(out + 4, (uint32_t)used);
-    wr32(out + 8, count);
+    snx_st_le32(out, limit);
+    snx_st_le32(out + 4, (uint32_t)used);
+    snx_st_le32(out + 8, count);
     if (snx_ctr_write_ram(c->process->space, dest, out, used) != SNX_CTR_MEM_OK) snx_ctr_ipc_bad(c);
     free(out);
     reply(c, 1, 2, 0);
@@ -839,15 +824,15 @@ void snx_ctr_uds_dispatch(SnxCtrIpc* c) {
         case 0xb: {
             if (!snx_ctr_ipc_expect(c, 0, 0)) return;
             uint8_t status[48] = {0};
-            wr32(status, u->status);
-            wr32(status + 4, u->reason);
-            wr16(status + 8, u->own);
-            wr16(status + 10, u->changed);
+            snx_st_le32(status, u->status);
+            snx_st_le32(status + 4, u->reason);
+            snx_st_le16(status + 8, u->own);
+            snx_st_le16(status + 10, u->changed);
             for (unsigned i = 0; i < 16; i++)
-                if (u->mask & (1u << i)) wr16(status + 12 + 2 * i, (uint16_t)(i + 1));
+                if (u->mask & (1u << i)) snx_st_le16(status + 12 + 2 * i, (uint16_t)(i + 1));
             status[44] = (uint8_t)population(u->mask);
             status[45] = u->net.bytes[29];
-            wr16(status + 46, u->mask);
+            snx_st_le16(status + 46, u->mask);
             reply(c, 13, 0, 0);
             snx_ctr_ipc_put_bytes(c, 2, status, 48);
             u->changed = 0;
@@ -922,8 +907,8 @@ void snx_ctr_uds_dispatch(SnxCtrIpc* c) {
                 return;
             }
             uint8_t b[UDS_DATA + 6];
-            wr16(b, u->own);
-            wr16(b + 2, (uint16_t)dest);
+            snx_st_le16(b, u->own);
+            snx_st_le16(b + 2, (uint16_t)dest);
             b[4] = (uint8_t)c->in[3];
             b[5] = (uint8_t)c->in[6];
             if (!input_buffer(c, 5, b + 6, size)) return;

@@ -64,7 +64,6 @@ static FpWide fp_mul64(u64 a, u64 b) {
 /* sign * X * 2^(e - 125), X normalized and compressed to 64 bits with a sticky bit, rounded (times 2^scale) */
 static u64 fp_pack_wide(CPU* c, int sign, int e, FpWide x, int scale, int width, int rm) {
     int top = fp_wide_top(x);
-    u64 frac;
     if (top > 125) {
         x = fp_wide_shr_jam(x, top - 125);
         e += top - 125;
@@ -72,7 +71,7 @@ static u64 fp_pack_wide(CPU* c, int sign, int e, FpWide x, int scale, int width,
         x = fp_wide_shl(x, 125 - top);
         e -= 125 - top;
     }
-    frac = (x.hi << 1) | (x.lo >> 63) | ((x.lo << 1) != 0);
+    u64 frac = (x.hi << 1) | (x.lo >> 63) | ((x.lo << 1) != 0);
     return fp_round_pack(c, sign, e + scale, frac, width, rm);
 }
 
@@ -127,7 +126,6 @@ static u64 fp_fused(CPU* c, u64 add, u64 a, u64 b, int width, int scale) {
     int rm = fp_rmode(c), sp = x.sign ^ y.sign, product_inf = x.kind == FPV_INF || y.kind == FPV_INF;
     int product_zero = x.kind == FPV_ZERO || y.kind == FPV_ZERO;
     int inf_zero = (x.kind == FPV_INF && y.kind == FPV_ZERO) || (x.kind == FPV_ZERO && y.kind == FPV_INF);
-    FpWide p;
     if (z.kind >= FPV_QNAN || x.kind >= FPV_QNAN || y.kind >= FPV_QNAN) {
         if (z.kind == FPV_QNAN && inf_zero) return fp_invalid(c, width);
         return fp_nan(c, fp_nan3(z, x, y), width);
@@ -136,7 +134,7 @@ static u64 fp_fused(CPU* c, u64 add, u64 a, u64 b, int width, int scale) {
     if (z.kind == FPV_INF) return fp_inf(z.sign, width);
     if (product_inf) return fp_inf(sp, width);
     if (z.kind == FPV_ZERO && product_zero && z.sign == sp) return fp_zero(sp, width);
-    p = product_zero ? fp_wide(0, 0) : fp_mul64(x.frac, y.frac); /* (frac * frac) * 2^(ex + ey + 1 - 125) */
+    FpWide p = product_zero ? fp_wide(0, 0) : fp_mul64(x.frac, y.frac); /* (frac * frac) * 2^(ex + ey + 1 - 125) */
     return fp_sum(c, z.sign, z.exp, fp_wide_of(z), sp, x.exp + y.exp + 1, p, scale, width, rm);
 }
 
@@ -145,12 +143,12 @@ u64 snx_fp_fma(CPU* c, u64 add, u64 a, u64 b, int width) { return fp_fused(c, ad
 /* the quotient of two finite nonzero values, a sticky bit from the remainder */
 static u64 fp_divide(CPU* c, FpValue x, FpValue y, int width, int rm) {
     u64 rem = x.frac, q = 0;
-    int e = x.exp - y.exp, i;
+    int e = x.exp - y.exp;
     if (rem < y.frac) {
         rem <<= 1;
         --e;
     }
-    for (i = 62; i >= 0; --i) {
+    for (int i = 62; i >= 0; --i) {
         if (rem >= y.frac) {
             rem -= y.frac;
             q |= (u64)1 << i;
@@ -164,17 +162,15 @@ static u64 fp_divide(CPU* c, FpValue x, FpValue y, int width, int rm) {
    steps FPRecipStepFused (2 - a * b) and FPRSqrtStepFused ((3 - a * b) / 2), which negate a before anything else,
    so a NaN a comes out with its sign flipped */
 static u64 fp_binary_rm(CPU* c, u64 a, u64 b, int width, int op, int rm) {
-    FpValue x, y;
-    int sign;
     u64 r;
     if (op == SNX_FP_RECPS || op == SNX_FP_RSQRTS) a ^= fp_signbit(1, width);
-    x = fp_unpack(c, a, width);
-    y = fp_unpack(c, b, width);
+    FpValue x = fp_unpack(c, a, width);
+    FpValue y = fp_unpack(c, b, width);
     if (x.kind >= FPV_QNAN || y.kind >= FPV_QNAN) {
         r = fp_nan(c, fp_nan2(x, y), width);
         return op == SNX_FP_ABD ? r & ~fp_signbit(1, width) : r;
     }
-    sign = x.sign ^ y.sign;
+    int sign = x.sign ^ y.sign;
     switch (op) {
         case SNX_FP_ADD:
         case SNX_FP_SUB:
@@ -276,8 +272,8 @@ u32 ursqrte32(u32 x) {
    exponents 0 and -1 */
 static u64 fp_recpe(CPU* c, u64 bits, int width) {
     int fb = fp_fbits(width), bias = fp_bias(width), sign = (int)((bits >> (width - 1)) & 1);
-    int e = (int)((bits >> fb) & (u64)((1 << fp_ebits(width)) - 1)), result_exp;
-    u64 frac = (bits & (((u64)1 << fb) - 1)) << (52 - fb), result_frac;
+    int e = (int)((bits >> fb) & (u64)((1 << fp_ebits(width)) - 1));
+    u64 frac = (bits & (((u64)1 << fb) - 1)) << (52 - fb);
     if ((bits & ~fp_signbit(1, width)) < ((u64)1 << (fb - 2))) { /* the reciprocal overflows */
         int rm = fp_rmode(c), to_inf = rm == 0 || (rm == 1 && !sign) || (rm == 2 && sign);
         c->fpsr |= FPSR_OFC | FPSR_IXC;
@@ -295,8 +291,8 @@ static u64 fp_recpe(CPU* c, u64 bits, int width) {
             frac <<= 1;
         }
     }
-    result_frac = (u64)fp_recip_estimate(0x100 | (u32)((frac >> 44) & 0xFF)) << 44 & (((u64)1 << 52) - 1);
-    result_exp = 2 * bias - 1 - e;
+    u64 result_frac = (u64)fp_recip_estimate(0x100 | (u32)((frac >> 44) & 0xFF)) << 44 & (((u64)1 << 52) - 1);
+    int result_exp = 2 * bias - 1 - e;
     if (result_exp == 0) {
         result_frac = (result_frac >> 1) | ((u64)1 << 51);
     } else if (result_exp == -1) {
@@ -312,7 +308,6 @@ static u64 fp_rsqrte(u64 bits, int width) {
     int fb = fp_fbits(width), bias = fp_bias(width);
     int e = (int)((bits >> fb) & (u64)((1 << fp_ebits(width)) - 1));
     u64 frac = (bits & (((u64)1 << fb) - 1)) << (52 - fb);
-    u32 scaled, estimate;
     if (e == 0) {
         while (!((frac >> 51) & 1)) {
             frac <<= 1;
@@ -320,20 +315,20 @@ static u64 fp_rsqrte(u64 bits, int width) {
         }
         frac = (frac & (((u64)1 << 51) - 1)) << 1;
     }
-    scaled = (e & 1) ? 0x80 | (u32)((frac >> 45) & 0x7F) : 0x100 | (u32)((frac >> 44) & 0xFF);
-    estimate = fp_rsqrt_estimate(scaled) & 0xFF;
+    u32 scaled = (e & 1) ? 0x80 | (u32)((frac >> 45) & 0x7F) : 0x100 | (u32)((frac >> 44) & 0xFF);
+    u32 estimate = fp_rsqrt_estimate(scaled) & 0xFF;
     return (u64)((3 * bias - 1 - e) / 2) << fb | ((u64)estimate << 44) >> (52 - fb);
 }
 
 /* the square root of a positive finite value, digit by digit: 63 result bits and a sticky bit */
 static u64 fp_sqrt(CPU* c, FpValue v, int width, int rm) {
-    int odd = v.exp & 1, half = (v.exp - odd) / 2, i;
-    FpWide n = fp_wide_shl(fp_wide(0, v.frac), 62 + odd), rem = fp_wide(0, 0), trial;
+    int odd = v.exp & 1, half = (v.exp - odd) / 2;
+    FpWide n = fp_wide_shl(fp_wide(0, v.frac), 62 + odd), rem = fp_wide(0, 0);
     u64 root = 0;
-    for (i = 62; i >= 0; --i) {
+    for (int i = 62; i >= 0; --i) {
         rem = fp_wide_shl(rem, 2);
         rem.lo |= (i >= 32 ? n.hi >> (2 * i - 64) : n.lo >> (2 * i)) & 3;
-        trial = fp_wide_shl(fp_wide(0, root), 2);
+        FpWide trial = fp_wide_shl(fp_wide(0, root), 2);
         trial.lo |= 1;
         root <<= 1;
         if (!fp_wide_less(rem, trial)) {
@@ -348,10 +343,10 @@ static u64 fp_sqrt(CPU* c, FpValue v, int width, int rm) {
 u64 snx_fp_unary(CPU* c, u64 bits, int width, int op) {
     FpValue v;
     if (op == SNX_FP_RECPX) { /* NaNs before flushing; then the exponent inverted and the fraction cleared */
-        int fb = fp_fbits(width), emax = (1 << fp_ebits(width)) - 1, e;
+        int fb = fp_fbits(width), emax = (1 << fp_ebits(width)) - 1;
         v = fp_unpack(c, bits, width);
         if (v.kind >= FPV_QNAN) return fp_nan(c, v, width);
-        e = v.kind == FPV_ZERO ? 0 : (int)((bits >> fb) & (u64)emax);
+        int e = v.kind == FPV_ZERO ? 0 : (int)((bits >> fb) & (u64)emax);
         return fp_signbit(v.sign, width) | (u64)(e ? ~e & emax : emax - 1) << fb;
     }
     v = fp_unpack(c, bits, width);
@@ -409,13 +404,12 @@ u64 snx_fp_convert(CPU* c, u64 bits, int src_width, int dst_width, int rm) {
 u64 snx_fp_from_int(CPU* c, u64 bits, int int_width, int fp_width, int uns, int fbits) {
     u64 mag = int_width >= 64 ? bits : bits & (((u64)1 << int_width) - 1);
     int sign = 0;
-    FpValue v;
     if (!uns && ((mag >> (int_width - 1)) & 1)) {
         sign = 1;
         mag = (0 - mag) & (int_width >= 64 ? ~(u64)0 : (((u64)1 << int_width) - 1));
     }
     if (!mag) return fp_zero(0, fp_width);
-    v = fp_from_magnitude(sign, mag, -fbits);
+    FpValue v = fp_from_magnitude(sign, mag, -fbits);
     return fp_round_pack(c, sign, v.exp, v.frac, fp_width, fp_rmode(c));
 }
 

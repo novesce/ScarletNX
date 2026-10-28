@@ -27,7 +27,7 @@ static LLVMValueRef taddsub(ArmIR* a, LLVMValueRef x, LLVMValueRef y, int is_sub
 }
 
 static void thumb_ldst(ArmIR* a, const SnxThumb* t) {
-    LLVMValueRef base, offset, addr, adjusted, value;
+    LLVMValueRef offset, addr, value;
     unsigned bytes = (t->flags & TH_B) ? 1 : (t->flags & TH_H) ? 2 : 4;
     int is_load = t->shape == TH_LOAD;
     int sign = !!(t->flags & TH_SIGN);
@@ -37,10 +37,10 @@ static void thumb_ldst(ArmIR* a, const SnxThumb* t) {
     } else {
         offset = c32(a, t->imm);
     }
-    base = t->rn == 15 ? tpcalign(a) : treg(a, t->rn); /* LDR (literal) */
+    LLVMValueRef base = t->rn == 15 ? tpcalign(a) : treg(a, t->rn); /* LDR (literal) */
     if (t->flags & TH_SPB) base = treg(a, 13);
     if (t->flags & TH_PCB) base = tpcalign(a);
-    adjusted = (t->flags & TH_UP) ? add(a, base, offset) : sub(a, base, offset);
+    LLVMValueRef adjusted = (t->flags & TH_UP) ? add(a, base, offset) : sub(a, base, offset);
     if (t->flags & TH_REG) addr = adjusted; /* register-offset forms are non-writeback */
     else if (t->flags & TH_PRE) addr = adjusted;
     else addr = base;
@@ -59,13 +59,13 @@ static void thumb_ldst(ArmIR* a, const SnxThumb* t) {
 /* LDRD/STRD: any two registers, unlike A32's even pair, and a word-aligned offset up to 1020. Both words are read
    before either register is written, and both checked before either is stored */
 static void thumb_dual(ArmIR* a, const SnxThumb* t) {
-    LLVMValueRef base = t->rn == 15 ? tpcalign(a) : treg(a, t->rn), adjusted, addr, first, second;
-    adjusted = (t->flags & TH_UP) ? add(a, base, c32(a, t->imm)) : sub(a, base, c32(a, t->imm));
-    addr = (t->flags & TH_PRE) ? adjusted : base;
+    LLVMValueRef base = t->rn == 15 ? tpcalign(a) : treg(a, t->rn);
+    LLVMValueRef adjusted = (t->flags & TH_UP) ? add(a, base, c32(a, t->imm)) : sub(a, base, c32(a, t->imm));
+    LLVMValueRef addr = (t->flags & TH_PRE) ? adjusted : base;
     transfer_begin(a, addr, 8, 4, !t->op, 1);
     if (t->op) {
-        first = readmem(a, addr, 4, 0);
-        second = readmem(a, add(a, addr, c32(a, 4)), 4, 0);
+        LLVMValueRef first = readmem(a, addr, 4, 0);
+        LLVMValueRef second = readmem(a, add(a, addr, c32(a, 4)), 4, 0);
         setreg(a, t->rd, first);
         setreg(a, t->rm, second);
     } else {
@@ -77,11 +77,11 @@ static void thumb_dual(ArmIR* a, const SnxThumb* t) {
 }
 
 static void thumb_alu(ArmIR* a, const SnxThumb* t, int hi) {
-    LLVMValueRef x, y, r;
+    LLVMValueRef r;
     /* CMP hi sets flags; the 16-bit ones set them outside an IT block (CMP, CMN and TST always) */
     int flags = hi ? t->op == 1 : !a->in_it;
-    x = hi ? treg(a, t->rn) : treg(a, t->rd); /* most 16-bit ALU ops read rd as first source */
-    y = treg(a, t->rm);
+    LLVMValueRef x = hi ? treg(a, t->rn) : treg(a, t->rd); /* most 16-bit ALU ops read rd as first source */
+    LLVMValueRef y = treg(a, t->rm);
     if (t->op == ALU_ADD || t->op == ALU_SUB) {
         r = taddsub(a, x, y, t->op == ALU_SUB, flags);
         setreg(a, t->rd, r);
@@ -127,18 +127,18 @@ static void thumb_imm8(ArmIR* a, const SnxThumb* t) {
 }
 
 static void thumb_extend(ArmIR* a, const SnxThumb* t) {
-    LLVMValueRef x = treg(a, t->rm), r;
+    LLVMValueRef x = treg(a, t->rm);
     /* op bit0: 0=half 1=byte; bit1: 0=signed 1=unsigned */
     LLVMTypeRef ty = (t->op & 1) ? a->i8 : a->i16;
     LLVMValueRef narrow = LLVMBuildTrunc(a->b, x, ty, "");
-    r = (t->op & 2) ? (LLVMValueRef)LLVMBuildZExt(a->b, narrow, a->i32, "")
+    LLVMValueRef r = (t->op & 2) ? (LLVMValueRef)LLVMBuildZExt(a->b, narrow, a->i32, "")
                     : (LLVMValueRef)LLVMBuildSExt(a->b, narrow, a->i32, "");
     setreg(a, t->rd, r);
 }
 
 static void thumb_pushpop(ArmIR* a, const SnxThumb* t) {
-    unsigned list = t->imm, count = 0, i;
-    for (i = 0; i < 8; ++i) count += (list >> i) & 1;
+    unsigned list = t->imm, count = 0;
+    for (unsigned i = 0; i < 8; ++i) count += (list >> i) & 1;
     count += t->ra;
     if (!count && a->memory == SNX_ARM_MEMORY_CHECKED) { trap(a, SNX_ARM_UNDEFINED, c32(a, a->word)); return; }
     LLVMValueRef sp = treg(a, 13);
@@ -147,17 +147,19 @@ static void thumb_pushpop(ArmIR* a, const SnxThumb* t) {
         /* the ARM7TDMI transfers at an unaligned SP */
         transfer_begin(a, start, count * 4, arm7tdmi(a) ? 1 : 4, 1, 1);
         unsigned index = 0;
-        for (i = 0; i < 8; ++i) if (list & (1u << i)) writemem_list(a, add(a, start, c32(a, index++ * 4)), 4, treg(a, i));
+        for (unsigned i = 0; i < 8; ++i)
+            if (list & (1u << i)) writemem_list(a, add(a, start, c32(a, index++ * 4)), 4, treg(a, i));
         if (t->ra) writemem_list(a, add(a, start, c32(a, index * 4)), 4, treg(a, 14));
         transfer_commit(a);
         setreg(a, 13, start);
     } else { /* POP */
-        LLVMValueRef start = sp, value;
+        LLVMValueRef start = sp;
         transfer_begin(a, start, count * 4, arm7tdmi(a) ? 1 : 4, 0, 1);
         unsigned index = 0;
-        for (i = 0; i < 8; ++i) if (list & (1u << i)) setreg(a, i, readmem_list(a, add(a, start, c32(a, index++ * 4)), 4));
+        for (unsigned i = 0; i < 8; ++i)
+            if (list & (1u << i)) setreg(a, i, readmem_list(a, add(a, start, c32(a, index++ * 4)), 4));
         if (t->ra) {
-            value = readmem_list(a, add(a, start, c32(a, index * 4)), 4);
+            LLVMValueRef value = readmem_list(a, add(a, start, c32(a, index * 4)), 4);
             /* The GBA's ARM7TDMI keeps the Thumb state on POP {pc}: interworking takes BX, and the
                target keeps only bit 0 clear (ARMv8-A would branch with the state from bit 0). */
             if (arm7tdmi(a))
@@ -170,18 +172,20 @@ static void thumb_pushpop(ArmIR* a, const SnxThumb* t) {
 }
 
 static void thumb_ldmstm(ArmIR* a, const SnxThumb* t) {
-    unsigned list = t->imm, count = 0, i;
-    for (i = 0; i < 8; ++i) count += (list >> i) & 1;
+    unsigned list = t->imm, count = 0;
+    for (unsigned i = 0; i < 8; ++i) count += (list >> i) & 1;
     if (!count) { trap(a, SNX_ARM_UNDEFINED, c32(a, a->word)); return; }
     LLVMValueRef base = treg(a, t->rn), values[8];
     /* the ARM7TDMI transfers at an unaligned base */
     transfer_begin(a, base, count * 4, arm7tdmi(a) ? 1 : 4, !t->op, 1);
     unsigned index = 0;
     if (t->op == 1) { /* LDMIA: snapshot before writeback */
-        for (i = 0; i < 8; ++i) if (list & (1u << i)) values[i] = readmem(a, add(a, base, c32(a, index++ * 4)), 4, 0);
-        for (i = 0; i < 8; ++i) if (list & (1u << i)) if (i != t->rn || !(t->flags & TH_WB)) setreg(a, i, values[i]);
+        for (unsigned i = 0; i < 8; ++i)
+            if (list & (1u << i)) values[i] = readmem(a, add(a, base, c32(a, index++ * 4)), 4, 0);
+        for (unsigned i = 0; i < 8; ++i)
+            if (list & (1u << i)) if (i != t->rn || !(t->flags & TH_WB)) setreg(a, i, values[i]);
     } else { /* STMIA: the ARM7TDMI stores the written back base when the base is not the first in the list */
-        for (i = 0; i < 8; ++i)
+        for (unsigned i = 0; i < 8; ++i)
             if (list & (1u << i))
                 writemem_list(a, add(a, base, c32(a, index++ * 4)), 4,
                               arm7tdmi(a) && i == (unsigned)t->rn && (t->flags & TH_WB) && (list & ((1u << i) - 1))
@@ -194,10 +198,10 @@ static void thumb_ldmstm(ArmIR* a, const SnxThumb* t) {
 
 static void thumb_bitfield(ArmIR* a, const SnxThumb* t) {
     unsigned lsb = t->imm;
-    LLVMValueRef x = treg(a, t->rn), r, mask;
+    LLVMValueRef x = treg(a, t->rn), r;
     if (t->op == 0 || t->op == 1) { /* SBFX / UBFX: .ra is width-1 */
         unsigned width = t->ra + 1;
-        mask = c32(a, width >= 32 ? 0xFFFFFFFFu : ((1u << width) - 1));
+        LLVMValueRef mask = c32(a, width >= 32 ? 0xFFFFFFFFu : ((1u << width) - 1));
         r = band(a, lsr(a, x, lsb), mask);
         if (t->op == 0 && width < 32) r = LLVMBuildAShr(a->b, shl(a, r, 32 - width), c32(a, 32 - width), "");
         setreg(a, t->rd, r);
@@ -391,11 +395,10 @@ static int thumb_instruction(ArmIR* a, const SnxThumb* t) {
         case TH_IT: case TH_HINT: return 0;
         case TH_A32: { /* the A32 emitter runs the twin, reading Thumb's PC (ArmIR.thumb) */
             uint32_t word = a->word;
-            int stop;
             a->word = t->imm;
             a->pair = t->ra;
             a->offset = t->rd;
-            stop = instruction(a, (SnxA32Kind)t->op);
+            int stop = instruction(a, (SnxA32Kind)t->op);
             a->word = word;
             a->pair = 0;
             a->offset = 0;
@@ -466,7 +469,6 @@ LLVMValueRef snx_thumb_llvm_block(LLVMModuleRef module, const char* name, const 
 LLVMValueRef snx_thumb_llvm_block_ex(LLVMModuleRef module, const char* name, const uint16_t* halfwords,
                                     size_t count, uint32_t pc, size_t* consumed, const SnxArmCodegenOptions* options) {
     ArmIR a = {0};
-    LLVMTypeRef ft;
     size_t used = 0;
     unsigned itstate = 0; /* ITSTATE before the instruction being emitted */
     if (consumed) *consumed = 0;
@@ -475,28 +477,13 @@ LLVMValueRef snx_thumb_llvm_block_ex(LLVMModuleRef module, const char* name, con
         return NULL;
     if (options) { a.profile = options->profile; a.memory = options->memory; }
     a.thumb = 1;
-    a.ctx = LLVMGetModuleContext(module);
-    a.mod = module;
-    a.b = LLVMCreateBuilderInContext(a.ctx);
-    a.i1 = LLVMInt1TypeInContext(a.ctx);
-    a.i8 = LLVMInt8TypeInContext(a.ctx);
-    a.i16 = LLVMInt16TypeInContext(a.ctx);
-    a.i32 = LLVMInt32TypeInContext(a.ctx);
-    a.i64 = LLVMInt64TypeInContext(a.ctx);
-    a.ptr = LLVMPointerTypeInContext(a.ctx, 0);
-    ft = LLVMFunctionType(LLVMVoidTypeInContext(a.ctx), &a.ptr, 1, 0);
-    a.fn = LLVMAddFunction(module, name, ft);
-    a.cpu = LLVMGetParam(a.fn, 0);
-    LLVMPositionBuilderAtEnd(a.b, block(&a, "entry"));
-    PUT(&a, exit, c32(&a, SNX_ARM_OK));
-    PUT(&a, syndrome, c32(&a, 0));
-    require(&a, cmp(&a, LLVMIntEQ, get(&a, offsetof(SnxArmCPU, r) + 60, a.i32), c32(&a, pc)), SNX_ARM_BAD_ENTRY,
-            c32(&a, pc));
+    block_begin(&a, module, name, pc);
     require(&a, cmp(&a, LLVMIntNE, band(&a, GET(&a, cpsr), c32(&a, SNX_ARM_T)), c32(&a, 0)), SNX_ARM_BAD_ENTRY,
             c32(&a, halfwords[0]));
     {
-        LLVMValueRef cpsr = GET(&a, cpsr), itstate;
-        itstate = bor(&a, band(&a, lsr(&a, cpsr, 25), c32(&a, 3)), band(&a, lsr(&a, cpsr, 8), c32(&a, 0xFC)));
+        LLVMValueRef cpsr = GET(&a, cpsr);
+        LLVMValueRef itstate = bor(&a, band(&a, lsr(&a, cpsr, 25), c32(&a, 3)),
+                                   band(&a, lsr(&a, cpsr, 8), c32(&a, 0xFC)));
         require(&a, cmp(&a, LLVMIntEQ, itstate, c32(&a, 0)), SNX_ARM_IT_ENTRY, itstate);
     }
     require(&a, cmp(&a, LLVMIntEQ, band(&a, GET(&a, cpsr), c32(&a, SNX_ARM_E)), c32(&a, 0)), SNX_ARM_ENDIAN_UNSUPPORTED,
@@ -506,7 +493,6 @@ LLVMValueRef snx_thumb_llvm_block_ex(LLVMModuleRef module, const char* name, con
         SnxThumb t;
         uint16_t hw1 = halfwords[used], hw2 = (used + 1 < count) ? halfwords[used + 1] : 0;
         unsigned len = snx_thumb_decode_profile(a.profile, hw1, hw2, &t);
-        uint32_t next_pc;
         unsigned cond = 14;
         int stop;
         if (!len || (len == TH_F32 && used + 1 >= count)) {
@@ -523,7 +509,7 @@ LLVMValueRef snx_thumb_llvm_block_ex(LLVMModuleRef module, const char* name, con
         }
         a.pc = pc + (uint32_t)used * 2;
         a.word = len == TH_F32 ? (uint32_t)hw1 | ((uint32_t)hw2 << 16) : hw1; /* what an undefined one reports */
-        next_pc = a.pc + len * 2;
+        uint32_t next_pc = a.pc + len * 2;
         a.next = next_pc;
         setreg(&a, 15, c32(&a, a.pc));
         instruction_fetch(&a, a.word, len * 2);

@@ -7,6 +7,7 @@
    info; a title ID that is no DLC's is refused as the console refuses it. */
 #include "3ds/services/am.h"
 #include "3ds/runtime/internal.h"
+#include "common/utilities/endian.h"
 #include <string.h>
 
 #define AM_TID_HIGH_DLC          0x0004008cu
@@ -43,8 +44,7 @@ void snx_ctr_am_dispatch(SnxCtrIpc* c) {
                     c->transport_result = 0xe0e01bf5u;
                     return;
                 }
-                uint32_t high = (uint32_t)title[0] | (uint32_t)title[1] << 8 | (uint32_t)title[2] << 16 |
-                                (uint32_t)title[3] << 24;
+                uint32_t high = snx_ld_le32(title);
                 if (high != AM_TID_HIGH_DLC) {
                     result = AM_ERR_INVALID_TID_LIST;
                     break;

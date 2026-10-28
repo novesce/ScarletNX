@@ -24,7 +24,7 @@ static bool parse(CtrReader* r, const CtrSource* s, CtrNcch* n, bool overlay) {
     /* An NCCH's content size and section sizes are in media units of 0x200 bytes, except a proto image's (an early
        tool's), which counts bytes and matches the file it is in. Azahar's NCCHContainer decides the same way
        (is_proto) and reads a proto's ExHeader as any other. */
-    unsigned units = ctr_le32(h + 0x104);
+    unsigned units = snx_ld_le32(h + 0x104);
     uint64_t unit = 512;
     if ((uint64_t)units * unit != boot.size) {
         if (units != boot.size)
@@ -33,13 +33,13 @@ static bool parse(CtrReader* r, const CtrSource* s, CtrNcch* n, bool overlay) {
     }
     n->proto = unit == 1;
     uint64_t wanted = overlay ? ctr_update_title(s->title_id) : s->title_id;
-    if (ctr_le64(h + 0x118) != wanted || ctr_le32(h + 0x180) != (n->proto ? 0 : 0x400))
+    if (snx_ld_le64(h + 0x118) != wanted || snx_ld_le32(h + 0x180) != (n->proto ? 0 : 0x400))
         return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "NCCH size/title/ExHeader mismatch");
     CtrSpan regions[4];
     const unsigned offsets[] = {0x190, 0x198, 0x1a0, 0x1b0};
     for (size_t i = 0; i < 4; ++i) {
-        uint64_t at = (uint64_t)ctr_le32(h + offsets[i]) * unit;
-        uint64_t size = (uint64_t)ctr_le32(h + offsets[i] + 4) * unit;
+        uint64_t at = (uint64_t)snx_ld_le32(h + offsets[i]) * unit;
+        uint64_t size = (uint64_t)snx_ld_le32(h + offsets[i] + 4) * unit;
         if ((size && at < 0xa00) || !ctr_fits(boot.size, at, size))
             return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "invalid NCCH section range");
         regions[i] = (CtrSpan){boot.offset + at, size};
@@ -51,14 +51,14 @@ static bool parse(CtrReader* r, const CtrSource* s, CtrNcch* n, bool overlay) {
     CtrSpan exe = regions[2], rom = regions[3];
     if (!exe.size || (!!rom.size == !!(h[0x18f] & 2)))
         return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "missing ExeFS or inconsistent RomFS flag");
-    uint64_t hash_size = (uint64_t)ctr_le32(h + 0x1a8) * unit;
+    uint64_t hash_size = (uint64_t)snx_ld_le32(h + 0x1a8) * unit;
     if (hash_size < sizeof n->exefs || hash_size > exe.size ||
         !ctr_hash_matches(r, (CtrSpan){exe.offset, hash_size}, h + 0x1c0))
         return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "invalid ExeFS superblock hash/range");
     if (!ctr_read(r, boot, 0x200, exheader, sizeof n->exheader)) return false;
     unsigned char hash[32];
     if (!ctr_sha256(r, exheader, 0x400, hash)) return false;
-    if (memcmp(hash, h + 0x160, 32) || ctr_le64(exheader + 0x200) != wanted)
+    if (memcmp(hash, h + 0x160, 32) || snx_ld_le64(exheader + 0x200) != wanted)
         return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "ExHeader hash/program ID mismatch");
     if (n->proto) { /* Azahar gives a proto's application the usual priority and the application resource limit */
         if (!exheader[0x20f]) exheader[0x20f] = 0x30;
@@ -67,11 +67,11 @@ static bool parse(CtrReader* r, const CtrSource* s, CtrNcch* n, bool overlay) {
     CtrSegment* segments = n->segments;
     const unsigned segment_offsets[] = {0x10, 0x20, 0x30};
     uint64_t expected = 0, minimum = 0;
-    uint32_t bss = n->bss = ctr_le32(exheader + 0x3c), stack = n->stack = ctr_le32(exheader + 0x1c);
+    uint32_t bss = n->bss = snx_ld_le32(exheader + 0x3c), stack = n->stack = snx_ld_le32(exheader + 0x1c);
     for (size_t i = 0; i < 3; ++i) {
         const unsigned char* p = exheader + segment_offsets[i];
         CtrSegment* s = &segments[i];
-        *s = (CtrSegment){ctr_le32(p), ctr_le32(p + 4), ctr_le32(p + 8)};
+        *s = (CtrSegment){snx_ld_le32(p), snx_ld_le32(p + 4), snx_ld_le32(p + 8)};
         uint64_t length = (uint64_t)s->pages * 4096;
         uint64_t virtual_length = length + (i == 2 ? ((uint64_t)bss + 4095) / 4096 * 4096 : 0);
         /* Some homebrew makers report .data size INCLUDING BSS, while pages
@@ -111,7 +111,7 @@ static bool parse(CtrReader* r, const CtrSource* s, CtrNcch* n, bool overlay) {
         }
         memcpy(names[i], p, 8);
         if (!ctr_name(names[i])) return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "unsafe ExeFS filename");
-        uint64_t at = (uint64_t)ctr_le32(p + 8) + 0x200, size = ctr_le32(p + 12);
+        uint64_t at = (uint64_t)snx_ld_le32(p + 8) + 0x200, size = snx_ld_le32(p + 12);
         if (!ctr_fits(exe.size, at, size)) return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "ExeFS file exceeds section");
         files[i] = (CtrSpan){exe.offset + at, size};
         for (size_t j = 0; j < i; ++j)
@@ -132,10 +132,10 @@ static bool parse(CtrReader* r, const CtrSource* s, CtrNcch* n, bool overlay) {
                                 : ctr_fail(r, SNX_CTR_EXTRACT_LIMIT, "out of memory");
     size_t expanded = stored_size;
     if (ok && (exheader[0xd] & 1)) {
-        if (stored_size < 8 || (uint64_t)stored_size + ctr_le32(stored + stored_size - 4) > expected)
+        if (stored_size < 8 || (uint64_t)stored_size + snx_ld_le32(stored + stored_size - 4) > expected)
             ok = ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "BLZ expansion exceeds segment sizes");
         else {
-            expanded += ctr_le32(stored + stored_size - 4);
+            expanded += snx_ld_le32(stored + stored_size - 4);
             if (!snx_ctr_blz(stored, stored_size, n->code, expanded))
                 ok = ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "invalid ExeFS BLZ stream");
         }
@@ -153,7 +153,7 @@ static bool parse(CtrReader* r, const CtrSource* s, CtrNcch* n, bool overlay) {
         if (*names[i] && !r->quick && !ctr_hash_matches(r, files[i], exefs + 0x1e0 - i * 32)) return false;
     n->rom = rom;
     if (rom.size) {
-        uint64_t rom_hash_size = (uint64_t)ctr_le32(h + 0x1b8) * unit;
+        uint64_t rom_hash_size = (uint64_t)snx_ld_le32(h + 0x1b8) * unit;
         if (!rom_hash_size || rom_hash_size > rom.size ||
             !ctr_hash_matches(r, (CtrSpan){rom.offset, rom_hash_size}, h + 0x1e0))
             return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "invalid RomFS superblock hash/range");

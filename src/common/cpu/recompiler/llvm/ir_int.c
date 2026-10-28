@@ -101,17 +101,16 @@ static void addsub_imm(SnxIr* ir, const SnxA64Args* a, int subtract, int setflag
 
 /* DecodeBitMasks' wmask (logic_imm_decode_wmask): 0 for a reserved immediate */
 static int bitmask_imm(SnxU64* result, unsigned immn, unsigned imms, unsigned immr) {
-    unsigned v = (immn << 6) | (~imms & 0x3Fu), len = 0, e, levels, s, r;
-    SnxU64 mask;
+    unsigned v = (immn << 6) | (~imms & 0x3Fu), len = 0;
     if (!v) return 0;
     while (v >> (len + 1)) ++len;
     if (len < 1) return 0; /* immn 0, imms 11111x */
-    e = 1u << len;
-    levels = e - 1;
-    s = imms & levels;
-    r = immr & levels;
+    unsigned e = 1u << len;
+    unsigned levels = e - 1;
+    unsigned s = imms & levels;
+    unsigned r = immr & levels;
     if (s == levels) return 0;
-    mask = ones(s + 1);
+    SnxU64 mask = ones(s + 1);
     if (r) mask = ((mask >> r) | (mask << (e - r))) & ones(e);
     for (; e < 64; e *= 2) mask |= mask << e;
     *result = mask;
@@ -130,10 +129,9 @@ static V logic(SnxIr* ir, SnxA64Op op, V a, V b) {
 
 static int logic_imm(SnxIr* ir, SnxA64Op op, const SnxA64Args* a) {
     SnxU64 imm;
-    V r;
     if (!bitmask_imm(&imm, ((unsigned)a->dbm >> 12) & 1, (unsigned)a->dbm & 0x3F, ((unsigned)a->dbm >> 6) & 0x3F))
         return 0;
-    r = logic(ir, op, reg(ir, (unsigned)a->rn, a->sf), konst(ir, a->sf, imm));
+    V r = logic(ir, op, reg(ir, (unsigned)a->rn, a->sf), konst(ir, a->sf, imm));
     if (op == SNX_A64_OP_ANDS_i) {
         ir_flags_logic(ir, r, bits_of(a->sf));
         set_reg(ir, (unsigned)a->rd, r);
@@ -199,9 +197,9 @@ static void extr(SnxIr* ir, const SnxA64Args* a) {
 /* ---- data processing (register) ---- */
 
 static void logic_reg(SnxIr* ir, SnxA64Op op, const SnxA64Args* a) {
-    V b = shift_imm(ir, reg(ir, (unsigned)a->rm, a->sf), (unsigned)a->st, (unsigned)a->sa, a->sf), r;
+    V b = shift_imm(ir, reg(ir, (unsigned)a->rm, a->sf), (unsigned)a->st, (unsigned)a->sa, a->sf);
     if (a->n) b = LLVMBuildNot(B, b, ""); /* BIC, ORN, EON, BICS */
-    r = logic(ir, op, reg(ir, (unsigned)a->rn, a->sf), b);
+    V r = logic(ir, op, reg(ir, (unsigned)a->rn, a->sf), b);
     if (op == SNX_A64_OP_ANDS_r) ir_flags_logic(ir, r, bits_of(a->sf));
     set_reg(ir, (unsigned)a->rd, r);
 }
@@ -215,13 +213,13 @@ static void addsub_reg(SnxIr* ir, const SnxA64Args* a, int subtract, int setflag
 static void addsub_ext(SnxIr* ir, const SnxA64Args* a, int subtract, int setflags) {
     static const unsigned sizes[3] = {8, 16, 32};
     unsigned option = (unsigned)a->st;
-    V m = ir_rx(ir, (unsigned)a->rm), r;
+    V m = ir_rx(ir, (unsigned)a->rm);
     if ((option & 3) != 3) {
         LLVMTypeRef narrow = LLVMIntTypeInContext(ir->ctx, sizes[option & 3]);
         m = ir_cast(ir, LLVMBuildTrunc(B, m, narrow, ""), ir->t_i64, (option & 4) != 0);
     }
     m = LLVMBuildShl(B, m, ir_i64(ir, (unsigned)a->sa), "");
-    r = add_sub(ir, a->sf, reg_sp(ir, (unsigned)a->rn, a->sf), a->sf ? m : ir_u32(ir, m), subtract, setflags);
+    V r = add_sub(ir, a->sf, reg_sp(ir, (unsigned)a->rn, a->sf), a->sf ? m : ir_u32(ir, m), subtract, setflags);
     if (setflags)
         set_reg(ir, (unsigned)a->rd, r);
     else
@@ -287,9 +285,9 @@ static void dp1(SnxIr* ir, SnxA64Op op, const SnxA64Args* a) {
 
 /* UDIV and SDIV: x / 0 is 0, and the most negative value / -1 is itself (do_div) */
 static void divide(SnxIr* ir, const SnxA64Args* a, int is_signed) {
-    V n = reg(ir, (unsigned)a->rn, a->sf), m = reg(ir, (unsigned)a->rm, a->sf), one = konst(ir, a->sf, 1), zero;
-    V by_zero = LLVMBuildICmp(B, LLVMIntEQ, m, konst(ir, a->sf, 0), ""), avoid = by_zero, r;
-    zero = konst(ir, a->sf, 0);
+    V n = reg(ir, (unsigned)a->rn, a->sf), m = reg(ir, (unsigned)a->rm, a->sf), one = konst(ir, a->sf, 1);
+    V by_zero = LLVMBuildICmp(B, LLVMIntEQ, m, konst(ir, a->sf, 0), ""), avoid = by_zero;
+    V zero = konst(ir, a->sf, 0);
     if (is_signed) {
         V minimum = LLVMBuildICmp(B, LLVMIntEQ, n, konst(ir, a->sf, 1ull << (bits_of(a->sf) - 1)), "");
         avoid = LLVMBuildOr(B, avoid,
@@ -297,7 +295,7 @@ static void divide(SnxIr* ir, const SnxA64Args* a, int is_signed) {
                             "");
     }
     m = LLVMBuildSelect(B, avoid, one, m, "");
-    r = is_signed ? LLVMBuildSDiv(B, n, m, "") : LLVMBuildUDiv(B, n, m, "");
+    V r = is_signed ? LLVMBuildSDiv(B, n, m, "") : LLVMBuildUDiv(B, n, m, "");
     set_reg(ir, (unsigned)a->rd, LLVMBuildSelect(B, by_zero, zero, r, ""));
 }
 
@@ -325,14 +323,14 @@ static V crc_table(SnxIr* ir, int castagnoli) {
         SnxU32 entries[8 * 256], poly = castagnoli ? 0x82F63B78u : 0xEDB88320u, c;
         V values[8 * 256];
         LLVMTypeRef type = LLVMArrayType(ir->t_i32, 8 * 256);
-        unsigned i, k;
-        for (i = 0; i < 256; ++i) {
+        for (unsigned i = 0; i < 256; ++i) {
             c = i;
-            for (k = 0; k < 8; ++k) c = (c >> 1) ^ (poly & (0u - (c & 1)));
+            for (unsigned k = 0; k < 8; ++k) c = (c >> 1) ^ (poly & (0u - (c & 1)));
             entries[i] = c;
         }
-        for (i = 256; i < 8 * 256; ++i) entries[i] = (entries[i - 256] >> 8) ^ entries[entries[i - 256] & 0xFF];
-        for (i = 0; i < 8 * 256; ++i) values[i] = ir_i32(ir, entries[i]);
+        for (unsigned i = 256; i < 8 * 256; ++i)
+            entries[i] = (entries[i - 256] >> 8) ^ entries[entries[i - 256] & 0xFF];
+        for (unsigned i = 0; i < 8 * 256; ++i) values[i] = ir_i32(ir, entries[i]);
         table = LLVMAddGlobal(ir->mod, type, name);
         LLVMSetLinkage(table, LLVMPrivateLinkage);
         LLVMSetUnnamedAddress(table, LLVMGlobalUnnamedAddr);
@@ -343,17 +341,16 @@ static V crc_table(SnxIr* ir, int castagnoli) {
 }
 
 static V crc_sliced(SnxIr* ir, V acc, V value, unsigned bytes, int castagnoli) {
-    V table = crc_table(ir, castagnoli), m, r;
+    V table = crc_table(ir, castagnoli);
     LLVMTypeRef type = LLVMArrayType(ir->t_i32, 8 * 256);
-    unsigned k;
-    m = LLVMBuildXor(B, LLVMBuildAnd(B, value, ir_i64(ir, ones(8 * bytes)), ""), ir_u64(ir, acc), "");
-    r = bytes < 4 ? LLVMBuildLShr(B, acc, ir_i32(ir, 8 * bytes), "") : ir_i32(ir, 0);
-    for (k = 0; k < bytes; ++k) {
+    V m = LLVMBuildXor(B, LLVMBuildAnd(B, value, ir_i64(ir, ones(8 * bytes)), ""), ir_u64(ir, acc), "");
+    V r = bytes < 4 ? LLVMBuildLShr(B, acc, ir_i32(ir, 8 * bytes), "") : ir_i32(ir, 0);
+    for (unsigned k = 0; k < bytes; ++k) {
         V byte = LLVMBuildAnd(B, LLVMBuildLShr(B, m, ir_i64(ir, 8 * k), ""), ir_i64(ir, 0xFF), "");
-        V index[2], entry;
+        V index[2];
         index[0] = ir_i64(ir, 0);
         index[1] = LLVMBuildAdd(B, byte, ir_i64(ir, 256 * (bytes - 1 - k)), "");
-        entry = LLVMBuildLoad2(B, ir->t_i32, LLVMBuildInBoundsGEP2(B, type, table, index, 2, ""), "");
+        V entry = LLVMBuildLoad2(B, ir->t_i32, LLVMBuildInBoundsGEP2(B, type, table, index, 2, ""), "");
         r = LLVMBuildXor(B, r, entry, "");
     }
     return r;
@@ -460,8 +457,8 @@ static V read_sysreg(SnxIr* ir, SnxU32 key) {
     switch (key) {
         case SYSREG(3, 4, 2, 0): { /* NZCV */
             V v = ir_i32(ir, 0);
-            unsigned i;
-            for (i = 0; i < 4; ++i) v = LLVMBuildOr(B, v, LLVMBuildShl(B, ir_flag_read(ir, i), ir_i32(ir, 31 - i), ""), "");
+            for (unsigned i = 0; i < 4; ++i)
+                v = LLVMBuildOr(B, v, LLVMBuildShl(B, ir_flag_read(ir, i), ir_i32(ir, 31 - i), ""), "");
             return ir_u64(ir, v);
         }
         case SYSREG(3, 4, 4, 0): return ir_u64(ir, ir_cpu_load(ir, ir->t_i32, offsetof(CPU, fpcr)));

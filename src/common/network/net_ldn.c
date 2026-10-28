@@ -69,14 +69,6 @@ struct SnxLdn {
 };
 
 /* ============================================================ frames */
-static void put16(uint8_t* p, uint16_t v) {
-    p[0] = (uint8_t)v;
-    p[1] = (uint8_t)(v >> 8);
-}
-static uint16_t get16(const uint8_t* p) { return (uint16_t)(p[0] | (p[1] << 8)); }
-static uint32_t get32(const uint8_t* p) {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
 /* ldn_mitm's run-length coding: a zero byte is followed by how many more zeros it stands for (up to 255). Returns
    the coded size, or 0 when it wouldn't fit max */
 static size_t rle(const uint8_t* in, size_t n, uint8_t* out, size_t max) {
@@ -105,10 +97,9 @@ static size_t unrle(const uint8_t* in, size_t n, uint8_t* out, size_t max) {
         if (o >= max) return 0;
         out[o++] = b;
         if (b == 0) {
-            size_t count, k;
             if (i >= n) return 0;
-            count = in[i++];
-            for (k = 0; k < count; k++) {
+            size_t count = in[i++];
+            for (size_t k = 0; k < count; k++) {
                 if (o >= max) return 0;
                 out[o++] = 0;
             }
@@ -130,31 +121,27 @@ size_t snx_ldn_frame(uint8_t type, const void* payload, size_t size, uint8_t* ou
             coded = size;
         }
     }
-    out[0] = (uint8_t)LDN_MAGIC;
-    out[1] = (uint8_t)(LDN_MAGIC >> 8);
-    out[2] = (uint8_t)(LDN_MAGIC >> 16);
-    out[3] = (uint8_t)(LDN_MAGIC >> 24);
+    snx_st_le32(out, LDN_MAGIC);
     out[4] = type;
     out[5] = compressed;
-    put16(out + 6, (uint16_t)coded);
-    put16(out + 8, (uint16_t)(compressed ? size : 0));
+    snx_st_le16(out + 6, (uint16_t)coded);
+    snx_st_le16(out + 8, (uint16_t)(compressed ? size : 0));
     out[10] = out[11] = 0;
     return SNX_LDN_HEADER + coded;
 }
 int snx_ldn_unframe(const uint8_t* in, size_t size, uint8_t* type, uint8_t* payload, size_t max, size_t* payload_size,
                     size_t* used) {
-    size_t length, total;
     if (size < SNX_LDN_HEADER) return 0;
-    if (get32(in) != LDN_MAGIC) return -1;
-    length = get16(in + 6);
-    total = SNX_LDN_HEADER + length;
+    if (snx_ld_le32(in) != LDN_MAGIC) return -1;
+    size_t length = snx_ld_le16(in + 6);
+    size_t total = SNX_LDN_HEADER + length;
     if (total > SNX_LDN_FRAME_MAX) return -1;
     if (size < total) return 0;
     *type = in[4];
     *used = total;
     if (in[5]) {
         size_t n = unrle(in + SNX_LDN_HEADER, length, payload, max);
-        if (!n || n != get16(in + 8)) return -1;
+        if (!n || n != snx_ld_le16(in + 8)) return -1;
         *payload_size = n;
         return 1;
     }
@@ -271,8 +258,8 @@ static void close_station(LdnStation* st) {
 }
 /* the host's network to every connected station */
 static void sync_stations(SnxLdn* l) {
-    int i, r;
-    for (i = 0; i < SNX_LDN_STATIONS; i++) {
+    int r;
+    for (int i = 0; i < SNX_LDN_STATIONS; i++) {
         if (!l->st[i].node) continue;
         if (l->room)
             r = snx_room_send_ldn(l->room, SNX_ROOM_LDN_SYNC_NETWORK, l->st[i].ip, 0, &l->info, sizeof l->info);
@@ -590,14 +577,14 @@ static void ldn_thread(void* arg) {
 /* ============================================================ the calls */
 int snx_ldn_open(SnxLdn** out, const uint8_t ip[4], const uint8_t mask[4], void (*changed)(void*), void* arg) {
     SnxLdn* l;
-    int i, r = snx_net_init();
+    int r = snx_net_init();
     if (r) return r;
     l = calloc(1, sizeof *l);
     if (!l) return -SNX_ENOMEM;
     snx_lock_init(&l->lk);
     memcpy(l->ip, ip, 4);
     memcpy(l->mask, mask, 4);
-    for (i = 0; i < 4; i++) l->bcast[i] = (uint8_t)(ip[i] | ~mask[i]);
+    for (int i = 0; i < 4; i++) l->bcast[i] = (uint8_t)(ip[i] | ~mask[i]);
     l->changed = changed;
     l->arg = arg;
     r = listen_socket(&l->listen, ip);
@@ -621,7 +608,7 @@ int snx_ldn_open(SnxLdn** out, const uint8_t ip[4], const uint8_t mask[4], void 
 int snx_ldn_open_room(SnxLdn** out, SnxRoom* room, void (*changed)(void*), void* arg) {
     static const uint8_t mask[4] = {255, 255, 255, 0}; /* the room's addresses are 192.168.x.y */
     SnxLdn* l;
-    int i, r = snx_net_init();
+    int r = snx_net_init();
     if (r) return r;
     l = calloc(1, sizeof *l);
     if (!l) return -SNX_ENOMEM;
@@ -629,7 +616,7 @@ int snx_ldn_open_room(SnxLdn** out, SnxRoom* room, void (*changed)(void*), void*
     l->room = room;
     snx_room_fake_ip(room, l->ip);
     memcpy(l->mask, mask, 4);
-    for (i = 0; i < 4; i++) l->bcast[i] = (uint8_t)(l->ip[i] | ~mask[i]);
+    for (int i = 0; i < 4; i++) l->bcast[i] = (uint8_t)(l->ip[i] | ~mask[i]);
     l->changed = changed;
     l->arg = arg;
     r = snx_socket_eventfd(&l->changed_ev, 0, 0);
@@ -651,7 +638,6 @@ int snx_ldn_open_room(SnxLdn** out, SnxRoom* room, void (*changed)(void*), void*
     return 0;
 }
 void snx_ldn_close(SnxLdn* l) {
-    int i;
     if (!l) return;
     if (l->room) { /* no more messages for l, then the goodbyes Eden's Finalize sends */
         snx_room_clear_ldn(l->room, l);
@@ -674,7 +660,7 @@ void snx_ldn_close(SnxLdn* l) {
         }
     }
     snx_socket_unref(l->listen);
-    for (i = 0; i < SNX_LDN_STATIONS; i++) snx_socket_unref(l->st[i].s);
+    for (int i = 0; i < SNX_LDN_STATIONS; i++) snx_socket_unref(l->st[i].s);
     snx_socket_unref(l->client);
     snx_socket_unref(l->ub);
     snx_socket_unref(l->uu);
@@ -689,9 +675,8 @@ void snx_ldn_address(const SnxLdn* l, uint8_t ip[4], uint8_t mask[4]) {
 }
 void snx_ldn_node_init(const SnxLdn* l, SnxLdnNodeInfo* node, const uint8_t user_name[SNX_LDN_USER_NAME],
                        int16_t version) {
-    int i;
     memset(node, 0, sizeof *node);
-    for (i = 0; i < 4; i++) node->ipv4[i] = l->ip[3 - i]; /* host order */
+    for (int i = 0; i < 4; i++) node->ipv4[i] = l->ip[3 - i]; /* host order */
     snx_ldn_fake_mac(l->ip, node->mac);
     node->is_connected = 1;
     memcpy(node->user_name, user_name, SNX_LDN_USER_NAME);
@@ -715,10 +700,9 @@ int snx_ldn_create_network(SnxLdn* l, const SnxLdnNetworkInfo* info) {
     return 0;
 }
 void snx_ldn_destroy_network(SnxLdn* l) {
-    int i;
     snx_lock(&l->lk);
     if (l->role == ROLE_HOST) {
-        for (i = 0; i < SNX_LDN_STATIONS; i++) {
+        for (int i = 0; i < SNX_LDN_STATIONS; i++) {
             if (l->room && l->st[i].node &&
                 snx_room_send_ldn(l->room, SNX_ROOM_LDN_DESTROY_NETWORK, l->st[i].ip, 0, NULL, 0))
                 snx_net_log("ldn: node %d wasn't told the network is gone", l->st[i].node);
@@ -763,7 +747,7 @@ static int filter_accepts(const SnxLdnScanFilter* f, const SnxLdnNetworkInfo* i)
 int snx_ldn_scan(SnxLdn* l, const SnxLdnScanFilter* filter, SnxLdnNetworkInfo* out, int max, int wait_ms) {
     SnxSockAddr to;
     int64_t deadline = snx_net_now_us() + (int64_t)wait_ms * 1000, first = 0;
-    int i, n = 0;
+    int n = 0;
     addr_of(&to, l->bcast, SNX_LDN_PORT);
     snx_lock(&l->lk);
     l->scanning = 1;
@@ -781,21 +765,20 @@ int snx_ldn_scan(SnxLdn* l, const SnxLdnScanFilter* filter, SnxLdnNetworkInfo* o
         send_frame_udp(l, SNX_LDN_SCAN, NULL, 0, &to);
     snx_unlock(&l->lk);
     for (;;) {
-        int64_t now = snx_net_now_us(), until = deadline, ms;
-        int count;
+        int64_t now = snx_net_now_us(), until = deadline;
         /* on the LAN the replies come together; through a room, from wherever each member is, so the whole wait */
         if (first && !l->room && first + LDN_SCAN_SETTLE_MS * 1000 < until) until = first + LDN_SCAN_SETTLE_MS * 1000;
         if (now >= until) break;
-        ms = (until - now + 999) / 1000;
+        int64_t ms = (until - now + 999) / 1000;
         wait_event(l->changed_ev, (int)ms);
         snx_lock(&l->lk);
-        count = l->nscan;
+        int count = l->nscan;
         snx_unlock(&l->lk);
         if (count && !first) first = snx_net_now_us();
     }
     snx_lock(&l->lk);
     l->scanning = 0;
-    for (i = 0; i < l->nscan && n < max; i++)
+    for (int i = 0; i < l->nscan && n < max; i++)
         if (filter_accepts(filter, &l->scan[i]) && l->scan[i].nodes[0].user_name[0]) out[n++] = l->scan[i];
     snx_unlock(&l->lk);
     return n;
@@ -803,8 +786,6 @@ int snx_ldn_scan(SnxLdn* l, const SnxLdnScanFilter* filter, SnxLdnNetworkInfo* o
 
 /* the station's side through a room: the Connect to the host, then the wait for its SyncNetwork */
 static int room_connect(SnxLdn* l, const SnxLdnNodeInfo* me, const uint8_t host[4], int wait_ms) {
-    int64_t deadline;
-    int r;
     snx_lock(&l->lk);
     memset(&l->info, 0, sizeof l->info);
     memset(l->updates, 0, sizeof l->updates);
@@ -814,17 +795,17 @@ static int room_connect(SnxLdn* l, const SnxLdnNodeInfo* me, const uint8_t host[
     l->reason = SNX_LDN_REASON_NONE;
     l->role = ROLE_STATION;
     drain_event(l->changed_ev);
-    r = snx_room_send_ldn(l->room, SNX_ROOM_LDN_CONNECT, host, 0, me, sizeof *me);
+    int r = snx_room_send_ldn(l->room, SNX_ROOM_LDN_CONNECT, host, 0, me, sizeof *me);
     if (r) l->role = ROLE_NONE;
     snx_unlock(&l->lk);
     if (r) return r;
-    deadline = snx_net_now_us() + (int64_t)wait_ms * 1000;
+    int64_t deadline = snx_net_now_us() + (int64_t)wait_ms * 1000;
     for (;;) {
         int64_t now = snx_net_now_us();
-        int connected, gone;
+        int connected;
         snx_lock(&l->lk);
         connected = l->connected;
-        gone = l->role != ROLE_STATION;
+        int gone = l->role != ROLE_STATION;
         snx_unlock(&l->lk);
         if (connected) return 0;
         if (gone) return -SNX_ECONNRESET; /* the host destroyed the network, or left the room */
@@ -841,8 +822,6 @@ int snx_ldn_connect(SnxLdn* l, const SnxLdnNetworkInfo* info, const uint8_t user
     SnxSockAddr a;
     SnxTimeval tv;
     uint8_t host[4];
-    int64_t deadline;
-    int i, r;
     if (info->node_count == 0) return -SNX_EINVAL;
     snx_lock(&l->lk);
     if (l->role != ROLE_NONE) {
@@ -851,9 +830,9 @@ int snx_ldn_connect(SnxLdn* l, const SnxLdnNetworkInfo* info, const uint8_t user
     }
     snx_ldn_node_init(l, &me, user_name, version);
     snx_unlock(&l->lk);
-    for (i = 0; i < 4; i++) host[i] = info->nodes[0].ipv4[3 - i];
+    for (int i = 0; i < 4; i++) host[i] = info->nodes[0].ipv4[3 - i];
     if (l->room) return room_connect(l, &me, host, wait_ms);
-    r = snx_socket_open(&s, SNX_AF_INET, SNX_SOCK_STREAM, 0);
+    int r = snx_socket_open(&s, SNX_AF_INET, SNX_SOCK_STREAM, 0);
     if (r) return r;
     tv.sec = (int64_t)snx_le64((uint64_t)(wait_ms / 1000)); /* the guest's order, as every option value */
     tv.usec = (int64_t)snx_le64((uint64_t)((wait_ms % 1000) * 1000));
@@ -877,13 +856,13 @@ int snx_ldn_connect(SnxLdn* l, const SnxLdnNetworkInfo* info, const uint8_t user
     drain_event(l->changed_ev);
     snx_unlock(&l->lk);
     signal_event(l->wake);
-    deadline = snx_net_now_us() + (int64_t)wait_ms * 1000;
+    int64_t deadline = snx_net_now_us() + (int64_t)wait_ms * 1000;
     for (;;) {
         int64_t now = snx_net_now_us();
-        int connected, gone;
+        int connected;
         snx_lock(&l->lk);
         connected = l->connected;
-        gone = l->client == NULL;
+        int gone = l->client == NULL;
         snx_unlock(&l->lk);
         if (connected) return 0;
         if (gone) return -SNX_ECONNRESET; /* the host closed on me: full, or going away */
@@ -910,9 +889,8 @@ void snx_ldn_disconnect(SnxLdn* l) {
 }
 
 int snx_ldn_network_info(SnxLdn* l, SnxLdnNetworkInfo* out, uint8_t updates[SNX_LDN_NODES]) {
-    int r;
     snx_lock(&l->lk);
-    r = l->role == ROLE_HOST || (l->role == ROLE_STATION && l->connected);
+    int r = l->role == ROLE_HOST || (l->role == ROLE_STATION && l->connected);
     if (r) {
         *out = l->info;
         if (updates) {
@@ -924,16 +902,14 @@ int snx_ldn_network_info(SnxLdn* l, SnxLdnNetworkInfo* out, uint8_t updates[SNX_
     return r;
 }
 int snx_ldn_connected(SnxLdn* l) {
-    int r;
     snx_lock(&l->lk);
-    r = l->role == ROLE_HOST || (l->role == ROLE_STATION && l->connected);
+    int r = l->role == ROLE_HOST || (l->role == ROLE_STATION && l->connected);
     snx_unlock(&l->lk);
     return r;
 }
 int snx_ldn_disconnect_reason(SnxLdn* l) {
-    int r;
     snx_lock(&l->lk);
-    r = l->reason;
+    int r = l->reason;
     snx_unlock(&l->lk);
     return r;
 }

@@ -156,17 +156,35 @@ static int same_bytes(const char* a, const char* b) {
     if (y) fclose(y);
     return same;
 }
+/* 1 when the runtime a game runs carries a Vulkan driver its folder has not (snx_vulkan_driver): the deploy puts it
+   there, and a folder that lost it gets it again (docs/APPLE.md) */
+static int driver_missing(const char* run, const char* game) {
+#if defined(__APPLE__) && !defined(SNX_IOS)
+    char* carried = snx_vulkan_driver(run);
+    char* there = carried ? snx_vulkan_driver(game) : NULL;
+    int missing = carried && !there;
+    free(carried);
+    free(there);
+    return missing;
+#else
+    (void)run;
+    (void)game;
+    return 0;
+#endif
+}
 /* A game made by another build of this ABI runs the code it was recompiled into (stamped), with its folder's copy of
    that build's runtime: replaced by this build's when the two differ, so its fixes reach the games made before it. 0,
    or nonzero with a line saying why */
 static int refresh_runtime(const SnxPaths* paths, const char* game) {
     char* run = snx_own_runtime(paths);
-    int rc = 0;
+    int rc = 0, same;
     /* a build without the runtime deploys one it builds, not itself: there is nothing here to hold the copy to */
     if (!run) return 0;
-    if (!same_bytes(run, game)) {
+    same = same_bytes(run, game);
+    /* the library beside the runtime is deployed with it (snx_deploy_runtime): a folder that lost it gets it back */
+    if (!same || driver_missing(run, game)) {
         rc = snx_deploy_runtime(run, game);
-        if (!rc) printf("%s ran another build's runtime: it runs %s now\n", game, run);
+        if (!rc && !same) printf("%s ran another build's runtime: it runs %s now\n", game, run);
     }
     free(run);
     return rc;

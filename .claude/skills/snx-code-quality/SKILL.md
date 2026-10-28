@@ -9,12 +9,28 @@ Write strict ISO C: C99, as the driver builds (`-std=c99 -pedantic-errors`), unl
 C99 is the baseline, so use what it has: `static inline` functions, `<stdint.h>` types (`SnxU32`/`SnxU64` in the
 driver), 64-bit literals as `0x...ull` (not `UINT64_C`, not two halves), `SIZE_MAX` in size checks
 (`n > SIZE_MAX / size`), `%zu` for a `size_t`, `%llu`/`%llx` through `(unsigned long long)` for a 64-bit value
-(never `(unsigned long)`: `long` is 32 bits on Windows), `bool` or `int` flags, `strtoull`, `snprintf`. A
-declaration may follow statements and open a `for`; comments stay `/* */`, as the code has them. In place of C11
-and C23: `__atomic_*` builtins on plain integers, a `char` padding array, a negative-size array typedef as the static
-assert. A file's build flags plus `-std=c99 -pedantic` list what is not. A local that starts zeroed is declared
-`= {0}`, not zeroed by a `memset` after its declaration; a `memset` stays for an object reached through a pointer.
-`strdup` is not C99: `snx_strdup` (common.h) is, and fails the way the rest of the code does when memory runs out.
+(never `(unsigned long)`: `long` is 32 bits on Windows), `bool` or `int` flags, `strtoull`, `snprintf`. Comments
+stay `/* */`, as the code has them. In place of C11 and C23: `__atomic_*` builtins on plain integers, a `char` padding
+array, a negative-size array typedef as the static assert. A file's build flags plus `-std=c99 -pedantic` list what
+is not. `strdup` is not C99: `snx_strdup` (common.h) is, and fails the way the rest of the code does when memory runs
+out.
+
+No C89 workarounds. A local is declared where it first gets its value, joined with that assignment, in the innermost
+block that uses it, and a loop counter in its `for`; a block of bare declarations at the top of a function is not the
+style. It stays above a forward `goto` whose label reads it.
+
+Language semantics over library calls. A local that starts zeroed is declared `= {0}`, not zeroed by a `memset`
+after its declaration. An object reached through a pointer is zeroed with `*p = (T){0};`, and a struct is copied by
+assignment (`a = b;`, `*dst = *src;`), not `memcpy`. `memset` and `memcpy` stay where the bytes matter or the types
+differ: bytes hashed, `memcmp`'d, used as a key, or written to a file, guest memory, a GPU buffer or the wire (an
+initializer or an assignment leaves padding unspecified), byte ranges, non-zero fills, copies between different
+types (that `memcpy` is how the code keeps strict aliasing), and objects over about a kilobyte (a compound literal
+can be a stack temporary that size: the 3DS's 100 KB `SnxCtrPica` is cleared with `memset`).
+
+One implementation of each helper. Before writing a small helper, look in `common/utilities/`: `ascii.h` (character
+classes, hex digits, case, path separators, locale-free), `bits.h` (align, clamp, min/max, FNV-1a, qsort
+comparators), `endian.h` (little- and big-endian loads and stores at a byte address) and `common.h` (paths, files,
+strings). A helper two files need goes there or in a header beside both, never in a second copy.
 
 1. **No state another value already says.** A NULL pointer is absent: no `is_present` beside it.
    Not when NULL means something itself, or the flag says something else.

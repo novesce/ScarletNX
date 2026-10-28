@@ -7,6 +7,7 @@
 #include "3ds/audio/dsp.h"
 #include "3ds/audio/output.h"
 #include "3ds/runtime/internal.h"
+#include "common/utilities/endian.h"
 #include "common/utilities/common.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -155,8 +156,8 @@ static bool receive_buffer(SnxCtrIpc* c, uint32_t size, uint32_t* address) {
         c->transport_result = 0xe0e01bf5u;
         return false;
     }
-    uint32_t descriptor = (uint32_t)d[0] | d[1] << 8 | d[2] << 16 | (uint32_t)d[3] << 24;
-    *address = (uint32_t)d[4] | d[5] << 8 | d[6] << 16 | (uint32_t)d[7] << 24;
+    uint32_t descriptor = snx_ld_le32(d);
+    *address = snx_ld_le32(d + 4);
     if ((descriptor & 0x3fff) != 2 || (descriptor >> 14) < size) {
         snx_ctr_ipc_bad(c);
         return false;

@@ -147,7 +147,7 @@ int agb_map_init(AgbMap* map, AgbBoard* board, char* error, size_t error_size) {
     size_t rom = board->has_cartridge ? board->cartridge.size : AGB_ROM_MIN;
     /* the image in whole units of the open bus pattern that follows it, which repeats every 128 KiB */
     size_t rom_backing_size = (rom + AGB_ROM_BUS_PERIOD - 1) & ~(size_t)(AGB_ROM_BUS_PERIOD - 1);
-    memset(map, 0, sizeof(*map));
+    *map = (AgbMap){0};
     map->page = snx_host_page();
     map->mirrored = map->page && map->page <= AGB_MAP_VIEW_MAX;
     map->base = snx_host_reserve(AGB_MAP_SIZE + AGB_MAP_GUARD);
@@ -195,5 +195,5 @@ void agb_map_destroy(AgbMap* map, AgbBoard* board) {
         if (map->adopted) agb_memory_init(&board->memory); /* the devices fall back to plain buffers */
     }
     for (int i = 0; i < map->backing_count; ++i) snx_host_memory_free(&map->backings[i]);
-    memset(map, 0, sizeof(*map));
+    *map = (AgbMap){0};
 }

@@ -13,25 +13,21 @@
    by name in the runtime library. The common single and double operations first try the host's IEEE arithmetic
    behind a guard proving it gives the helper's result and flags (the fast paths below). */
 #include "common/cpu/recompiler/llvm/ir_fpu.h"
+#include "common/cpu/recompiler/llvm/ir_fp.h"
 #include "common/cpu/aarch64/cpu.h"
 
 typedef LLVMValueRef V;
 #define B ir->b
 
-#define FPCR_RMODE (3u << 22)
-#define FPCR_FZ    (1u << 24)
-#define FPSR_IXC   0x10u
 
 /* ---- types, registers and FP state ---- */
 
-static LLVMTypeRef int_type(SnxIr* ir, unsigned bits) { return LLVMIntTypeInContext(ir->ctx, bits); }
 static LLVMTypeRef float_type(SnxIr* ir, unsigned bits) {
     return bits == 32 ? LLVMFloatTypeInContext(ir->ctx) : LLVMDoubleTypeInContext(ir->ctx);
 }
-static V kint(SnxIr* ir, unsigned bits, SnxU64 v) { return LLVMConstInt(int_type(ir, bits), v, 0); }
+static V kint(SnxIr* ir, unsigned bits, SnxU64 v) { return LLVMConstInt(ir_int_type(ir, bits), v, 0); }
 static V kfloat(SnxIr* ir, unsigned bits, double v) { return LLVMConstReal(float_type(ir, bits), v); }
 static unsigned width_of(int esz) { return 8u << esz; }
-static unsigned esz_of(unsigned width) { return width == 16 ? 1 : width == 32 ? 2 : 3; }
 
 /* the low width bits of Vn (read_fp_hreg, read_fp_sreg, read_fp_dreg) */
 static V fp_reg(SnxIr* ir, unsigned n, unsigned width) { return ir_ve(ir, n, esz_of(width), 0); }
@@ -47,43 +43,26 @@ static V gpr(SnxIr* ir, unsigned n, int sf) {
 }
 static void set_gpr(SnxIr* ir, unsigned d, V value) { ir_setx(ir, d, ir_cast(ir, value, ir->t_i64, 0)); }
 
-static V fpcr(SnxIr* ir) { return ir_cpu_load(ir, ir->t_i32, offsetof(CPU, fpcr)); }
-static V fpsr(SnxIr* ir) { return ir_cpu_load(ir, ir->t_i32, offsetof(CPU, fpsr)); }
-/* FPCR.RMode as the helpers' rounding mode (0-3) */
-static V fpcr_rmode(SnxIr* ir) {
-    return LLVMBuildAnd(B, LLVMBuildLShr(B, fpcr(ir), ir_i32(ir, 22), ""), ir_i32(ir, 3), "");
-}
-/* i1: none of the FPCR bits of mask is set */
-static V fpcr_clear(SnxIr* ir, SnxU32 mask) {
-    return LLVMBuildICmp(B, LLVMIntEQ, LLVMBuildAnd(B, fpcr(ir), ir_i32(ir, mask), ""), ir_i32(ir, 0), "");
-}
-static V ixc_set(SnxIr* ir) {
-    return LLVMBuildICmp(B, LLVMIntNE, LLVMBuildAnd(B, fpsr(ir), ir_i32(ir, FPSR_IXC), ""), ir_i32(ir, 0), "");
-}
-static V both(SnxIr* ir, V a, V b) { return LLVMBuildAnd(B, a, b, ""); }
-static V either(SnxIr* ir, V a, V b) { return LLVMBuildOr(B, a, b, ""); }
 
 /* ---- the helpers (cpu.h): integer arithmetic on IEEE encodings, reading c->fpcr and raising c->fpsr's flags ---- */
 
 /* name(c, operands...), declared from the operands' types (u64 for an encoding or integer, int for the rest) */
 static V fp_call(SnxIr* ir, const char* name, LLVMTypeRef ret, const V* operands, unsigned count) {
     LLVMTypeRef params[8];
-    V args[8], function;
-    unsigned i;
+    V args[8];
     params[0] = ir->t_ptr;
     args[0] = ir->c;
-    for (i = 0; i < count; ++i) {
+    for (unsigned i = 0; i < count; ++i) {
         args[i + 1] = operands[i];
         params[i + 1] = LLVMTypeOf(operands[i]);
     }
-    function = ir_extern(ir, name, ret, params, count + 1);
+    V function = ir_extern(ir, name, ret, params, count + 1);
     ir_argmem(ir, function); /* only c->fpcr and c->fpsr */
     ir_noregs(ir, function);
     ir_state_invalidate(ir);
     return LLVMBuildCall2(B, LLVMFunctionType(ret, params, count + 1, 0), function, args, count + 1, "");
 }
-static V u64_of(SnxIr* ir, V bits) { return ir_cast(ir, bits, ir->t_i64, 0); }
-static V to_width(SnxIr* ir, V bits, unsigned width) { return ir_cast(ir, bits, int_type(ir, width), 0); }
+static V to_width(SnxIr* ir, V bits, unsigned width) { return ir_cast(ir, bits, ir_int_type(ir, width), 0); }
 
 static V call_binary(SnxIr* ir, V a, V b, unsigned width, unsigned op) {
     V operands[4];
@@ -190,12 +169,7 @@ static V call_from_int(SnxIr* ir, V v, unsigned integer, unsigned width, unsigne
    slow paths call the helpers' snx_fp_host_* forms, which try the host's arithmetic on what these guards refuse
    (NaNs, infinities, underflows) before the soft-float. */
 
-static int host_native(SnxIr* ir) { return ir->features->x86 || ir->features->aarch64; }
-static int host_fma(SnxIr* ir) { return (ir->features->x86 && ir->features->fma) || ir->features->aarch64; }
-/* roundss/roundsd (SSE4.1) or FRINT*: the rounding intrinsics never become libm calls */
-static int host_round(SnxIr* ir) { return (ir->features->x86 && ir->features->sse42) || ir->features->aarch64; }
 
-static SnxU64 sign_mask(unsigned width) { return (SnxU64)1 << (width - 1); }
 static SnxU64 inf_bits(unsigned width) { return width == 32 ? 0x7F800000u : 0x7FF0000000000000ull; }
 static SnxU64 min_normal(unsigned width) { return width == 32 ? 0x00800000u : 0x0010000000000000ull; }
 /* doubles whose FMA residuals (products of two ulps at least 2^-1074 apart from the operand's) stay representable */
@@ -230,16 +204,8 @@ static V unflushed(SnxIr* ir, unsigned width, V bits) {
 }
 
 static V as_float(SnxIr* ir, V bits, unsigned width) { return LLVMBuildBitCast(B, bits, float_type(ir, width), ""); }
-static V as_bits(SnxIr* ir, V f, unsigned width) { return LLVMBuildBitCast(B, f, int_type(ir, width), ""); }
+static V as_bits(SnxIr* ir, V f, unsigned width) { return LLVMBuildBitCast(B, f, ir_int_type(ir, width), ""); }
 static V widen(SnxIr* ir, V f) { return LLVMBuildFPExt(B, f, LLVMDoubleTypeInContext(ir->ctx), ""); }
-static V fma3(SnxIr* ir, V a, V b, V c) {
-    V args[3];
-    args[0] = a;
-    args[1] = b;
-    args[2] = c;
-    return ir_intrinsic(ir, "llvm.fma", LLVMTypeOf(a), args, 3);
-}
-static V float_ne(SnxIr* ir, V a, V b) { return LLVMBuildFCmp(B, LLVMRealUNE, a, b, ""); }
 
 /* A value from the host where ok holds, from the helpers otherwise: begin branches (positioning at the slow block
    for the caller's helper call), end joins them. The fast block sets IXC when inexact (NULL: never) */
@@ -269,11 +235,11 @@ static void split_begin(SnxIr* ir, V ok, V fast, V inexact, Split* s) {
 }
 static V split_end(SnxIr* ir, Split* s, V slow) {
     LLVMBasicBlockRef slow_end = LLVMGetInsertBlock(B);
-    V phi, values[2];
+    V values[2];
     LLVMBasicBlockRef blocks[2];
     LLVMBuildBr(B, s->join);
     LLVMPositionBuilderAtEnd(B, s->join);
-    phi = LLVMBuildPhi(B, LLVMTypeOf(slow), "");
+    V phi = LLVMBuildPhi(B, LLVMTypeOf(slow), "");
     values[0] = s->fast;
     values[1] = slow;
     blocks[0] = s->fast_end;
@@ -289,12 +255,11 @@ static V fast_binary(SnxIr* ir, unsigned op, unsigned width, V a, V b, V* ok, V*
     switch (op) {
         case SNX_FP_ADD:
         case SNX_FP_SUB: { /* TwoSum: the rounding error of fa + fb, exactly */
-            V t, va, vb;
             if (op == SNX_FP_SUB) fb = LLVMBuildFNeg(B, fb, "");
             r = LLVMBuildFAdd(B, fa, fb, "");
-            t = LLVMBuildFSub(B, r, fa, "");
-            va = LLVMBuildFSub(B, fa, LLVMBuildFSub(B, r, t, ""), "");
-            vb = LLVMBuildFSub(B, fb, t, "");
+            V t = LLVMBuildFSub(B, r, fa, "");
+            V va = LLVMBuildFSub(B, fa, LLVMBuildFSub(B, r, t, ""), "");
+            V vb = LLVMBuildFSub(B, fb, t, "");
             *inexact = float_ne(ir, LLVMBuildFAdd(B, va, vb, ""), kfloat(ir, width, 0.0));
             rb = as_bits(ir, r, width);
             exact_zero = is_zero(ir, width, rb);
@@ -393,12 +358,12 @@ static void fp_minmax(SnxIr* ir, const SnxA64Args* a, unsigned minimum, unsigned
     unsigned width = width_of(a->esz);
     V n = fp_reg(ir, (unsigned)a->rn, width), m = fp_reg(ir, (unsigned)a->rm, width), r;
     if (width != 16) {
-        V fn = as_float(ir, n, width), fm = as_float(ir, m, width), ok, fast;
+        V fn = as_float(ir, n, width), fm = as_float(ir, m, width);
         LLVMRealPredicate wins = minimum ? LLVMRealOLT : LLVMRealOGT;
         Split s;
-        ok = both(ir, LLVMBuildNot(B, either(ir, is_nan(ir, width, n), is_nan(ir, width, m)), ""),
-                  both(ir, unflushed(ir, width, n), unflushed(ir, width, m)));
-        fast = minimum ? LLVMBuildOr(B, n, m, "") : LLVMBuildAnd(B, n, m, "");
+        V ok = both(ir, LLVMBuildNot(B, either(ir, is_nan(ir, width, n), is_nan(ir, width, m)), ""),
+                    both(ir, unflushed(ir, width, n), unflushed(ir, width, m)));
+        V fast = minimum ? LLVMBuildOr(B, n, m, "") : LLVMBuildAnd(B, n, m, "");
         fast = LLVMBuildSelect(B, LLVMBuildFCmp(B, wins, fm, fn, ""), m, fast, "");
         fast = LLVMBuildSelect(B, LLVMBuildFCmp(B, wins, fn, fm, ""), n, fast, "");
         split_begin(ir, ok, fast, NULL, &s);
@@ -412,8 +377,8 @@ static void fp_minmax(SnxIr* ir, const SnxA64Args* a, unsigned minimum, unsigned
    instruction says, so a NaN among them comes out with its sign flipped (do_fmadd) */
 static void fp_fma(SnxIr* ir, const SnxA64Args* a, int negate_add, int negate_n) {
     unsigned width = width_of(a->esz);
-    V n = fp_reg(ir, (unsigned)a->rn, width), m = fp_reg(ir, (unsigned)a->rm, width), add, r;
-    add = fp_reg(ir, (unsigned)a->ra, width);
+    V n = fp_reg(ir, (unsigned)a->rn, width), m = fp_reg(ir, (unsigned)a->rm, width), r;
+    V add = fp_reg(ir, (unsigned)a->ra, width);
     if (negate_add) add = LLVMBuildXor(B, add, kint(ir, width, sign_mask(width)), "");
     if (negate_n) n = LLVMBuildXor(B, n, kint(ir, width, sign_mask(width)), "");
     if (width != 16 && host_fma(ir)) {
@@ -504,8 +469,8 @@ static void fp_convert(SnxIr* ir, const SnxA64Args* a, unsigned from, unsigned t
    fraction's top */
 static SnxU64 expand_imm(unsigned imm8, unsigned width) {
     unsigned e = width == 16 ? 5 : width == 32 ? 8 : 11, f = width - e - 1;
-    SnxU64 b6 = (imm8 >> 6) & 1, exponent;
-    exponent = (b6 ^ 1) << (e - 1) | (b6 ? ((SnxU64)1 << (e - 3)) - 1 : 0) << 2 | ((imm8 >> 4) & 3);
+    SnxU64 b6 = (imm8 >> 6) & 1;
+    SnxU64 exponent = (b6 ^ 1) << (e - 1) | (b6 ? ((SnxU64)1 << (e - 3)) - 1 : 0) << 2 | ((imm8 >> 4) & 3);
     return (SnxU64)((imm8 >> 7) & 1) << (width - 1) | exponent << f | (SnxU64)(imm8 & 15) << (f - 4);
 }
 
@@ -514,14 +479,13 @@ static SnxU64 expand_imm(unsigned imm8, unsigned width) {
 /* the NZCV nibble of FCMP or FCMPE (signal) of a and b. Without a NaN, and without a denormal FPCR.FZ flushes,
    FPCompare raises nothing and orders as the host does: N for less, ZC for equal, C for greater */
 static V fp_compare(SnxIr* ir, V a, V b, unsigned width, unsigned signal) {
-    V fa, fb, ok, fast;
     Split s;
     if (width == 16) return call_compare(ir, a, b, width, signal);
-    fa = as_float(ir, a, width);
-    fb = as_float(ir, b, width);
-    ok = both(ir, unflushed(ir, width, a), unflushed(ir, width, b));
+    V fa = as_float(ir, a, width);
+    V fb = as_float(ir, b, width);
+    V ok = both(ir, unflushed(ir, width, a), unflushed(ir, width, b));
     ok = both(ir, LLVMBuildFCmp(B, LLVMRealORD, fa, fb, ""), ok);
-    fast = LLVMBuildSelect(B, LLVMBuildFCmp(B, LLVMRealOEQ, fa, fb, ""), ir_i32(ir, 6), ir_i32(ir, 2), "");
+    V fast = LLVMBuildSelect(B, LLVMBuildFCmp(B, LLVMRealOEQ, fa, fb, ""), ir_i32(ir, 6), ir_i32(ir, 2), "");
     fast = LLVMBuildSelect(B, LLVMBuildFCmp(B, LLVMRealOLT, fa, fb, ""), ir_i32(ir, 8), fast, "");
     split_begin(ir, ok, fast, NULL, &s);
     return split_end(ir, &s, call_compare(ir, a, b, width, signal));
@@ -537,16 +501,14 @@ static void fp_cmp(SnxIr* ir, const SnxA64Args* a) {
 /* FCCMP, FCCMPE: the compare when cond holds (only then can it raise anything), else nzcv */
 static void fp_ccmp(SnxIr* ir, const SnxA64Args* a) {
     unsigned width = width_of(a->esz);
-    LLVMBasicBlockRef match, other, done;
-    V holds;
     if (a->cond >= 14) {
         fp_cmp(ir, a);
         return;
     }
-    match = ir_block(ir, "fccmp");
-    other = ir_block(ir, "fccmp_else");
-    done = ir_block(ir, "fccmp_done");
-    holds = ir_flags_cond(ir, (unsigned)a->cond);
+    LLVMBasicBlockRef match = ir_block(ir, "fccmp");
+    LLVMBasicBlockRef other = ir_block(ir, "fccmp_else");
+    LLVMBasicBlockRef done = ir_block(ir, "fccmp_done");
+    V holds = ir_flags_cond(ir, (unsigned)a->cond);
     LLVMBuildCondBr(B, LLVMBuildICmp(B, LLVMIntNE, holds, LLVMConstNull(LLVMTypeOf(holds)), ""), match, other);
     LLVMPositionBuilderAtEnd(B, other);
     ir_flags_set_nzcv(ir, ir_i32(ir, (SnxU32)a->nzcv));
@@ -579,7 +541,7 @@ static void fp_from_int(SnxIr* ir, const SnxA64Args* a, unsigned uns) {
     V v = gpr(ir, (unsigned)a->rn, a->sf), r;
     if (width != 16) {
         LLVMTypeRef type = float_type(ir, width);
-        V f, ok, fast;
+        V f, ok;
         Split s;
         if (integer <= precision)
             ok = LLVMConstInt(ir->t_i1, 1, 0);
@@ -595,7 +557,7 @@ static void fp_from_int(SnxIr* ir, const SnxA64Args* a, unsigned uns) {
         else
             f = uns ? LLVMBuildUIToFP(B, v, type, "") : LLVMBuildSIToFP(B, v, type, "");
         if (fbits) f = LLVMBuildFMul(B, f, kfloat(ir, width, 1.0 / (double)((SnxU64)1 << (fbits - 1)) / 2.0), "");
-        fast = as_bits(ir, f, width);
+        V fast = as_bits(ir, f, width);
         ok = either(ir, ok, both(ir, fpcr_clear(ir, FPCR_RMODE), ixc_set(ir)));
         split_begin(ir, ok, fast, NULL, &s);
         r = split_end(ir, &s, call_from_int(ir, v, integer, width, uns, fbits));
@@ -615,12 +577,12 @@ static void fp_to_int(SnxIr* ir, const SnxA64Args* a, unsigned rm, unsigned uns)
     int fast_path = width != 16 && (rm == 3 || (host_round(ir) && (rm != 4 || ir->features->aarch64)));
     if (fast_path) {
         static const char* const rounding[] = {"llvm.roundeven", "llvm.ceil", "llvm.floor", NULL, "llvm.round"};
-        LLVMTypeRef type = int_type(ir, integer);
-        V f = as_float(ir, n, width), rounded, low, high, ok, fast, inexact;
+        LLVMTypeRef type = ir_int_type(ir, integer);
+        V f = as_float(ir, n, width), low;
         Split s;
         double top = (double)((SnxU64)1 << (integer - 1)) * (uns ? 2.0 : 1.0);
         if (fbits) f = LLVMBuildFMul(B, f, kfloat(ir, width, (double)((SnxU64)1 << (fbits - 1)) * 2.0), "");
-        rounded = rm == 3 ? f : ir_intrinsic(ir, rounding[rm], LLVMTypeOf(f), &f, 1);
+        V rounded = rm == 3 ? f : ir_intrinsic(ir, rounding[rm], LLVMTypeOf(f), &f, 1);
         /* the lowest integer in range less one, where the format holds it (trunc of anything above it is in
            range), else the lowest integer itself */
         if (uns)
@@ -629,12 +591,12 @@ static void fp_to_int(SnxIr* ir, const SnxA64Args* a, unsigned rm, unsigned uns)
             low = LLVMBuildFCmp(B, LLVMRealOGT, rounded, kfloat(ir, width, -top - 1.0), "");
         else
             low = LLVMBuildFCmp(B, LLVMRealOGE, rounded, kfloat(ir, width, -top), "");
-        high = LLVMBuildFCmp(B, LLVMRealOLT, rounded, kfloat(ir, width, top), "");
-        ok = both(ir, both(ir, low, high), unflushed(ir, width, n));
-        fast = uns ? LLVMBuildFPToUI(B, rounded, type, "") : LLVMBuildFPToSI(B, rounded, type, "");
+        V high = LLVMBuildFCmp(B, LLVMRealOLT, rounded, kfloat(ir, width, top), "");
+        V ok = both(ir, both(ir, low, high), unflushed(ir, width, n));
+        V fast = uns ? LLVMBuildFPToUI(B, rounded, type, "") : LLVMBuildFPToSI(B, rounded, type, "");
         if (rm == 3)
             rounded = uns ? LLVMBuildUIToFP(B, fast, LLVMTypeOf(f), "") : LLVMBuildSIToFP(B, fast, LLVMTypeOf(f), "");
-        inexact = float_ne(ir, rounded, f);
+        V inexact = float_ne(ir, rounded, f);
         split_begin(ir, ok, ir_cast(ir, fast, ir->t_i64, 0), inexact, &s);
         r = split_end(ir, &s, call_to_int(ir, n, width, integer, uns, fbits, rm));
     } else

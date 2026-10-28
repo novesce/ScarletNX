@@ -14,7 +14,6 @@
 #include "common/utilities/endian.h"
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 
 /* a block's -O level, the A64 JIT's default */
 #define BLOCK_OPT '0'
@@ -48,7 +47,7 @@ static size_t slot_of(const SnxArmExec* e, uint64_t key) {
 /* room for one more block: 0, or -1 out of memory */
 static int reserve(SnxArmExec* e) {
     CachedBlock* old = e->blocks;
-    size_t old_capacity = e->capacity, i;
+    size_t old_capacity = e->capacity;
     if (e->count + 1 <= e->capacity / 2) return 0;
     e->capacity = old_capacity ? old_capacity * 2 : 256;
     e->blocks = calloc(e->capacity, sizeof *e->blocks);
@@ -57,7 +56,7 @@ static int reserve(SnxArmExec* e) {
         e->capacity = old_capacity;
         return -1;
     }
-    for (i = 0; i < old_capacity; i++)
+    for (size_t i = 0; i < old_capacity; i++)
         if (old[i].key) e->blocks[slot_of(e, old[i].key)] = old[i];
     free(old);
     return 0;
@@ -103,10 +102,9 @@ SnxArmBlock snx_arm_exec_block(SnxArmExec* e, const SnxArmExecRange* ranges, siz
     const void* code = base + pc;
     void* swapped = NULL;
     if (SNX_HOST_BE) {
-        size_t i;
         swapped = malloc(span * (thumb ? 2 : 4));
         if (!swapped) return NULL;
-        for (i = 0; i < span; ++i)
+        for (size_t i = 0; i < span; ++i)
             if (thumb)
                 ((uint16_t*)swapped)[i] = snx_ld_le16(base + pc + i * 2);
             else
@@ -147,9 +145,8 @@ SnxArmExec* snx_arm_exec_new(char* error, size_t error_size) {
     /* the helpers blocks call, loaded into the arena, whose globals they resolve to. They reach the runtime only
        through cpu->rt, pointer calls that LLVM makes with r2 saved */
     if (e->loader) {
-        SnxLinkInput armlib;
+        SnxLinkInput armlib = {0};
         unsigned char* object = NULL;
-        memset(&armlib, 0, sizeof armlib);
         armlib.name = "armlib";
         if (snx_ir_armlib_object(BLOCK_OPT, &object, &armlib.size, error, error_size)) {
             snx_arm_exec_free(e);

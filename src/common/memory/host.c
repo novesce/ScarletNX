@@ -47,7 +47,7 @@ size_t snx_host_page(void) {
     return calls() ? info.dwPageSize : 0;
 }
 bool snx_host_memory_new(SnxHostMemory* m, uint64_t size) {
-    memset(m, 0, sizeof *m);
+    *m = (SnxHostMemory){0};
     HANDLE section = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE | SEC_COMMIT, (DWORD)(size >> 32),
                                         (DWORD)size, NULL);
     if (!section) return false;
@@ -63,7 +63,7 @@ bool snx_host_memory_new(SnxHostMemory* m, uint64_t size) {
 void snx_host_memory_free(SnxHostMemory* m) {
     if (m->view) UnmapViewOfFile(m->view);
     if (m->handle) CloseHandle((HANDLE)m->handle);
-    memset(m, 0, sizeof *m);
+    *m = (SnxHostMemory){0};
 }
 unsigned char* snx_host_reserve(uint64_t size) {
     if (!calls()) return NULL;
@@ -128,7 +128,7 @@ size_t snx_host_page(void) {
     return page > 0 ? (size_t)page : 0;
 }
 bool snx_host_memory_new(SnxHostMemory* m, uint64_t size) {
-    memset(m, 0, sizeof *m);
+    *m = (SnxHostMemory){0};
     int fd = -1;
 #if defined(__linux__) || defined(__ANDROID__)
     /* the system call itself: Android's C library has memfd_create only from Android 11 (API 30), as code_loader.c
@@ -155,7 +155,7 @@ bool snx_host_memory_new(SnxHostMemory* m, uint64_t size) {
 void snx_host_memory_free(SnxHostMemory* m) {
     if (m->view) munmap(m->view, (size_t)m->size);
     if (m->view) close((int)m->handle);
-    memset(m, 0, sizeof *m);
+    *m = (SnxHostMemory){0};
 }
 unsigned char* snx_host_reserve(uint64_t size) {
     void* base = mmap(NULL, (size_t)size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);

@@ -7,6 +7,7 @@
    come back. Textures and render targets are each in a list from the least recently used to the most, which the
    caches' eviction takes from (vk_surf_reclaim): idle ones, and more when device memory nears its budget
    (vk_mem_trim, with the budget from gpu/vk/memory.c). */
+#include "common/utilities/bits.h"
 #include <stdlib.h>
 #include <string.h>
 #include "nx/gpu/gpu.h"
@@ -1127,7 +1128,7 @@ static u64 rt_mem_hash(const Surf* s) {
             n += size - o - n < 0x1000 ? size - o - n : 0x1000;
         /* an unmapped page counts as its length, pages the GPU holds as their owners (they are trapped) */
         if (!cpu || !own_hash(cpu, n, &h))
-            h = (h ^ (cpu ? vk_hash(GP(cpu), n) : n)) * 1099511628211ull;
+            h = snx_fnv_step(h, cpu ? vk_hash(GP(cpu), n) : n);
         o += n;
     }
     return h;

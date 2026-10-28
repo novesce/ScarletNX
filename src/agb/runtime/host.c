@@ -190,7 +190,6 @@ bool agb_host_poll(AgbHost* host, uint16_t* keys) {
 }
 
 void agb_host_frame(AgbHost* host, const uint32_t* framebuffer, const int16_t* samples, uint32_t count) {
-    uint64_t now;
     SDL_UpdateTexture(host->texture, NULL, framebuffer, AGB_SCREEN_WIDTH * 4);
     SDL_SetRenderDrawColor(host->renderer, 0, 0, 0, 255);
     SDL_RenderClear(host->renderer);
@@ -198,7 +197,7 @@ void agb_host_frame(AgbHost* host, const uint32_t* framebuffer, const int16_t* s
     SDL_RenderPresent(host->renderer);
     if (host->audio && SDL_GetAudioStreamQueued(host->audio) < (int)(QUEUED_FRAMES * count * 4))
         SDL_PutAudioStreamData(host->audio, samples, (int)(count * 4));
-    now = SDL_GetTicksNS();
+    uint64_t now = SDL_GetTicksNS();
     if (host->due > now)
         SDL_DelayPrecise(host->due - now);
     else if (now - host->due > 3 * FRAME_NS) /* behind by more than a few frames: start the count again, no rush */

@@ -17,13 +17,13 @@ size_t snx_script_parse(const char* program, const char* text, uint32_t buttons,
     while (*c && count < most) {
         const char* press = c;
         char* end;
-        unsigned long at = strtoul(c, &end, 10), mask;
+        unsigned long at = strtoul(c, &end, 10);
         if (end == c || *end != ':') {
             c = press;
             break;
         }
         const char* hex = end + 1;
-        mask = strtoul(hex, &end, 16);
+        unsigned long mask = strtoul(hex, &end, 16);
         if (end == hex || (*end && *end != ',') || at > UINT32_MAX || (mask & ~(unsigned long)buttons)) {
             c = press;
             break;

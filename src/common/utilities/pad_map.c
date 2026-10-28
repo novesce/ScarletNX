@@ -27,21 +27,18 @@ const char* snx_pad_button_name(int bit) { return bit >= 0 && bit < SNX_PAD_BUTT
 
 void snx_pad_map_position(SnxPadMap* map) { memcpy(map->bit, POSITION, sizeof map->bit); }
 void snx_pad_map_swap_ab(SnxPadMap* map) {
-    int c;
-    for (c = 0; c < SNX_PAD_CONTROLS; ++c)
+    for (int c = 0; c < SNX_PAD_CONTROLS; ++c)
         if (map->bit[c] == 0 || map->bit[c] == 1) map->bit[c] = (signed char)(1 - map->bit[c]); /* A is 0, B 1 */
 }
 void snx_pad_map_unset(SnxPadMap* map) { memset(map->bit, SNX_PAD_UNSET, sizeof map->bit); }
 void snx_pad_map_fill(SnxPadMap* map, const SnxPadMap* from) {
-    int c;
-    for (c = 0; c < SNX_PAD_CONTROLS; ++c)
+    for (int c = 0; c < SNX_PAD_CONTROLS; ++c)
         if (map->bit[c] == SNX_PAD_UNSET) map->bit[c] = from->bit[c];
 }
 /* the index of the word of n letters at s in names (count of them), any case; -1 when none */
 static int lookup(const char* const* names, int count, const char* s, size_t n) {
-    int i;
     size_t k;
-    for (i = 0; i < count; ++i) {
+    for (int i = 0; i < count; ++i) {
         if (strlen(names[i]) != n) continue;
         for (k = 0; k < n && (names[i][k] | 0x20) == (s[k] | 0x20); ++k) {}
         if (k == n) return i;
@@ -77,19 +74,16 @@ int snx_pad_map_read(SnxPadMap* map, const char* text, char* error, size_t size)
 }
 void snx_pad_map_write(const SnxPadMap* map, char* out, size_t size) {
     size_t at = 0;
-    int c;
     if (size) out[0] = 0;
-    for (c = 0; c < SNX_PAD_CONTROLS && at < size; ++c) {
-        int n;
+    for (int c = 0; c < SNX_PAD_CONTROLS && at < size; ++c) {
         if (map->bit[c] == SNX_PAD_UNSET) continue;
-        n = snprintf(out + at, size - at, "%s%s:%s", at ? " " : "", KEYS[c], snx_pad_button_name(map->bit[c]));
+        int n = snprintf(out + at, size - at, "%s%s:%s", at ? " " : "", KEYS[c], snx_pad_button_name(map->bit[c]));
         if (n < 0) break;
         at += (size_t)n;
     }
 }
 int snx_pad_map_find(const SnxPadMap* map, int bit) {
-    int c;
-    for (c = 0; c < SNX_PAD_CONTROLS; ++c)
+    for (int c = 0; c < SNX_PAD_CONTROLS; ++c)
         if (map->bit[c] == bit) return c;
     return -1;
 }

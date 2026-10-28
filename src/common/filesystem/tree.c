@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
    Copyright 2026 the ScarletNX contributors */
 #include "common/filesystem/tree.h"
+#include "common/utilities/ascii.h"
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -22,8 +23,6 @@
 
 /* Bound recursive initialization/deletion without silently omitting a deeper subtree. */
 #define FS_TREE_DEPTH_MAX 256
-
-static int separator(char c) { return c == '/' || c == '\\'; }
 
 static FsNode* node_new(const char* name, int is_dir) {
     FsNode* n = calloc(1, sizeof *n);
@@ -129,7 +128,7 @@ void fs_tree_destroy(FsTree* tree) {
 static int valid_name(const char* s, size_t len) {
     if (!len || len >= FS_TREE_PATH_MAX) return 0;
     for (size_t i = 0; i < len; i++) {
-        if (separator(s[i]) || s[i] == ':') return 0;
+        if (snx_is_any_separator(s[i]) || s[i] == ':') return 0;
 #if defined(_WIN32)
         if ((unsigned char)s[i] < 32 || strchr("<>\"|?*", s[i])) return 0;
 #endif
@@ -172,7 +171,7 @@ FsTreeResult fs_tree_path(FsTree* tree, const FsNode* node, char* out, size_t ca
     while (top != tree->root && !top->host) top = top->parent;
     const char* base = top->host ? top->host : tree->base;
     size_t base_len = strlen(base), size = base_len;
-    int base_slash = base_len && separator(base[base_len - 1]);
+    int base_slash = base_len && snx_is_any_separator(base[base_len - 1]);
     for (const FsNode* n = node; n != top; n = n->parent) {
         size_t add = strlen(n->name) + !(n->parent == top && base_slash);
         if (add >= FS_TREE_PATH_MAX || size >= FS_TREE_PATH_MAX - add) return FS_TREE_TOOLONG;
@@ -203,27 +202,27 @@ static FsTreeResult parse_path(FsTree* tree, FsNode* scope, const char* path, Fs
     if (!scope) {
         const char* colon = strchr(p, ':');
         const char* slash = p;
-        while (*slash && !separator(*slash)) slash++;
+        while (*slash && !snx_is_any_separator(*slash)) slash++;
         if (colon && colon < slash) {
             size_t len = (size_t)(colon - p);
-            if (!valid_name(p, len) || (colon[1] && !separator(colon[1]))) return FS_TREE_INVALID;
+            if (!valid_name(p, len) || (colon[1] && !snx_is_any_separator(colon[1]))) return FS_TREE_INVALID;
             char drive[FS_TREE_PATH_MAX];
             memcpy(drive, p, len);
             drive[len] = 0;
             base = child_find(tree->root, drive);
             if (!base || !base->is_dir) return FS_TREE_NOTFOUND;
             p = colon + 1;
-        } else if (separator(*p)) {
+        } else if (snx_is_any_separator(*p)) {
             base = child_find(tree->root, "root");
             if (!base || !base->is_dir) return FS_TREE_NOTFOUND;
         }
     }
     size_t used = 0;
     while (*p) {
-        while (separator(*p)) p++;
+        while (snx_is_any_separator(*p)) p++;
         if (!*p) break;
         const char* e = p;
-        while (*e && !separator(*e)) e++;
+        while (*e && !snx_is_any_separator(*e)) e++;
         size_t len = (size_t)(e - p);
         if (len == 1 && p[0] == '.') {
             /* nothing */
@@ -294,7 +293,7 @@ static FsTreeResult child_path(FsTree* tree, FsNode* parent, const char* name, c
     FsTreeResult rc = fs_tree_path(tree, parent, out, FS_TREE_PATH_MAX);
     if (rc) return rc;
     size_t len = strlen(out), add = strlen(name);
-    int slash = len && !separator(out[len - 1]);
+    int slash = len && !snx_is_any_separator(out[len - 1]);
     if (len + slash + add >= FS_TREE_PATH_MAX) return FS_TREE_TOOLONG;
     if (slash) out[len++] = '/';
     memcpy(out + len, name, add + 1);
@@ -445,7 +444,7 @@ FsTreeResult fs_tree_create(FsTree* tree, FsNode* scope, const char* path, int i
 
 FsTreeResult fs_tree_mkdirs(FsTree* tree, const char* relative_path, FsNode** out) {
     if (out) *out = NULL;
-    if (!relative_path || separator(*relative_path) || strchr(relative_path, ':')) return FS_TREE_INVALID;
+    if (!relative_path || snx_is_any_separator(*relative_path) || strchr(relative_path, ':')) return FS_TREE_INVALID;
     char norm[FS_TREE_PATH_MAX];
     FsNode* parent;
     FsTreeResult rc = parse_path(tree, tree ? tree->root : NULL, relative_path, &parent, norm);
@@ -578,7 +577,7 @@ FsTreeResult fs_tree_rename(FsTree* tree, FsNode* scope, const char* src, const 
 FsTreeResult fs_tree_add_virtual(FsTree* tree, const char* relative_path, const void* data, uint64_t size,
                                  FsNode** out) {
     if (out) *out = NULL;
-    if (!relative_path || separator(*relative_path) || strchr(relative_path, ':') || size > SIZE_MAX ||
+    if (!relative_path || snx_is_any_separator(*relative_path) || strchr(relative_path, ':') || size > SIZE_MAX ||
         size > INT64_MAX || (size && !data))
         return FS_TREE_INVALID;
     char norm[FS_TREE_PATH_MAX];
@@ -967,7 +966,7 @@ FsTreeResult fs_tree_overlay(FsTree* tree, const char* directory, const char* co
 FsTreeResult fs_tree_init(FsTree* tree, const char* directory) { return fs_tree_init_skipping(tree, directory, NULL); }
 FsTreeResult fs_tree_init_skipping(FsTree* tree, const char* directory, const char* const* skipped) {
     if (!tree || !directory || !*directory) return FS_TREE_INVALID;
-    memset(tree, 0, sizeof *tree);
+    *tree = (FsTree){0};
     pm_init(&tree->lock);
     char absolute[FS_TREE_PATH_MAX];
     FsTreeResult rc = host_directory(directory, absolute);

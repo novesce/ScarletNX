@@ -6,6 +6,9 @@
 #endif
 #include "common/cpu/recompiler/llvm/jit_service.h"
 #include "common/utilities/common.h"
+#include "common/utilities/ascii.h"
+#include "common/utilities/bits.h"
+#include "common/utilities/endian.h"
 #include "common/cpu/recompiler/llvm/jit_cache.h"
 #include "common/cpu/recompiler/llvm/code_loader.h"
 #include "common/cpu/recompiler/llvm/ir.h"
@@ -110,8 +113,11 @@ typedef struct {
     const unsigned char* functions; /* the body's function list, in the buffer */
     const unsigned char* object;
     size_t object_size, function_count;
+    SnxU64 table; /* the unit's table, once loaded: a load again publishes its code from it */
     char name[64];
-    int state; /* 0 not loaded yet, 1 loaded, -1 refused (its code changed since, or the loader refused it) */
+    int state; /* 0 not loaded yet, 1 loaded (and published again for a pc of it that is not done: its code was
+                  invalidated since and may still be what the record holds), -1 refused (its code changed since, or
+                  the loader refused it) */
 } CacheRecord;
 typedef struct {
     SnxU64 key; /* pc | 1, 0 for a free slot */
@@ -124,6 +130,7 @@ typedef struct {
     CacheSlot* index; /* the records' leaders, the newest record's for a pc in several, at most half full */
     size_t capacity;  /* a power of two */
     FILE* file;       /* appended to; NULL when there is no cache or it can't be written */
+    size_t size;      /* the file's bytes: a record that would take it past SNX_JIT_CACHE_MAX is left out */
 } Cache;
 
 struct SnxJitService {
@@ -228,9 +235,8 @@ static size_t entry_hash(SnxU64 key, size_t capacity) {
 
 static Entry* find(const SnxJitService* s, SnxU64 pc) {
     SnxU64 key = pc | 1;
-    size_t i;
     if (!s->entry_capacity) return NULL;
-    for (i = entry_hash(key, s->entry_capacity); s->entries[i].key; i = (i + 1) & (s->entry_capacity - 1))
+    for (size_t i = entry_hash(key, s->entry_capacity); s->entries[i].key; i = (i + 1) & (s->entry_capacity - 1))
         if (s->entries[i].key == key) return &s->entries[i];
     return NULL;
 }
@@ -239,17 +245,15 @@ static Entry* find(const SnxJitService* s, SnxU64 pc) {
 static Entry* add(SnxJitService* s, SnxU64 pc, int state) {
     SnxU64 key = pc | 1;
     Entry* e = find(s, pc);
-    size_t i;
     if (e) return e;
     if ((s->entry_count + 1) * 2 > s->entry_capacity) {
-        size_t capacity = s->entry_capacity ? s->entry_capacity * 2 : 1024, j;
-        Entry* grown;
-        if (capacity > SIZE_MAX / sizeof(*grown)) return NULL;
-        grown = (Entry*)calloc(capacity, sizeof(*grown));
+        size_t capacity = s->entry_capacity ? s->entry_capacity * 2 : 1024;
+        if (capacity > SIZE_MAX / sizeof(Entry)) return NULL;
+        Entry* grown = (Entry*)calloc(capacity, sizeof(*grown));
         if (!grown) return NULL;
-        for (j = 0; j < s->entry_capacity; ++j)
+        for (size_t j = 0; j < s->entry_capacity; ++j)
             if (s->entries[j].key) {
-                i = entry_hash(s->entries[j].key, capacity);
+                size_t i = entry_hash(s->entries[j].key, capacity);
                 while (grown[i].key) i = (i + 1) & (capacity - 1);
                 grown[i] = s->entries[j];
             }
@@ -257,6 +261,7 @@ static Entry* add(SnxJitService* s, SnxU64 pc, int state) {
         s->entries = grown;
         s->entry_capacity = capacity;
     }
+    size_t i;
     for (i = entry_hash(key, s->entry_capacity); s->entries[i].key; i = (i + 1) & (s->entry_capacity - 1)) continue;
     e = &s->entries[i];
     e->key = key;
@@ -268,14 +273,12 @@ static Entry* add(SnxJitService* s, SnxU64 pc, int state) {
 
 /* 0, or -1 when memory runs out */
 static int push(Queue* q, SnxU64 pc) {
-    SnxU64* grown;
-    size_t capacity, i;
     if (q->count == q->capacity) {
-        capacity = q->capacity ? q->capacity * 2 : 256;
-        if (capacity > SIZE_MAX / sizeof(*grown)) return -1;
-        grown = (SnxU64*)malloc(capacity * sizeof(*grown));
+        size_t capacity = q->capacity ? q->capacity * 2 : 256;
+        if (capacity > SIZE_MAX / sizeof(SnxU64)) return -1;
+        SnxU64* grown = (SnxU64*)malloc(capacity * sizeof(*grown));
         if (!grown) return -1;
-        for (i = 0; i < q->count; ++i) grown[i] = q->pcs[(q->head + i) & (q->capacity - 1)];
+        for (size_t i = 0; i < q->count; ++i) grown[i] = q->pcs[(q->head + i) & (q->capacity - 1)];
         free(q->pcs);
         q->pcs = grown;
         q->head = 0;
@@ -297,10 +300,8 @@ static SnxU64 pop(Queue* q) {
 
 /* pc in the text of the config's images */
 static int in_text(const SnxJitService* s, SnxU64 pc) {
-    const SnxCodeImage* m;
-    size_t i;
-    for (i = 0; !(pc & 3) && i < s->config.image_count; ++i) {
-        m = &s->config.images[i];
+    for (size_t i = 0; !(pc & 3) && i < s->config.image_count; ++i) {
+        const SnxCodeImage* m = &s->config.images[i];
         if (pc >= m->base + m->text_off && pc - (m->base + m->text_off) < m->text_size) return 1;
     }
     return 0;
@@ -309,24 +310,21 @@ static int in_text(const SnxJitService* s, SnxU64 pc) {
 /* the region whose table has a slot for pc, or NULL */
 static Region* region_of(const SnxJitService* s, SnxU64 pc) {
     Region* r = (Region*)&s->regions[0];
-    RegionTop* top;
-    unsigned short index;
-    SnxU64 hi;
-    size_t i;
     if (pc & 3) return NULL;
     if (pc - r->lo < r->hi - r->lo) return r;
-    top = __atomic_load_n(&s->region_top, __ATOMIC_ACQUIRE);
+    RegionTop* top = __atomic_load_n(&s->region_top, __ATOMIC_ACQUIRE);
     if (top && (size_t)(pc >> REGION_TOP_SHIFT) < top->count) {
         unsigned short* leaf = __atomic_load_n(&top->leaves[pc >> REGION_TOP_SHIFT], __ATOMIC_ACQUIRE);
         if (leaf) {
-            index = __atomic_load_n(&leaf[(pc >> REGION_PAGE_SHIFT) & (REGION_LEAF_ENTRIES - 1)], __ATOMIC_ACQUIRE);
+            unsigned short index = __atomic_load_n(&leaf[(pc >> REGION_PAGE_SHIFT) & (REGION_LEAF_ENTRIES - 1)],
+                                                   __ATOMIC_ACQUIRE);
             if (index) return (Region*)&s->regions[index]; /* 1-based; regions[0] is never an image */
         }
     }
     /* a pc outside the map's coverage, or under a leaf whose entry isn't set: the regions themselves */
-    for (i = 1; i <= SNX_JIT_IMAGES; ++i) {
+    for (size_t i = 1; i <= SNX_JIT_IMAGES; ++i) {
         r = (Region*)&s->regions[i];
-        hi = __atomic_load_n(&r->hi, __ATOMIC_ACQUIRE);
+        SnxU64 hi = __atomic_load_n(&r->hi, __ATOMIC_ACQUIRE);
         if (hi && pc >= __atomic_load_n(&r->lo, __ATOMIC_RELAXED) && pc < hi) return r;
     }
     return NULL;
@@ -343,9 +341,8 @@ static int is_pending(const Region* r, SnxU64 pc) {
    right whatever the entry says by then (the code, once published, is in the slot) */
 static void set_pending(SnxJitService* s, SnxU64 pc) {
     Region* r = region_of(s, pc);
-    size_t i;
     if (!r) return;
-    i = (size_t)((pc - r->lo) >> 2);
+    size_t i = (size_t)((pc - r->lo) >> 2);
     __atomic_fetch_or(&r->pending[i >> 3], (unsigned char)(1u << (i & 7)), __ATOMIC_RELAXED);
 }
 
@@ -365,9 +362,9 @@ typedef struct {
 } Batch;
 
 static int in_batch(const Batch* b, SnxU64 pc) {
-    size_t lo = 0, hi = b->count, middle;
+    size_t lo = 0, hi = b->count;
     while (lo < hi) {
-        middle = lo + (hi - lo) / 2;
+        size_t middle = lo + (hi - lo) / 2;
         if (b->pcs[middle] < pc)
             lo = middle + 1;
         else
@@ -382,15 +379,13 @@ static int known(void* user, SnxU64 address) {
     const Batch* b = (const Batch*)user;
     SnxJitService* s = b->service;
     Region* r = region_of(s, address);
-    Entry* e;
-    int result;
     if (r) {
         if (__atomic_load_n(slot(r, address), __ATOMIC_RELAXED)) return 1;
         return is_pending(r, address) && !in_batch(b, address);
     }
     lock(&s->lock);
-    e = find(s, address);
-    result = e && e->state != QUEUED_WARM && e->state != GONE && !(e->state == IN_FLIGHT && in_batch(b, address));
+    Entry* e = find(s, address);
+    int result = e && e->state != QUEUED_WARM && e->state != GONE && !(e->state == IN_FLIGHT && in_batch(b, address));
     unlock(&s->lock);
     return result;
 }
@@ -401,10 +396,9 @@ static int known(void* user, SnxU64 address) {
    compiled again */
 static SnxU64 direct(void* user, SnxU64 target) {
     const SnxJitService* s = (const SnxJitService*)user;
-    size_t lo = 0, hi = s->config.aot_count, middle;
-    GuestFn function;
+    size_t lo = 0, hi = s->config.aot_count;
     while (lo < hi) {
-        middle = lo + (hi - lo) / 2;
+        size_t middle = lo + (hi - lo) / 2;
         if (s->config.aot_addresses[middle] < target)
             lo = middle + 1;
         else
@@ -412,7 +406,7 @@ static SnxU64 direct(void* user, SnxU64 target) {
     }
     if (lo == s->config.aot_count || s->config.aot_addresses[lo] != target) return 0;
     /* a function the runtime found stale (its code changed: SNX_ABI 14) leaves the table while the JIT runs */
-    function = __atomic_load_n(&s->config.aot_functions[lo], __ATOMIC_ACQUIRE);
+    GuestFn function = __atomic_load_n(&s->config.aot_functions[lo], __ATOMIC_ACQUIRE);
     /* and a hooked one is called through its slot, which holds the hook (SNX_ABI 15) */
     if (function && s->config.dispatch && target >= s->config.code_lo && target < s->config.code_hi &&
         __atomic_load_n(&s->config.dispatch[(target - s->config.code_lo) >> 2], __ATOMIC_RELAXED) != function)
@@ -423,10 +417,9 @@ static SnxU64 direct(void* user, SnxU64 target) {
 /* the loader's resolver: snx_aot_<target>, the AOT module's function for target (ir_codegen.c's call) */
 static SnxU64 resolve_aot(void* user, const char* name) {
     SnxU64 target = 0;
-    const char* p;
     if (strncmp(name, "snx_aot_", 8) || !name[8]) return 0;
-    for (p = name + 8; *p; ++p) {
-        int digit = *p >= '0' && *p <= '9' ? *p - '0' : *p >= 'a' && *p <= 'f' ? *p - 'a' + 10 : -1;
+    for (const char* p = name + 8; *p; ++p) {
+        int digit = snx_hex_value((unsigned char)*p);
         if (digit < 0) return 0;
         target = target << 4 | (SnxU64)digit;
     }
@@ -441,8 +434,7 @@ static SnxU64 resolve_aot(void* user, const char* name) {
    leaves out: the first function that shows it. When none does, none uses r2, and any address near them will do
    for the arena's own (the first function's: the loader's veneers reach the others from it) */
 static uint64_t aot_toc(const SnxJitConfig* config) {
-    size_t i;
-    for (i = 0; i < config->aot_count; ++i) {
+    for (size_t i = 0; i < config->aot_count; ++i) {
         const unsigned char* f = (const unsigned char*)(size_t)config->aot_functions[i];
         uint64_t toc;
         if (!f) continue;
@@ -460,7 +452,7 @@ static uint64_t aot_toc(const SnxJitConfig* config) {
 #endif
         if (toc) return toc;
     }
-    for (i = 0; i < config->aot_count; ++i)
+    for (size_t i = 0; i < config->aot_count; ++i)
         if (config->aot_functions[i]) return (uint64_t)(size_t)config->aot_functions[i];
     return 0;
 }
@@ -472,12 +464,8 @@ static uint64_t aot_toc(const SnxJitConfig* config) {
 static int emit_unit(SnxJitService* s, SnxCodegen* codegen, const char* table_name, unsigned char** object,
                      size_t* size, char* error, size_t error_size) {
     SnxIr* ir = snx_ir_new_jit("jit", s->config.opt, error, error_size);
-    LLVMValueRef *functions, table;
-    LLVMTypeRef type;
-    size_t i;
-    int rc;
     if (!ir) return -1;
-    functions = (LLVMValueRef*)malloc(codegen->function_count * sizeof(*functions));
+    LLVMValueRef* functions = (LLVMValueRef*)malloc(codegen->function_count * sizeof(*functions));
     if (!functions) {
         snx_ir_free(ir);
         snprintf(error, error_size, "out of memory");
@@ -487,19 +475,19 @@ static int emit_unit(SnxJitService* s, SnxCodegen* codegen, const char* table_na
     ir->direct_user = s;
     codegen->hook_direct_calls = s->config.hook_direct_calls;
     codegen->direct_svc = s->config.direct_svc;
-    for (i = 0; i < codegen->function_count; ++i) snx_ir_emit(ir, codegen, &codegen->functions[i]);
-    for (i = 0; i < codegen->function_count; ++i) {
+    for (size_t i = 0; i < codegen->function_count; ++i) snx_ir_emit(ir, codegen, &codegen->functions[i]);
+    for (size_t i = 0; i < codegen->function_count; ++i) {
         functions[i] = snx_ir_guest_function(ir, codegen->functions[i].start);
         LLVMSetLinkage(functions[i], LLVMInternalLinkage);
         LLVMSetVisibility(functions[i], LLVMDefaultVisibility); /* a local symbol has no visibility */
     }
-    type = LLVMArrayType(ir->t_ptr, (unsigned)codegen->function_count);
-    table = LLVMAddGlobal(ir->mod, type, table_name);
+    LLVMTypeRef type = LLVMArrayType(ir->t_ptr, (unsigned)codegen->function_count);
+    LLVMValueRef table = LLVMAddGlobal(ir->mod, type, table_name);
     LLVMSetInitializer(table, LLVMConstArray(ir->t_ptr, functions, (unsigned)codegen->function_count));
     LLVMSetGlobalConstant(table, 1);
     LLVMSetVisibility(table, LLVMHiddenVisibility);
     free(functions);
-    rc = snx_ir_object(ir, s->config.opt, object, size, error, error_size);
+    int rc = snx_ir_object(ir, s->config.opt, object, size, error, error_size);
     snx_ir_free(ir);
     return rc;
 }
@@ -535,19 +523,18 @@ static void span_keep(SnxJitService* s, SnxU64 lo, SnxU64 hi, Published* leaders
 }
 /* the leaders of a batch's functions, with their code in table, as a span (span_keep) */
 static void span_of_batch(SnxJitService* s, const SnxCodegen* codegen, SnxU64 table) {
-    size_t i, j, count = 0, n = 0;
+    size_t count = 0, n = 0;
     SnxU64 lo = ~(SnxU64)0, hi = 0, a;
-    Published* leaders;
-    for (i = 0; i < codegen->function_count; ++i) count += codegen->functions[i].leader_count;
-    leaders = count ? (Published*)malloc(count * sizeof(*leaders)) : NULL;
+    for (size_t i = 0; i < codegen->function_count; ++i) count += codegen->functions[i].leader_count;
+    Published* leaders = count ? (Published*)malloc(count * sizeof(*leaders)) : NULL;
     if (!leaders) return;
-    for (i = 0; i < codegen->function_count; ++i) {
+    for (size_t i = 0; i < codegen->function_count; ++i) {
         const SnxFunction* f = &codegen->functions[i];
         GuestFn code = unit_function(table, i);
         if (!f->count) continue;
         if ((a = snx_function_address(f, 0)) < lo) lo = a;
         if ((a = snx_function_address(f, f->count - 1) + 4) > hi) hi = a;
-        for (j = 0; j < f->count && n < count; ++j)
+        for (size_t j = 0; j < f->count && n < count; ++j)
             if (f->leaders[j]) {
                 leaders[n].pc = snx_function_address(f, j);
                 leaders[n++].code = code;
@@ -557,11 +544,6 @@ static void span_of_batch(SnxJitService* s, const SnxCodegen* codegen, SnxU64 ta
 }
 
 /* ---- the cache (Cache) ---- */
-
-static SnxU32 get32(const unsigned char* p) {
-    return (SnxU32)p[0] | (SnxU32)p[1] << 8 | (SnxU32)p[2] << 16 | (SnxU32)p[3] << 24;
-}
-static SnxU64 get64(const unsigned char* p) { return get32(p) | (SnxU64)get32(p + 4) << 32; }
 
 /* a growing byte buffer for a record */
 typedef struct {
@@ -588,10 +570,7 @@ static void out_bytes(Out* o, const void* data, size_t n) {
 }
 static void out32(Out* o, SnxU32 v) {
     unsigned char b[4];
-    b[0] = (unsigned char)v;
-    b[1] = (unsigned char)(v >> 8);
-    b[2] = (unsigned char)(v >> 16);
-    b[3] = (unsigned char)(v >> 24);
+    snx_st_le32(b, v);
     out_bytes(o, b, 4);
 }
 static void out64(Out* o, SnxU64 v) {
@@ -599,21 +578,13 @@ static void out64(Out* o, SnxU64 v) {
     out32(o, (SnxU32)(v >> 32));
 }
 
-/* FNV-1a over bytes, from basis: the body's check, the runtime library's identity */
-static SnxU64 fnv(const unsigned char* p, size_t n, SnxU64 basis) {
-    size_t i;
-    for (i = 0; i < n; ++i) basis = (basis ^ p[i]) * (SnxU64)0x100000001B3ULL;
-    return basis;
-}
-
 /* the instruction word at address in the images: 0, or -1 outside their text */
 static int image_word(const SnxCodeImage* images, size_t count, SnxU64 address, SnxU32* word) {
-    size_t i;
-    for (i = 0; i < count; ++i) {
+    for (size_t i = 0; i < count; ++i) {
         const SnxCodeImage* m = &images[i];
         SnxU64 start = m->base + m->text_off, off = address - m->base;
         if (address < start || address - start + 4 > m->text_size || off + 4 > m->image_size) continue;
-        *word = get32(m->image + (size_t)off);
+        *word = snx_ld_le32(m->image + (size_t)off);
         return 0;
     }
     return -1;
@@ -623,18 +594,14 @@ static int image_word(const SnxCodeImage* images, size_t count, SnxU64 address, 
    images. runs: count pairs of (start, words) */
 static int hash_runs(const SnxCodeImage* images, size_t image_count, const unsigned char* runs, size_t count,
                      SnxU64* h1, SnxU64* h2) {
-    SnxU64 a = 0xCBF29CE484222325ULL, b = 0x84222325CBF29CE4ULL, address;
-    SnxU32 word, n, k;
-    size_t i;
-    for (i = 0; i < count; ++i) {
-        address = get64(runs + 12 * i);
-        n = get32(runs + 12 * i + 8);
-        for (k = 0; k < n; ++k, address += 4) {
-            SnxU64 v;
+    SnxU64 a = SNX_VARIANT_H1_BASIS, b = SNX_VARIANT_H2_BASIS;
+    for (size_t i = 0; i < count; ++i) {
+        SnxU64 address = snx_ld_le64(runs + 12 * i);
+        SnxU32 n = snx_ld_le32(runs + 12 * i + 8);
+        for (SnxU32 k = 0; k < n; ++k, address += 4) {
+            SnxU32 word;
             if (image_word(images, image_count, address, &word)) return -1;
-            v = address << 32 ^ word;
-            a = (a ^ v) * (SnxU64)0x100000001B3ULL;
-            b = (b ^ (v * (SnxU64)0x9E3779B97F4A7C15ULL)) * (SnxU64)0xC2B2AE3D27D4EB4FULL;
+            snx_variant_mix(&a, &b, address, word);
         }
     }
     *h1 = a;
@@ -642,8 +609,9 @@ static int hash_runs(const SnxCodeImage* images, size_t image_count, const unsig
     return 0;
 }
 
-/* What the objects depend on beyond the code: the ABI, LLVM, the runtime library, the host CPU and its features (the
-   code is compiled for them), the -O level, hooked direct calls, direct SVCs, the guest's A64 features and the
+/* What the objects depend on beyond the code: the ABI, the IR object version, the host target triple, LLVM, the
+   runtime library, the host CPU and its features (the code is compiled for them), the -O level, hooked direct calls,
+   direct SVCs, SLP vectorization, FPSR flag exactness, volatile guest accesses, the guest's A64 features and the
    decoder */
 static char* cache_key(const SnxJitService* s) {
     return snx_jit_cache_key(s->config.opt, s->config.hook_direct_calls, s->config.direct_svc, s->config.features);
@@ -654,39 +622,37 @@ static char* cache_key(const SnxJitService* s) {
 static size_t cache_parse(Cache* c, size_t start, size_t size, size_t* used) {
     size_t at = start, count = 0, f;
     while (at + 12 <= size) {
-        SnxU64 length = get64(c->buffer + at + 4);
-        const unsigned char *body = c->buffer + at + 12, *p;
-        CacheRecord* r;
-        size_t name_length;
-        if (get32(c->buffer + at) != SNX_JIT_RECORD_MAGIC || length > size - at - 12 || size - at - 12 - length < 8 ||
-            fnv(body, (size_t)length, 0xCBF29CE484222325ULL) != get64(body + length))
+        SnxU64 length = snx_ld_le64(c->buffer + at + 4);
+        const unsigned char* body = c->buffer + at + 12;
+        if (snx_ld_le32(c->buffer + at) != SNX_JIT_RECORD_MAGIC || length > size - at - 12 ||
+            size - at - 12 - length < 8 ||
+            snx_fnv1a(SNX_FNV_BASIS, body, (size_t)length) != snx_ld_le64(body + length))
             break;
-        r = &c->records[count];
-        p = body;
-        name_length = p[0] | (size_t)p[1] << 8;
+        CacheRecord* r = &c->records[count];
+        const unsigned char* p = body;
+        size_t name_length = snx_ld_le16(p);
         if (name_length >= sizeof(r->name) || 2 + name_length + 4 > length) break;
         memcpy(r->name, p + 2, name_length);
         r->name[name_length] = 0;
         p += 2 + name_length;
-        r->function_count = get32(p);
+        r->function_count = snx_ld_le32(p);
         p += 4;
         r->functions = p;
         /* walk the functions to the object: each is start, leaders, runs, two hashes */
         for (f = 0; f < r->function_count; ++f) {
-            size_t leaders, runs;
             if ((size_t)(p - body) + 12 > length) break;
-            leaders = get32(p + 8);
+            size_t leaders = snx_ld_le32(p + 8);
             if (leaders > (length - (size_t)(p - body) - 12) / 8) break;
             p += 12 + 8 * leaders;
             if ((size_t)(p - body) + 4 > length) break;
-            runs = get32(p);
+            size_t runs = snx_ld_le32(p);
             if (runs > (length - (size_t)(p - body) - 4) / 12) break;
             p += 4 + 12 * runs;
             if ((size_t)(p - body) + 16 > length) break;
             p += 16;
         }
         if (f < r->function_count || (size_t)(p - body) + 8 > length) break;
-        r->object_size = (size_t)get64(p);
+        r->object_size = (size_t)snx_ld_le64(p);
         r->object = p + 8;
         if (r->object_size != length - (size_t)(r->object - body)) break;
         r->state = 0;
@@ -699,25 +665,26 @@ static size_t cache_parse(Cache* c, size_t start, size_t size, size_t* used) {
 
 /* every leader of every record into the index, the newest record last so its own win */
 static int cache_index(Cache* c) {
-    size_t i, f, k, total = 0, slot;
-    for (i = 0; i < c->count; ++i) {
+    size_t total = 0;
+    for (size_t i = 0; i < c->count; ++i) {
         const unsigned char* p = c->records[i].functions;
-        for (f = 0; f < c->records[i].function_count; ++f) {
-            size_t leaders = get32(p + 8);
+        for (size_t f = 0; f < c->records[i].function_count; ++f) {
+            size_t leaders = snx_ld_le32(p + 8);
             total += leaders;
             p += 12 + 8 * leaders;
-            p += 4 + 12 * (size_t)get32(p) + 16;
+            p += 4 + 12 * (size_t)snx_ld_le32(p) + 16;
         }
     }
     for (c->capacity = 1024; c->capacity < 2 * total + 2; c->capacity *= 2) continue;
     c->index = (CacheSlot*)calloc(c->capacity, sizeof(*c->index));
     if (!c->index) return -1;
-    for (i = 0; i < c->count; ++i) {
+    for (size_t i = 0; i < c->count; ++i) {
         const unsigned char* p = c->records[i].functions;
-        for (f = 0; f < c->records[i].function_count; ++f) {
-            size_t leaders = get32(p + 8);
-            for (k = 0; k < leaders; ++k) {
-                SnxU64 key = get64(p + 12 + 8 * k) | 1;
+        for (size_t f = 0; f < c->records[i].function_count; ++f) {
+            size_t leaders = snx_ld_le32(p + 8);
+            for (size_t k = 0; k < leaders; ++k) {
+                SnxU64 key = snx_ld_le64(p + 12 + 8 * k) | 1;
+                size_t slot;
                 for (slot = entry_hash(key, c->capacity); c->index[slot].key && c->index[slot].key != key;
                      slot = (slot + 1) & (c->capacity - 1))
                     continue;
@@ -725,26 +692,28 @@ static int cache_index(Cache* c) {
                 c->index[slot].record = i;
             }
             p += 12 + 8 * leaders;
-            p += 4 + 12 * (size_t)get32(p) + 16;
+            p += 4 + 12 * (size_t)snx_ld_le32(p) + 16;
         }
     }
     return 0;
 }
 
-/* Opens the cache: reads what an earlier run with the same key wrote, and starts the file over when there is none, its
-   key differs, it is too large or a run left a record unfinished (rewritten with the whole ones) */
+/* Opens the cache: reads what an earlier run with the same key wrote, and starts the file over when there is none or
+   its key differs. A run that left a record unfinished, or a file past SNX_JIT_CACHE_MAX (an earlier build's appends
+   had no limit), is rewritten with the whole records the limit holds: refusing the file outright threw a full cache
+   away the run after it filled, so every other run started cold */
 static void cache_open(SnxJitService* s) {
     Cache* c = &s->cache;
-    char *key = cache_key(s), *temporary;
+    char* key = cache_key(s);
     FILE* f = fopen(s->config.cache_path, "rb");
-    size_t key_length, size = 0, header, used = 0, slots;
+    size_t size = 0, used = 0;
     long length = -1;
     if (!key) return;
-    key_length = strlen(key);
-    header = 8 + 4 + key_length;
+    size_t key_length = strlen(key);
+    size_t header = 8 + 4 + key_length;
     if (f && !fseek(f, 0, SEEK_END)) length = ftell(f);
-    if (f && length >= (long)header && (size_t)length <= SNX_JIT_CACHE_MAX && !fseek(f, 0, SEEK_SET)) {
-        size = (size_t)length;
+    if (f && length >= (long)header && !fseek(f, 0, SEEK_SET)) {
+        size = (size_t)length < SNX_JIT_CACHE_MAX ? (size_t)length : SNX_JIT_CACHE_MAX;
         c->buffer = (unsigned char*)malloc(size);
         if (c->buffer && fread(c->buffer, 1, size, f) != size) {
             free(c->buffer);
@@ -752,13 +721,13 @@ static void cache_open(SnxJitService* s) {
         }
     }
     if (f) fclose(f);
-    if (c->buffer && (memcmp(c->buffer, SNX_JIT_CACHE_MAGIC, 8) || get32(c->buffer + 8) != key_length ||
+    if (c->buffer && (memcmp(c->buffer, SNX_JIT_CACHE_MAGIC, 8) || snx_ld_le32(c->buffer + 8) != key_length ||
                       memcmp(c->buffer + 12, key, key_length))) {
         free(c->buffer); /* another build or host's: of no use here */
         c->buffer = NULL;
     }
     if (c->buffer) {
-        slots = (size - header) / 20 + 1; /* a record takes more than 20 bytes */
+        size_t slots = (size - header) / 20 + 1; /* a record takes more than 20 bytes */
         c->records = (CacheRecord*)calloc(slots, sizeof(*c->records));
         if (c->records) c->count = cache_parse(c, header, size, &used);
         if (!c->records || cache_index(c)) {
@@ -769,17 +738,17 @@ static void cache_open(SnxJitService* s) {
             c->count = 0;
         }
     }
-    if (c->buffer && used == size) {
+    if (c->buffer && used == (size_t)length) {
         c->file = fopen(s->config.cache_path, "ab");
+        c->size = used;
     } else {
         /* a new file: the header, and the whole records of the old one */
-        temporary = (char*)malloc(strlen(s->config.cache_path) + 8);
+        char* temporary = (char*)malloc(strlen(s->config.cache_path) + 8);
         if (temporary) {
             sprintf(temporary, "%s.new", s->config.cache_path);
             c->file = fopen(temporary, "wb");
             if (c->file) {
-                Out o;
-                memset(&o, 0, sizeof(o));
+                Out o = {0};
                 out_bytes(&o, SNX_JIT_CACHE_MAGIC, 8);
                 out32(&o, (SnxU32)key_length);
                 out_bytes(&o, key, key_length);
@@ -795,6 +764,7 @@ static void cache_open(SnxJitService* s) {
                 fclose(c->file);
                 remove(s->config.cache_path); /* Windows' rename doesn't replace */
                 c->file = rename(temporary, s->config.cache_path) ? NULL : fopen(s->config.cache_path, "ab");
+                c->size = header + (c->buffer ? used - header : 0);
             }
             free(temporary);
         }
@@ -807,15 +777,14 @@ static void cache_close(Cache* c) {
     free(c->index);
     free(c->records);
     free(c->buffer);
-    memset(c, 0, sizeof(*c));
+    *c = (Cache){0};
 }
 
 /* the record whose functions have pc as a leader, or NULL */
 static CacheRecord* cache_find(Cache* c, SnxU64 pc) {
     SnxU64 key = pc | 1;
-    size_t slot;
     if (!c->capacity) return NULL;
-    for (slot = entry_hash(key, c->capacity); c->index[slot].key; slot = (slot + 1) & (c->capacity - 1))
+    for (size_t slot = entry_hash(key, c->capacity); c->index[slot].key; slot = (slot + 1) & (c->capacity - 1))
         if (c->index[slot].key == key) return &c->records[c->index[slot].record];
     return NULL;
 }
@@ -824,29 +793,27 @@ static CacheRecord* cache_find(Cache* c, SnxU64 pc) {
    load_lock */
 static void cache_append(SnxJitService* s, const SnxCodegen* codegen, const char* name, const unsigned char* object,
                          size_t size, const SnxCodeImage* images, size_t image_count) {
-    Out body, runs;
-    size_t i, j, leaders, run_count, name_length = strlen(name);
+    size_t name_length = strlen(name);
     SnxU64 h1 = 0, h2 = 0, start = 0, previous = 0;
     unsigned char head[12];
     if (!s->cache.file) return;
-    memset(&body, 0, sizeof(body));
-    memset(&runs, 0, sizeof(runs));
-    head[0] = (unsigned char)name_length;
-    head[1] = (unsigned char)(name_length >> 8);
+    Out body = {0}, runs = {0};
+    snx_st_le16(head, (uint16_t)name_length);
     out_bytes(&body, head, 2);
     out_bytes(&body, name, name_length);
     out32(&body, (SnxU32)codegen->function_count);
-    for (i = 0; i < codegen->function_count && !body.failed; ++i) {
+    for (size_t i = 0; i < codegen->function_count && !body.failed; ++i) {
         const SnxFunction* f = &codegen->functions[i];
         out64(&body, f->start);
-        for (j = 0, leaders = 0; j < f->count; ++j) leaders += f->leaders[j] != 0;
+        size_t leaders = 0;
+        for (size_t j = 0; j < f->count; ++j) leaders += f->leaders[j] != 0;
         out32(&body, (SnxU32)leaders);
-        for (j = 0; j < f->count; ++j)
+        for (size_t j = 0; j < f->count; ++j)
             if (f->leaders[j]) out64(&body, snx_function_address(f, j));
         /* the instructions as runs of consecutive addresses */
         runs.size = 0;
-        run_count = 0;
-        for (j = 0; j < f->count; ++j) {
+        size_t run_count = 0;
+        for (size_t j = 0; j < f->count; ++j) {
             SnxU64 address = snx_function_address(f, j);
             if (!j || address != previous + 4) {
                 if (j) out32(&runs, (SnxU32)((previous - start) / 4 + 1));
@@ -866,18 +833,20 @@ static void cache_append(SnxJitService* s, const SnxCodegen* codegen, const char
     out64(&body, (SnxU64)size);
     out_bytes(&body, object, size);
     if (!body.failed) {
-        h1 = fnv(body.bytes, body.size, 0xCBF29CE484222325ULL);
-        head[0] = (unsigned char)SNX_JIT_RECORD_MAGIC;
-        head[1] = (unsigned char)(SNX_JIT_RECORD_MAGIC >> 8);
-        head[2] = (unsigned char)(SNX_JIT_RECORD_MAGIC >> 16);
-        head[3] = (unsigned char)(SNX_JIT_RECORD_MAGIC >> 24);
-        for (i = 0; i < 8; ++i) head[4 + i] = (unsigned char)((SnxU64)body.size >> (8 * i));
+        h1 = snx_fnv1a(SNX_FNV_BASIS, body.bytes, body.size);
+        snx_st_le32(head, SNX_JIT_RECORD_MAGIC);
+        snx_st_le64(head + 4, (SnxU64)body.size);
         out64(&body, h1);
+        /* a full file takes no more: past the limit the next run would read only the records before it */
+        if (!body.failed &&
+            (s->cache.size > SNX_JIT_CACHE_MAX - 12 || body.size > SNX_JIT_CACHE_MAX - 12 - s->cache.size))
+            body.failed = 1;
         if (!body.failed && (fwrite(head, 1, 12, s->cache.file) != 12 ||
                              fwrite(body.bytes, 1, body.size, s->cache.file) != body.size || fflush(s->cache.file))) {
             fclose(s->cache.file); /* a disk that failed once: no more records this run */
             s->cache.file = NULL;
-        }
+        } else if (!body.failed)
+            s->cache.size += 12 + body.size;
     }
     free(body.bytes);
     free(runs.bytes);
@@ -887,49 +856,54 @@ static void cache_append(SnxJitService* s, const SnxCodegen* codegen, const char
    are still those it was compiled from: 1, or 0 when it is refused (and it stays so). Under load_lock */
 static int cache_load(SnxJitService* s, CacheRecord* r, const SnxCodeImage* images, size_t image_count) {
     const unsigned char* p = r->functions;
-    unsigned char* object;
-    SnxLinkInput input;
     const char* names[1];
-    SnxU64 table = 0, h1, h2, epoch, span_lo = ~(SnxU64)0, span_hi = 0;
-    size_t f, k, leaders, runs, span_count = 0;
+    SnxU64 table = 0, span_lo = ~(SnxU64)0, span_hi = 0;
+    size_t span_count = 0;
     Published* span = NULL;
     char error[256];
-    int refused;
     lock(&s->lock);
-    epoch = s->epoch; /* memory changing after here makes the record stale: refused below */
+    SnxU64 epoch = s->epoch; /* memory changing after here makes the record stale: refused below */
     unlock(&s->lock);
-    for (f = 0; f < r->function_count; ++f) { /* the code it was compiled from, unchanged */
-        leaders = get32(p + 8);
+    for (size_t f = 0; f < r->function_count; ++f) { /* the code it was compiled from, unchanged */
+        SnxU64 h1, h2;
+        size_t leaders = snx_ld_le32(p + 8);
         p += 12 + 8 * leaders;
-        runs = get32(p);
-        if (hash_runs(images, image_count, p + 4, runs, &h1, &h2) || h1 != get64(p + 4 + 12 * runs) ||
-            h2 != get64(p + 12 + 12 * runs)) {
+        size_t runs = snx_ld_le32(p);
+        if (hash_runs(images, image_count, p + 4, runs, &h1, &h2) || h1 != snx_ld_le64(p + 4 + 12 * runs) ||
+            h2 != snx_ld_le64(p + 12 + 12 * runs)) {
             r->state = -1;
             return 0;
         }
         p += 4 + 12 * runs + 16;
     }
-    /* the object at whatever offset the file put it, copied where malloc aligns it: the ELF reader reads its headers,
-       sections and relocations in place. Without the memory, refused as the loader refuses */
-    object = (unsigned char*)malloc(r->object_size ? r->object_size : 1);
-    if (object) memcpy(object, r->object, r->object_size);
-    input.data = object;
-    input.size = r->object_size;
-    input.name = r->name;
-    names[0] = r->name;
-    refused = !object || snx_code_load(s->loader, &input, 1, names, 1, &table, error, sizeof(error));
-    free(object);
-    if (refused) {
-        r->state = -1;
-        return 0;
+    if (r->state == 1)
+        table = r->table; /* its code is in the arena still (code is never freed), compiled from what the check found */
+    else {
+        /* the object at whatever offset the file put it, copied where malloc aligns it: the ELF reader reads its
+           headers, sections and relocations in place. Without the memory, refused as the loader refuses */
+        unsigned char* object = (unsigned char*)malloc(r->object_size ? r->object_size : 1);
+        if (object) memcpy(object, r->object, r->object_size);
+        SnxLinkInput input;
+        input.data = object;
+        input.size = r->object_size;
+        input.name = r->name;
+        names[0] = r->name;
+        int refused = !object || snx_code_load(s->loader, &input, 1, names, 1, &table, error, sizeof(error));
+        free(object);
+        if (refused) {
+            r->state = -1;
+            return 0;
+        }
+        r->state = 1;
+        r->table = table;
     }
-    r->state = 1;
     /* publish: each function's leaders, into their empty slots and the service's table (compile's), unless memory
        changed since the record's code was checked */
     p = r->functions;
     lock(&s->lock);
     if (epoch != s->epoch) {
-        r->state = -1;
+        /* memory changed somewhere while it loaded, perhaps not under it: the next miss checks it again (its object
+           loaded, once it is) */
         unlock(&s->lock);
         return 0;
     }
@@ -937,39 +911,40 @@ static int cache_load(SnxJitService* s, CacheRecord* r, const SnxCodeImage* imag
     {
         const unsigned char* q = r->functions;
         size_t total = 0, n;
-        for (f = 0; f < r->function_count; ++f) {
-            total += get32(q + 8);
-            q += 12 + 8 * (size_t)get32(q + 8);
-            q += 4 + 12 * (size_t)get32(q) + 16;
+        for (size_t f = 0; f < r->function_count; ++f) {
+            total += snx_ld_le32(q + 8);
+            q += 12 + 8 * (size_t)snx_ld_le32(q + 8);
+            q += 4 + 12 * (size_t)snx_ld_le32(q) + 16;
         }
         span = total ? (Published*)malloc(total * sizeof(*span)) : NULL;
-        for (f = 0, q = r->functions, n = 0; span && f < r->function_count; ++f) {
-            SnxU64 run;
-            for (k = 0; k < get32(q + 8); ++k) {
-                span[n].pc = get64(q + 12 + 8 * k);
+        q = r->functions;
+        n = 0;
+        for (size_t f = 0; span && f < r->function_count; ++f) {
+            for (size_t k = 0; k < snx_ld_le32(q + 8); ++k) {
+                span[n].pc = snx_ld_le64(q + 12 + 8 * k);
                 span[n++].code = unit_function(table, f);
             }
-            q += 12 + 8 * (size_t)get32(q + 8);
-            for (k = 0; k < get32(q); ++k) {
-                run = get64(q + 4 + 12 * k);
+            q += 12 + 8 * (size_t)snx_ld_le32(q + 8);
+            for (size_t k = 0; k < snx_ld_le32(q); ++k) {
+                SnxU64 run = snx_ld_le64(q + 4 + 12 * k);
                 if (run < span_lo) span_lo = run;
-                if (run + 4 * (SnxU64)get32(q + 4 + 12 * k + 8) > span_hi)
-                    span_hi = run + 4 * (SnxU64)get32(q + 4 + 12 * k + 8);
+                if (run + 4 * (SnxU64)snx_ld_le32(q + 4 + 12 * k + 8) > span_hi)
+                    span_hi = run + 4 * (SnxU64)snx_ld_le32(q + 4 + 12 * k + 8);
             }
-            q += 4 + 12 * (size_t)get32(q) + 16;
+            q += 4 + 12 * (size_t)snx_ld_le32(q) + 16;
         }
         span_count = n;
     }
-    for (f = 0; f < r->function_count; ++f) {
+    for (size_t f = 0; f < r->function_count; ++f) {
         GuestFn code = unit_function(table, f);
-        leaders = get32(p + 8);
-        for (k = 0; k < leaders; ++k) {
-            SnxU64 address = get64(p + 12 + 8 * k);
+        size_t leaders = snx_ld_le32(p + 8);
+        for (size_t k = 0; k < leaders; ++k) {
+            SnxU64 address = snx_ld_le64(p + 12 + 8 * k);
             Entry* e = add(s, address, DONE);
-            Region* region;
             GuestFn expected = NULL;
-            if (e && e->state == GONE) continue; /* invalidated while this record was loading */
-            region = region_of(s, address);
+            /* a GONE pc was invalidated before the record's code was checked (epoch is unchanged since), and the check
+               found the record's code still there: published again, as a load after an invalidation is for */
+            Region* region = region_of(s, address);
             if (region)
                 __atomic_compare_exchange_n(slot(region, address), &expected, code, 0, __ATOMIC_RELEASE,
                                             __ATOMIC_RELAXED);
@@ -978,7 +953,7 @@ static int cache_load(SnxJitService* s, CacheRecord* r, const SnxCodeImage* imag
             e->code = code;
         }
         p += 12 + 8 * leaders;
-        p += 4 + 12 * (size_t)get32(p) + 16;
+        p += 4 + 12 * (size_t)snx_ld_le32(p) + 16;
     }
     span_keep(s, span_lo, span_hi, span, span_count);
     ++s->stats.cached;
@@ -1009,10 +984,10 @@ static void requeue(SnxJitService* s, Entry* e, SnxU64 pc, int queue) {
 static SnxCodeImage* images_take(SnxJitService* s, size_t* count, unsigned char* taken) {
     SnxCodeImage* images =
         (SnxCodeImage*)malloc((s->config.image_count + SNX_JIT_IMAGES) * sizeof(*images) + sizeof(*images));
-    size_t i, n = s->config.image_count;
+    size_t n = s->config.image_count;
     if (!images) return NULL;
     memcpy(images, s->config.images, s->config.image_count * sizeof(*images));
-    for (i = 1; i <= SNX_JIT_IMAGES; ++i) {
+    for (size_t i = 1; i <= SNX_JIT_IMAGES; ++i) {
         taken[i] = s->regions[i].hi != 0;
         if (!taken[i]) continue;
         images[n++] = s->regions[i].image;
@@ -1022,9 +997,8 @@ static SnxCodeImage* images_take(SnxJitService* s, size_t* count, unsigned char*
     return images;
 }
 static void images_release(SnxJitService* s, SnxCodeImage* images, const unsigned char* taken) {
-    size_t i;
     lock(&s->lock);
-    for (i = 1; i <= SNX_JIT_IMAGES; ++i)
+    for (size_t i = 1; i <= SNX_JIT_IMAGES; ++i)
         if (taken[i]) --s->regions[i].users;
     cond_broadcast(&s->released);
     unlock(&s->lock);
@@ -1034,41 +1008,42 @@ static void images_release(SnxJitService* s, SnxCodeImage* images, const unsigne
 static void compile(SnxJitService* s, const SnxU64* pcs, size_t count, SnxU64 stamp, int queue) {
     SnxCodegen codegen;
     SnxJitReport report = {0};
-    SnxLinkInput input;
-    SnxCodeImage* images;
     unsigned char taken[1 + SNX_JIT_IMAGES];
     unsigned char* object = NULL;
-    size_t size = 0, i, j, used, failed = 0, image_count = 0;
+    size_t size = 0, failed = 0, image_count = 0;
     char error[512], name[48];
-    const char* names[1];
-    SnxU64 table = 0, address, epoch, *left = NULL;
-    GuestFn code, expected;
-    const SnxFunction* f;
-    Region* r;
-    Entry* e;
-    Batch batch;
-    int rc, discovered, dropped;
+    SnxU64 table = 0, *left = NULL;
     report.pc = pcs[0];
     report.pcs = count;
     report.seconds = snx_seconds();
     error[0] = 0;
+    Batch batch;
     batch.service = s;
     batch.pcs = pcs;
     batch.count = count;
     lock(&s->lock);
-    images = images_take(s, &image_count, taken);
+    SnxCodeImage* images = images_take(s, &image_count, taken);
     unlock(&s->lock);
     if (images && s->cache.capacity && (left = (SnxU64*)malloc(count * sizeof(*left))) != NULL) {
         /* what the cache has: its units loaded and published, and the pcs they covered done */
         lock(&s->load_lock);
-        for (i = 0; i < count; ++i) {
+        for (size_t i = 0; i < count; ++i) {
             CacheRecord* record = cache_find(&s->cache, pcs[i]);
-            if (record && !record->state) cache_load(s, record, images, image_count);
+            if (!record || record->state < 0) continue;
+            /* a pc of a record loaded before is missed again when its code was invalidated since (a mapping or
+               permission change over it, which a mod loader's patching makes): the record is checked and loaded
+               again, not compiled. Compiling those took most of a cached run's waits, and appended their units again */
+            lock(&s->lock);
+            Entry* e = find(s, pcs[i]);
+            int done = e && e->state == DONE && e->code;
+            unlock(&s->lock);
+            if (!done) cache_load(s, record, images, image_count);
         }
         unlock(&s->load_lock);
         lock(&s->lock);
-        for (i = 0, j = 0; i < count; ++i) {
-            e = find(s, pcs[i]);
+        size_t j = 0;
+        for (size_t i = 0; i < count; ++i) {
+            Entry* e = find(s, pcs[i]);
             if (!e || e->state != DONE || !e->code) left[j++] = pcs[i];
         }
         unlock(&s->lock);
@@ -1085,17 +1060,19 @@ static void compile(SnxJitService* s, const SnxU64* pcs, size_t count, SnxU64 st
         report.pcs = count;
     }
     lock(&s->lock);
-    epoch = s->epoch; /* memory changing after the code is read makes this batch's code stale: the publish skips it */
+    /* memory changing after the code is read makes this batch's code stale: the publish skips it */
+    SnxU64 epoch = s->epoch;
     unlock(&s->lock);
-    rc = images ? snx_codegen_discover(&codegen, images, image_count, pcs, count, known, &batch, s->config.budget,
-                                       s->config.features)
-              : -1;
-    if (!images) memset(&codegen, 0, sizeof(codegen));
-    discovered = !rc;
+    int rc = images ? snx_codegen_discover(&codegen, images, image_count, pcs, count, known, &batch, s->config.budget,
+                                           s->config.features)
+                    : -1;
+    if (!images) codegen = (SnxCodegen){0};
+    int discovered = !rc;
     if (rc) snprintf(error, sizeof(error), "no guest code to compile at %llx", (unsigned long long)pcs[0]);
-    for (i = 0; !rc && i < codegen.function_count; ++i) report.instructions += codegen.functions[i].count;
+    for (size_t i = 0; !rc && i < codegen.function_count; ++i) report.instructions += codegen.functions[i].count;
     report.functions = codegen.function_count;
     if (!rc) {
+        SnxU64 address;
         lock(&s->load_lock);
         /* unique in the loader's table, the cache's units from earlier runs included */
         do sprintf(name, "snx_jit_unit_%s_%lu", s->run, ++s->units);
@@ -1104,6 +1081,8 @@ static void compile(SnxJitService* s, const SnxU64* pcs, size_t count, SnxU64 st
         rc = emit_unit(s, &codegen, name, &object, &size, error, sizeof(error));
     }
     if (!rc) {
+        SnxLinkInput input;
+        const char* names[1];
         input.data = object;
         input.size = size;
         input.name = name;
@@ -1111,7 +1090,7 @@ static void compile(SnxJitService* s, const SnxU64* pcs, size_t count, SnxU64 st
         /* the code is complete and visible to instruction fetch when this returns: its addresses may go to any
            thread from here (code_loader.h) */
         lock(&s->load_lock);
-        used = snx_code_used(s->loader);
+        size_t used = snx_code_used(s->loader);
         rc = snx_code_load(s->loader, &input, 1, names, 1, &table, error, sizeof(error));
         report.bytes = snx_code_used(s->loader) - used;
         if (!rc) cache_append(s, &codegen, name, object, size, images, image_count);
@@ -1121,7 +1100,7 @@ static void compile(SnxJitService* s, const SnxU64* pcs, size_t count, SnxU64 st
     if (rc && discovered && count > 1) {
         snx_codegen_free(&codegen);
         if (images) images_release(s, images, taken);
-        for (i = 0; i < count; ++i) compile(s, &pcs[i], 1, stamp, queue);
+        for (size_t i = 0; i < count; ++i) compile(s, &pcs[i], 1, stamp, queue);
         free(left);
         return;
     }
@@ -1131,17 +1110,18 @@ static void compile(SnxJitService* s, const SnxU64* pcs, size_t count, SnxU64 st
        written before it. A slot something else filled meanwhile (another batch, a wrapper) keeps what it holds */
     lock(&s->lock);
     if (epoch == s->epoch) {
-        for (i = 0; !rc && i < codegen.function_count; ++i) {
-            f = &codegen.functions[i];
-            code = unit_function(table, i);
-            for (j = 0; j < f->count; ++j) {
+        for (size_t i = 0; !rc && i < codegen.function_count; ++i) {
+            const SnxFunction* f = &codegen.functions[i];
+            GuestFn code = unit_function(table, i);
+            for (size_t j = 0; j < f->count; ++j) {
                 if (!f->leaders[j]) continue;
-                address = snx_function_address(f, j);
-                r = region_of(s, address); /* an added region being removed has none: its arrays stay until users is 0 */
+                SnxU64 address = snx_function_address(f, j);
+                /* an added region being removed has none: its arrays stay until users is 0 */
+                Region* r = region_of(s, address);
                 if (!r) continue;
-                e = add(s, address, DONE);
+                Entry* e = add(s, address, DONE);
                 if (e && e->state == GONE) continue; /* invalidated while this batch compiled */
-                expected = NULL;
+                GuestFn expected = NULL;
                 __atomic_compare_exchange_n(slot(r, address), &expected, code, 0, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
                 /* a queued pc this batch compiled is done (its queue skips it); one another batch compiles is that
                    batch's to end, as this batch's own pcs are below, and an earlier batch's keeps its code */
@@ -1152,11 +1132,11 @@ static void compile(SnxJitService* s, const SnxU64* pcs, size_t count, SnxU64 st
         }
         if (!rc) span_of_batch(s, &codegen, table);
     }
-    dropped = epoch != s->epoch;
-    for (i = 0; i < count; ++i) {
-        e = find(s, pcs[i]);
-        f = rc ? NULL : snx_codegen_entry(&codegen, pcs[i]);
-        code = f ? unit_function(table, (size_t)(f - codegen.functions)) : NULL;
+    int dropped = epoch != s->epoch;
+    for (size_t i = 0; i < count; ++i) {
+        Entry* e = find(s, pcs[i]);
+        const SnxFunction* f = rc ? NULL : snx_codegen_entry(&codegen, pcs[i]);
+        GuestFn code = f ? unit_function(table, (size_t)(f - codegen.functions)) : NULL;
         /* a pc another batch took since (invalidated and missed again) is that batch's to end */
         if (e && e->state == IN_FLIGHT && e->taken != stamp) continue;
         if (dropped) {
@@ -1217,18 +1197,15 @@ static void compile(SnxJitService* s, const SnxU64* pcs, size_t count, SnxU64 st
    goes in *taken, and the queue they came from in *queue; 0 when both are empty. Skips the pcs a batch compiled while
    they waited */
 static size_t take(SnxJitService* s, SnxU64* pcs, SnxU64* taken, int* queue) {
-    size_t n = 0, max;
-    int q, state;
-    SnxU64 pc;
-    Entry* e;
+    size_t n = 0;
     *taken = ++s->takes;
-    for (q = LIVE; q < QUEUES && !n; ++q) {
+    for (int q = LIVE; q < QUEUES && !n; ++q) {
         *queue = q;
-        max = q == LIVE ? s->config.batch : (s->config.batch + 7) / 8;
+        size_t max = q == LIVE ? s->config.batch : (s->config.batch + 7) / 8;
         while (n < max && s->queues[q].count) {
-            pc = pop(&s->queues[q]);
-            e = find(s, pc);
-            state = q == LIVE ? QUEUED : QUEUED_WARM;
+            SnxU64 pc = pop(&s->queues[q]);
+            Entry* e = find(s, pc);
+            int state = q == LIVE ? QUEUED : QUEUED_WARM;
             /* compiled since as another batch's leader (whatever its slot holds: a wrapper isn't code for it), or moved
                to the misses' queue */
             if (!e || e->state != state) continue;
@@ -1242,18 +1219,10 @@ static size_t take(SnxJitService* s, SnxU64* pcs, SnxU64* taken, int* queue) {
     return n;
 }
 
-static int compare_pc(const void* a, const void* b) {
-    SnxU64 x = *(const SnxU64*)a, y = *(const SnxU64*)b;
-    return x < y ? -1 : x > y;
-}
-
 /* A compile thread: batch after batch until the service stops. A batch that leaves pcs queued wakes another thread
    for them */
 static void worker(SnxJitService* s) {
     SnxU64* pcs = (SnxU64*)malloc(s->config.batch * sizeof(*pcs));
-    SnxU64 taken;
-    size_t n;
-    int queue;
     /* below the guest threads: when the host has no idle CPU, a compile waits, not the game */
 #if defined(__linux__)
     setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 10);
@@ -1262,7 +1231,9 @@ static void worker(SnxJitService* s) {
 #endif
     lock(&s->lock);
     while (pcs && !s->stop) {
-        n = take(s, pcs, &taken, &queue);
+        SnxU64 taken;
+        int queue;
+        size_t n = take(s, pcs, &taken, &queue);
         if (!n) {
             if (!s->busy) cond_broadcast(&s->idle);
             cond_wait(&s->work, &s->lock);
@@ -1271,7 +1242,7 @@ static void worker(SnxJitService* s) {
         ++s->busy;
         if (s->queues[LIVE].count || s->queues[WARM].count) cond_signal(&s->work);
         unlock(&s->lock);
-        qsort(pcs, n, sizeof(*pcs), compare_pc);
+        qsort(pcs, n, sizeof(*pcs), snx_compare_u64);
         compile(s, pcs, n, taken, queue);
         lock(&s->lock);
         --s->busy;
@@ -1317,14 +1288,13 @@ int snx_jit_covers(const SnxJitService* s, SnxU64 pc) {
 GuestFn snx_jit_resolve(SnxJitService* s, SnxU64 pc) {
     GuestFn code = NULL;
     Region* r = region_of(s, pc);
-    Entry* e;
     /* an added image's table is the service's alone: its code is found here, without the lock (the main table's slot
        is empty, or the caller's lookup would not have missed) */
     if (r && r != &s->regions[0] && (code = __atomic_load_n(slot(r, pc), __ATOMIC_ACQUIRE)) != NULL) return code;
     if (!in_text(s, pc) && !(r && r != &s->regions[0])) return NULL;
     if (r && is_pending(r, pc) && !__atomic_load_n(slot(r, pc), __ATOMIC_ACQUIRE)) return NULL;
     lock(&s->lock);
-    e = find(s, pc);
+    Entry* e = find(s, pc);
     if (!e || e->state == QUEUED_WARM || e->state == GONE) {
         if (!e) e = add(s, pc, QUEUED);
         if (e && !push(&s->queues[LIVE], pc)) {
@@ -1341,15 +1311,13 @@ GuestFn snx_jit_resolve(SnxJitService* s, SnxU64 pc) {
 }
 
 size_t snx_jit_warm(SnxJitService* s, const SnxU64* pcs, size_t count) {
-    size_t i, queued = 0;
-    Region* r;
-    Entry* e;
+    size_t queued = 0;
     lock(&s->lock);
-    for (i = 0; i < count; ++i) {
+    for (size_t i = 0; i < count; ++i) {
         if (!in_text(s, pcs[i]) || find(s, pcs[i])) continue;
-        r = region_of(s, pcs[i]);
+        Region* r = region_of(s, pcs[i]);
         if (r && __atomic_load_n(slot(r, pcs[i]), __ATOMIC_RELAXED)) continue;
-        e = add(s, pcs[i], QUEUED_WARM);
+        Entry* e = add(s, pcs[i], QUEUED_WARM);
         if (!e) break;
         if (push(&s->queues[WARM], pcs[i])) {
             e->state = FAILED;
@@ -1370,13 +1338,12 @@ void snx_jit_drain(SnxJitService* s) {
 }
 
 GuestFn snx_jit_wait(SnxJitService* s, SnxU64 pc) {
-    GuestFn code = snx_jit_resolve(s, pc); /* queued at the front of the misses, if it wasn't */
-    Entry* e;
+    GuestFn code = snx_jit_resolve(s, pc); /* queued in the live misses' queue, if it wasn't */
     if (code) return code;
     lock(&s->lock);
     for (;;) {
         /* found again each time: the table moves when it grows */
-        e = find(s, pc);
+        Entry* e = find(s, pc);
         if (!e || e->state == FAILED) break; /* outside the images, or uncompilable */
         if (e->state == DONE) {
             code = e->code;
@@ -1407,12 +1374,11 @@ static void region_chunk_range(SnxU64 lo, SnxU64 hi, size_t i, SnxU64* from, Snx
 /* under lock: the top has an entry for chunk last */
 static int region_top_cover(SnxJitService* s, size_t last) {
     RegionTop* top = s->region_top;
-    RegionTop* grown;
-    size_t count = top ? top->count : 0, n;
+    size_t count = top ? top->count : 0;
     if (last < count) return 0;
-    n = count ? count : 16;
+    size_t n = count ? count : 16;
     while (n <= last) n *= 2;
-    grown = (RegionTop*)calloc(1, sizeof(*grown) + n * sizeof(*grown->leaves));
+    RegionTop* grown = (RegionTop*)calloc(1, sizeof(*grown) + n * sizeof(*grown->leaves));
     if (!grown) return -1;
     if (top) memcpy(grown->leaves, top->leaves, count * sizeof(*grown->leaves));
     grown->count = n;
@@ -1424,10 +1390,9 @@ static int region_top_cover(SnxJitService* s, size_t last) {
 /* under lock: the pages of [lo, hi) read as the region at index (regions, 1-based). A leaf or top the allocation can't
    carve out leaves those pages to region_of's scan */
 static void region_map_add(SnxJitService* s, SnxU64 lo, SnxU64 hi, unsigned index) {
-    size_t first = (size_t)(lo >> REGION_TOP_SHIFT), last = (size_t)((hi - 1) >> REGION_TOP_SHIFT), i;
-    SnxU64 from, to, pc;
+    size_t first = (size_t)(lo >> REGION_TOP_SHIFT), last = (size_t)((hi - 1) >> REGION_TOP_SHIFT);
     if (region_top_cover(s, last)) return;
-    for (i = first; i <= last; ++i) {
+    for (size_t i = first; i <= last; ++i) {
         RegionTop* top = s->region_top;
         unsigned short* leaf = __atomic_load_n(&top->leaves[i], __ATOMIC_RELAXED);
         if (!leaf) {
@@ -1435,8 +1400,9 @@ static void region_map_add(SnxJitService* s, SnxU64 lo, SnxU64 hi, unsigned inde
             if (!leaf) continue; /* region_of scans for them */
             __atomic_store_n(&top->leaves[i], leaf, __ATOMIC_RELEASE);
         }
+        SnxU64 from, to;
         region_chunk_range(lo, hi, i, &from, &to);
-        for (pc = from; pc < to; pc += 0x1000)
+        for (SnxU64 pc = from; pc < to; pc += 0x1000)
             __atomic_store_n(&leaf[(pc >> REGION_PAGE_SHIFT) & (REGION_LEAF_ENTRIES - 1)], (unsigned short)index,
                              __ATOMIC_RELEASE);
     }
@@ -1445,18 +1411,17 @@ static void region_map_add(SnxJitService* s, SnxU64 lo, SnxU64 hi, unsigned inde
 /* under lock: the pages of [lo, hi) read as no added region again */
 static void region_map_remove(SnxJitService* s, SnxU64 lo, SnxU64 hi) {
     RegionTop* top = s->region_top;
-    size_t first, last, i;
-    SnxU64 from, to, pc;
     if (!top) return;
-    first = (size_t)(lo >> REGION_TOP_SHIFT);
-    last = (size_t)((hi - 1) >> REGION_TOP_SHIFT);
+    size_t first = (size_t)(lo >> REGION_TOP_SHIFT);
+    size_t last = (size_t)((hi - 1) >> REGION_TOP_SHIFT);
     if (first >= top->count) return;
     if (last >= top->count) last = top->count - 1;
-    for (i = first; i <= last; ++i) {
+    for (size_t i = first; i <= last; ++i) {
         unsigned short* leaf = __atomic_load_n(&top->leaves[i], __ATOMIC_RELAXED);
         if (!leaf) continue;
+        SnxU64 from, to;
         region_chunk_range(lo, hi, i, &from, &to);
-        for (pc = from; pc < to; pc += 0x1000)
+        for (SnxU64 pc = from; pc < to; pc += 0x1000)
             __atomic_store_n(&leaf[(pc >> REGION_PAGE_SHIFT) & (REGION_LEAF_ENTRIES - 1)], (unsigned short)0,
                              __ATOMIC_RELEASE);
     }
@@ -1464,13 +1429,11 @@ static void region_map_remove(SnxJitService* s, SnxU64 lo, SnxU64 hi) {
 
 int snx_jit_add_image(SnxJitService* s, const SnxCodeImage* image) {
     SnxU64 lo = image->base + image->text_off, hi = lo + image->text_size;
-    size_t i, n = (size_t)(image->text_size / 4);
-    GuestFn* slots;
-    unsigned char* pending;
+    size_t n = (size_t)(image->text_size / 4);
     Region* r = NULL;
-    if (!image->text_size || (lo & 3) || hi < lo || n > SIZE_MAX / sizeof(*slots)) return -1;
-    slots = (GuestFn*)calloc(n, sizeof(*slots));
-    pending = (unsigned char*)calloc(n / 8 + 1, 1);
+    if (!image->text_size || (lo & 3) || hi < lo || n > SIZE_MAX / sizeof(GuestFn)) return -1;
+    GuestFn* slots = (GuestFn*)calloc(n, sizeof(*slots));
+    unsigned char* pending = (unsigned char*)calloc(n / 8 + 1, 1);
     if (!slots || !pending) {
         free(slots);
         free(pending);
@@ -1478,7 +1441,7 @@ int snx_jit_add_image(SnxJitService* s, const SnxCodeImage* image) {
     }
     lock(&s->lock);
     if (lo < s->regions[0].hi && s->regions[0].lo < hi) r = &s->regions[0]; /* over the main table: refused */
-    for (i = 1; r != &s->regions[0] && i <= SNX_JIT_IMAGES; ++i)
+    for (size_t i = 1; r != &s->regions[0] && i <= SNX_JIT_IMAGES; ++i)
         if (!s->regions[i].hi) {
             if (!r) r = &s->regions[i];
         } else if (lo < s->regions[i].hi && s->regions[i].lo < hi)
@@ -1501,35 +1464,31 @@ int snx_jit_add_image(SnxJitService* s, const SnxCodeImage* image) {
 
 void snx_jit_remove_image(SnxJitService* s, SnxU64 base) {
     Region* r = NULL;
-    GuestFn* slots;
-    unsigned char* pending;
-    SnxU64 lo, hi, pc;
-    size_t i;
     lock(&s->lock);
-    for (i = 1; i <= SNX_JIT_IMAGES && !r; ++i)
+    for (size_t i = 1; i <= SNX_JIT_IMAGES && !r; ++i)
         if (s->regions[i].hi && s->regions[i].image.base == base) r = &s->regions[i];
     if (!r) {
         unlock(&s->lock);
         return;
     }
-    lo = r->lo;
-    hi = r->hi;
+    SnxU64 lo = r->lo;
+    SnxU64 hi = r->hi;
     region_map_remove(s, lo, hi); /* its pages read as no region again */
     __atomic_store_n(&r->hi, 0, __ATOMIC_RELEASE); /* no batch takes the image, no publish finds the table */
     while (r->users) cond_wait(&s->released, &s->lock);
     /* its pcs are new to the service again: queued ones are skipped when taken, compiled ones forgotten */
-    for (i = 0; i < s->entry_capacity; ++i) {
-        pc = s->entries[i].key & ~(SnxU64)1;
+    for (size_t i = 0; i < s->entry_capacity; ++i) {
+        SnxU64 pc = s->entries[i].key & ~(SnxU64)1;
         if (!s->entries[i].key || pc < lo || pc >= hi) continue;
         s->entries[i].state = GONE;
         s->entries[i].code = NULL;
     }
     cond_broadcast(&s->done); /* a thread waiting for one of them gets NULL */
-    slots = r->slots;
-    pending = r->pending;
+    GuestFn* slots = r->slots;
+    unsigned char* pending = r->pending;
     r->slots = NULL;
     r->pending = NULL;
-    memset(&r->image, 0, sizeof(r->image));
+    r->image = (SnxCodeImage){0};
     unlock(&s->lock);
     free(slots);
     free(pending);
@@ -1538,47 +1497,47 @@ void snx_jit_remove_image(SnxJitService* s, SnxU64 base) {
 void snx_jit_invalidate_ranges(SnxJitService* s, SnxU64 addr, SnxU64 size, SnxJitInvalidatedRange callback,
                                void* context) {
     typedef struct { SnxU64 start, end; } InvalidatedRange;
-    SnxU64 end = addr + size, from, to, pc;
-    size_t i, j, range_count = 0, range_capacity;
-    Entry* e;
-    Region* r;
+    SnxU64 end = addr + size;
+    size_t range_count = 0;
     InvalidatedRange* ranges = NULL;
     int ranges_incomplete = 0;
     if (!size || end < addr) return;
     lock(&s->lock);
-    range_capacity = s->span_count;
+    size_t range_capacity = s->span_count;
     if (callback && range_capacity) ranges = (InvalidatedRange*)calloc(range_capacity, sizeof(*ranges));
     if (callback && range_capacity && !ranges) ranges_incomplete = 1;
     /* a batch compiling now reads s->epoch before its code, and skips the publish when it has changed */
     ++s->epoch;
     if ((end - addr) / 4 < s->entry_capacity / 8) { /* a few lines (IC IVAU's 64 bytes): each pc looked up */
-        for (pc = addr & ~(SnxU64)3; pc < end; pc += 4)
-            if ((e = find(s, pc)) != NULL) {
+        for (SnxU64 pc = addr & ~(SnxU64)3; pc < end; pc += 4) {
+            Entry* e = find(s, pc);
+            if (e != NULL) {
                 e->state = GONE;
                 e->code = NULL;
             }
+        }
     } else
-        for (i = 0; i < s->entry_capacity; ++i) {
-            e = &s->entries[i];
-            pc = e->key & ~(SnxU64)1;
+        for (size_t i = 0; i < s->entry_capacity; ++i) {
+            Entry* e = &s->entries[i];
+            SnxU64 pc = e->key & ~(SnxU64)1;
             if (e->key && pc >= addr && pc < end) {
                 e->state = GONE;
                 e->code = NULL;
             }
         }
-    for (j = 0; j <= SNX_JIT_IMAGES; ++j) {
-        r = &s->regions[j];
+    for (size_t j = 0; j <= SNX_JIT_IMAGES; ++j) {
+        Region* r = &s->regions[j];
         if (!r->hi || r->hi <= addr || r->lo >= end) continue; /* free, or outside the range */
-        from = ((addr > r->lo ? addr : r->lo) + 3) & ~(SnxU64)3;
-        to = end < r->hi ? end : r->hi;
-        for (pc = from; pc < to; pc += 4) {
+        SnxU64 from = ((addr > r->lo ? addr : r->lo) + 3) & ~(SnxU64)3;
+        SnxU64 to = end < r->hi ? end : r->hi;
+        for (SnxU64 pc = from; pc < to; pc += 4) {
             __atomic_store_n(slot(r, pc), NULL, __ATOMIC_RELEASE);
             clear_pending(r, pc); /* its pc is new to the service again: discovery isn't told a batch has it */
         }
     }
     /* a unit whose code the change touches goes whole: its leaders outside the range too, as its functions call the
        ones inside directly. Its code stays in the arena, where a thread may still be running it */
-    for (i = 0; i < s->span_count;) {
+    for (size_t i = 0; i < s->span_count;) {
         UnitSpan* u = &s->spans[i];
         if (u->hi <= addr || u->lo >= end) {
             ++i;
@@ -1592,14 +1551,14 @@ void snx_jit_invalidate_ranges(SnxJitService* s, SnxU64 addr, SnxU64 size, SnxJi
                 ranges_incomplete = 1;
             }
         }
-        for (j = 0; j < u->count; ++j) {
+        for (size_t j = 0; j < u->count; ++j) {
             GuestFn expected = u->leaders[j].code;
-            e = find(s, u->leaders[j].pc);
+            Entry* e = find(s, u->leaders[j].pc);
             if (e && e->code == u->leaders[j].code) {
                 e->state = GONE;
                 e->code = NULL;
             }
-            r = region_of(s, u->leaders[j].pc);
+            Region* r = region_of(s, u->leaders[j].pc);
             if (r && __atomic_compare_exchange_n(slot(r, u->leaders[j].pc), &expected, NULL, 0, __ATOMIC_RELEASE,
                                                  __ATOMIC_RELAXED))
                 clear_pending(r, u->leaders[j].pc);
@@ -1614,7 +1573,7 @@ void snx_jit_invalidate_ranges(SnxJitService* s, SnxU64 addr, SnxU64 size, SnxJi
             /* A coarse range is safe and avoids leaving a caller unaware of retired JIT code on OOM. */
             callback(context, addr, end);
         } else {
-            for (i = 0; i < range_count; ++i) callback(context, ranges[i].start, ranges[i].end);
+            for (size_t i = 0; i < range_count; ++i) callback(context, ranges[i].start, ranges[i].end);
         }
     }
     free(ranges);
@@ -1643,16 +1602,13 @@ static unsigned default_threads(void) {
 }
 
 SnxJitService* snx_jit_service_new(const SnxJitConfig* config, char* error, size_t error_size) {
-    SnxJitService* s;
-    SnxLinkInput input;
-    size_t i, bits;
-    for (i = 1; i < config->aot_count; ++i)
+    for (size_t i = 1; i < config->aot_count; ++i)
         if (config->aot_addresses[i - 1] >= config->aot_addresses[i]) {
             snprintf(error, error_size, "the AOT entries are not in ascending order");
             return NULL;
         }
     if (snx_ir_init(error, error_size)) return NULL;
-    s = (SnxJitService*)calloc(1, sizeof(*s));
+    SnxJitService* s = (SnxJitService*)calloc(1, sizeof(*s));
     if (!s) {
         snprintf(error, error_size, "out of memory");
         return NULL;
@@ -1663,7 +1619,7 @@ SnxJitService* snx_jit_service_new(const SnxJitConfig* config, char* error, size
     if (!s->config.opt) s->config.opt = '0';
     if (!s->config.threads) s->config.threads = default_threads();
     if (s->config.threads > SNX_JIT_THREADS) s->config.threads = SNX_JIT_THREADS;
-    bits = s->config.code_hi > s->config.code_lo ? (size_t)((s->config.code_hi - s->config.code_lo) >> 2) : 0;
+    size_t bits = s->config.code_hi > s->config.code_lo ? (size_t)((s->config.code_hi - s->config.code_lo) >> 2) : 0;
     s->regions[0].lo = s->config.code_lo;
     s->regions[0].hi = s->config.code_hi > s->config.code_lo ? s->config.code_hi : s->config.code_lo;
     s->regions[0].slots = s->config.dispatch;
@@ -1681,6 +1637,7 @@ SnxJitService* snx_jit_service_new(const SnxJitConfig* config, char* error, size
         return NULL;
     }
     snx_code_set_resolver(s->loader, resolve_aot, s);
+    SnxLinkInput input;
     input.data = snx_rtlib_object;
     input.size = snx_rtlib_object_size;
     input.name = "rtlib";
@@ -1694,7 +1651,7 @@ SnxJitService* snx_jit_service_new(const SnxJitConfig* config, char* error, size
     /* this run's part of unit names: two runs that share a cache name their units apart (compile's loop makes sure) */
     {
         SnxU64 seed = (SnxU64)time(NULL) << 20 ^ (SnxU64)clock() ^ (SnxU64)(size_t)s ^ (SnxU64)(size_t)&seed;
-        seed = fnv((const unsigned char*)&seed, sizeof(seed), 0xCBF29CE484222325ULL);
+        seed = snx_fnv1a(SNX_FNV_BASIS, (const unsigned char*)&seed, sizeof(seed));
         sprintf(s->run, "%016llx", (unsigned long long)seed);
     }
     if (s->config.cache_path) cache_open(s);
@@ -1704,6 +1661,7 @@ SnxJitService* snx_jit_service_new(const SnxJitConfig* config, char* error, size
     cond_init(&s->idle);
     cond_init(&s->released);
     cond_init(&s->done);
+    size_t i;
     for (i = 0; i < s->config.threads; ++i)
         if (thread_start(&s->threads[i], s)) break;
     s->stats.threads = (unsigned)i;
@@ -1717,30 +1675,27 @@ SnxJitService* snx_jit_service_new(const SnxJitConfig* config, char* error, size
 }
 
 void snx_jit_service_free(SnxJitService* s) {
-    unsigned i;
-    int q;
     if (!s) return;
     lock(&s->lock);
     s->stop = 1;
     cond_broadcast(&s->work);
     unlock(&s->lock);
-    for (i = 0; i < s->stats.threads; ++i) thread_join(s->threads[i]);
+    for (unsigned i = 0; i < s->stats.threads; ++i) thread_join(s->threads[i]);
     cache_close(&s->cache);
     snx_code_loader_free(s->loader);
-    for (i = 0; i < s->span_count; ++i) free(s->spans[i].leaders);
+    for (size_t i = 0; i < s->span_count; ++i) free(s->spans[i].leaders);
     free(s->spans);
     free(s->entries);
-    for (q = 0; q < QUEUES; ++q) free(s->queues[q].pcs);
-    for (i = 0; i <= SNX_JIT_IMAGES; ++i) {
+    for (int q = 0; q < QUEUES; ++q) free(s->queues[q].pcs);
+    for (unsigned i = 0; i <= SNX_JIT_IMAGES; ++i) {
         free(s->regions[i].pending);
         if (i) free(s->regions[i].slots);
     }
     /* the map's leaves are shared by the tops it grew through: free them from the newest, then the tops themselves */
     {
         RegionTop* top = s->region_top;
-        size_t j;
         if (top)
-            for (j = 0; j < top->count; ++j) free(top->leaves[j]);
+            for (size_t j = 0; j < top->count; ++j) free(top->leaves[j]);
         while (top) {
             RegionTop* older = top->older;
             free(top);

@@ -2,27 +2,20 @@
    Copyright 2026 the ScarletNX contributors */
 #include "common/cpu/recompiler/llvm/objects_pack.h"
 #include "common/utilities/common.h"
+#include "common/utilities/endian.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-static uint64_t word(const unsigned char* p) {
-    uint64_t v = 0;
-    int i;
-    for (i = 7; i >= 0; --i) v = v << 8 | p[i];
-    return v;
-}
-
 unsigned char* snx_objects_pack(const SnxLinkInput* inputs, size_t count, size_t* size) {
-    size_t i, total = 16, at;
-    unsigned char* data;
-    for (i = 0; i < count; ++i) total += 8 + inputs[i].size;
-    data = (unsigned char*)malloc(total);
+    size_t total = 16;
+    for (size_t i = 0; i < count; ++i) total += 8 + inputs[i].size;
+    unsigned char* data = (unsigned char*)malloc(total);
     if (!data) return NULL;
     memcpy(data, "snx-objs", 8);
-    snx_link_put64(data + 8, count);
-    for (i = 0, at = 16; i < count; ++i) {
-        snx_link_put64(data + at, inputs[i].size);
+    snx_st_le64(data + 8, count);
+    for (size_t i = 0, at = 16; i < count; ++i) {
+        snx_st_le64(data + at, inputs[i].size);
         memcpy(data + at + 8, inputs[i].data, inputs[i].size);
         at += 8 + inputs[i].size;
     }
@@ -35,7 +28,7 @@ int snx_objects_pack_write(const SnxLinkInput* inputs, size_t count, const char*
                            void (*written)(void* arg, size_t index), void* arg, char* error, size_t error_size) {
     unsigned char head[16];
     char reason[256], why[768];
-    size_t i, total = sizeof head;
+    size_t total = sizeof head;
     int rc = -1;
     FILE* f = snx_fopen(path, "wb");
     if (!f) {
@@ -43,12 +36,12 @@ int snx_objects_pack_write(const SnxLinkInput* inputs, size_t count, const char*
         return -1;
     }
     memcpy(head, "snx-objs", 8);
-    snx_link_put64(head + 8, count);
+    snx_st_le64(head + 8, count);
     if (fwrite(head, 1, sizeof head, f) != sizeof head) {
         snprintf(error, error_size, "cannot write %s: %s", path, snx_os_error(reason, sizeof reason));
         goto done;
     }
-    for (i = 0; i < count; ++i) {
+    for (size_t i = 0; i < count; ++i) {
         unsigned char length[8], *loaded = NULL;
         const unsigned char* data = inputs[i].data;
         size_t loaded_size = 0;
@@ -66,7 +59,7 @@ int snx_objects_pack_write(const SnxLinkInput* inputs, size_t count, const char*
             data = loaded;
         }
         if (ok) {
-            snx_link_put64(length, inputs[i].size);
+            snx_st_le64(length, inputs[i].size);
             ok = fwrite(length, 1, sizeof length, f) == sizeof length &&
                  fwrite(data, 1, inputs[i].size, f) == inputs[i].size;
             if (!ok) snprintf(error, error_size, "cannot write %s: %s", path, snx_os_error(reason, sizeof reason));
@@ -87,16 +80,15 @@ done:
 }
 
 SnxLinkInput* snx_objects_unpack(const unsigned char* data, size_t size, const char* name, size_t* count) {
-    size_t n, i, at = 16;
-    SnxLinkInput* inputs;
+    size_t at = 16;
     if (size < 16 || memcmp(data, "snx-objs", 8)) return NULL;
-    n = (size_t)word(data + 8);
+    size_t n = (size_t)snx_ld_le64(data + 8);
     if (!n || n > size / 8) return NULL;
-    inputs = (SnxLinkInput*)calloc(n, sizeof(*inputs));
+    SnxLinkInput* inputs = (SnxLinkInput*)calloc(n, sizeof(*inputs));
     if (!inputs) return NULL;
-    for (i = 0; i < n; ++i) {
+    for (size_t i = 0; i < n; ++i) {
         uint64_t length;
-        if (size - at < 8 || (length = word(data + at)) > size - at - 8) {
+        if (size - at < 8 || (length = snx_ld_le64(data + at)) > size - at - 8) {
             free(inputs);
             return NULL;
         }

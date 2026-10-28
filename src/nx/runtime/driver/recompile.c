@@ -111,15 +111,26 @@ static int copy_dlls(const char* run, const char* out) {
 int snx_deploy_runtime(const char* run, const char* exe) {
     char* tmp = snx_format("%s.tmp", exe);
     int rc;
+#if defined(_WIN32) || defined(__APPLE__)
+    char* folder = snx_dirname(exe); /* what a program loads from its own folder goes beside it before it does */
+#endif
 #ifdef _WIN32
-    char* folder = snx_dirname(exe);
     rc = copy_dlls(run, folder);
     if (rc) snx_error("cannot copy the runtime's DLLs to %s", folder);
-    free(folder);
     if (rc) {
+        free(folder);
         free(tmp);
         return rc;
     }
+#endif
+#if defined(__APPLE__) && !defined(SNX_IOS)
+    /* MoltenVK, the Vulkan driver the app carries in its Frameworks: a game's copy of the runtime plays outside the
+       bundle, where SDL finds neither the app's Frameworks nor a system loader (docs/APPLE.md). A copy the disk refuses
+       (a game folder on a read-only image) is said, and no reason to refuse the run: the system's loader may serve it */
+    if (folder) snx_deploy_vulkan_driver(run, folder);
+#endif
+#if defined(_WIN32) || defined(__APPLE__)
+    free(folder);
 #endif
 #ifdef __ANDROID__
     /* the shared storage runs nothing (the game runs on the app's own runtime), and before Android 11 it refuses a

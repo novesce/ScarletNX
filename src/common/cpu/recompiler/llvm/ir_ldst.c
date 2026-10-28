@@ -20,7 +20,6 @@ typedef LLVMValueRef V;
 /* ---- operands ---- */
 
 static LLVMTypeRef bytes_type(SnxIr* ir, unsigned n) { return LLVMVectorType(ir->t_i8, n); }
-static LLVMTypeRef int_type(SnxIr* ir, unsigned bits) { return LLVMIntTypeInContext(ir->ctx, bits); }
 
 /* Xn, n = 31 being SP (cpu_reg_sp), plus a constant offset */
 static V base_plus(SnxIr* ir, unsigned n, SnxU64 offset) {
@@ -51,24 +50,23 @@ static void set_vreg(SnxIr* ir, unsigned n, V value) {
 /* shufflevector(a, b, mask) with a mask of n indices */
 static V shuffle(SnxIr* ir, V a, V b, const unsigned* mask, unsigned n) {
     V m[64];
-    unsigned i;
-    for (i = 0; i < n; ++i) m[i] = ir_i32(ir, mask[i]);
+    for (unsigned i = 0; i < n; ++i) m[i] = ir_i32(ir, mask[i]);
     return LLVMBuildShuffleVector(B, a, b, LLVMConstVector(m, n), "");
 }
 
 /* the low n bytes of a <16 x i8> */
 static V low_bytes(SnxIr* ir, V v, unsigned n) {
-    unsigned mask[16], i;
+    unsigned mask[16];
     if (n == 16) return v;
-    for (i = 0; i < n; ++i) mask[i] = i;
+    for (unsigned i = 0; i < n; ++i) mask[i] = i;
     return shuffle(ir, v, v, mask, n);
 }
 
 /* <16 x i8> of the count bytes of v (<total x i8>) from first, the rest zero (do_fp_ld's clear_vec_high) */
 static V widen_bytes(SnxIr* ir, V v, unsigned total, unsigned first, unsigned count) {
-    unsigned mask[16], i;
+    unsigned mask[16];
     if (total == 16 && first == 0 && count == 16) return v;
-    for (i = 0; i < 16; ++i) mask[i] = i < count ? first + i : total;
+    for (unsigned i = 0; i < 16; ++i) mask[i] = i < count ? first + i : total;
     return shuffle(ir, v, LLVMConstNull(bytes_type(ir, total)), mask, 16);
 }
 
@@ -110,10 +108,11 @@ static void ldst_imm(SnxIr* ir, const SnxA64Args* a, int vector, int store) {
 static void ldst_reg(SnxIr* ir, const SnxA64Args* a, int vector, int store) {
     static const unsigned widths[4] = {8, 16, 32, 64};
     unsigned option = (unsigned)a->opt, sz = (unsigned)a->sz;
-    V m = ir_rx(ir, (unsigned)a->rm), address;
-    if ((option & 3) != 3) m = ir_cast(ir, ir_cast(ir, m, int_type(ir, widths[option & 3]), 0), ir->t_i64, option & 4);
+    V m = ir_rx(ir, (unsigned)a->rm);
+    if ((option & 3) != 3)
+        m = ir_cast(ir, ir_cast(ir, m, ir_int_type(ir, widths[option & 3]), 0), ir->t_i64, option & 4);
     if (a->s) m = LLVMBuildShl(B, m, ir_i64(ir, sz), "");
-    address = LLVMBuildAdd(B, ir_x(ir, (unsigned)a->rn), m, "");
+    V address = LLVMBuildAdd(B, ir_x(ir, (unsigned)a->rn), m, "");
     if (vector)
         fp_access(ir, address, (unsigned)a->rt, sz, store);
     else
@@ -131,9 +130,9 @@ static void ldst_pair(SnxIr* ir, const SnxA64Args* a, int vector, int store) {
     SnxU64 offset = (SnxU64)(int64_t)a->imm << sz;
     V base = ir_x(ir, rn), address = a->p ? base : LLVMBuildAdd(B, base, ir_i64(ir, offset), "");
     if (vector) { /* one access of both registers' low bytes (trans_LDP_v, trans_STP_v make two adjacent ones) */
-        unsigned n = 1u << sz, mask[32], i;
+        unsigned n = 1u << sz, mask[32];
         if (store) {
-            for (i = 0; i < 2 * n; ++i) mask[i] = i < n ? i : 16 + i - n;
+            for (unsigned i = 0; i < 2 * n; ++i) mask[i] = i < n ? i : 16 + i - n;
             ir_wr_bytes(ir, address, shuffle(ir, vreg(ir, rt), vreg(ir, rt2), mask, 2 * n));
         } else {
             V both = ir_rd_bytes(ir, address, 2 * n);
@@ -226,9 +225,8 @@ static V rmw_value(SnxIr* ir, LLVMAtomicRMWBinOp op, V old, V operand) {
 /* the old value of an atomic read-modify-write of operand (iN) at address. Bitwise operations and exchanges commute
    with the byte order; on a big-endian host the arithmetic ones are a compare-and-swap loop on the guest's value */
 static V atomic_rmw(SnxIr* ir, LLVMAtomicRMWBinOp op, V address, V operand) {
-    LLVMBasicBlockRef entry, loop, done;
     LLVMTypeRef type = LLVMTypeOf(operand);
-    V pointer = ir_mp(ir, address), first, old, pair, seen;
+    V pointer = ir_mp(ir, address);
     int bitwise = op == LLVMAtomicRMWBinOpXchg || op == LLVMAtomicRMWBinOpAnd || op == LLVMAtomicRMWBinOpOr ||
                   op == LLVMAtomicRMWBinOpXor;
     if (!ir->big_endian || bitwise) {
@@ -236,22 +234,22 @@ static V atomic_rmw(SnxIr* ir, LLVMAtomicRMWBinOp op, V address, V operand) {
                                    0);
         return ir_guest_order(ir, atomic_tag(ir, rmw));
     }
-    first = LLVMBuildLoad2(B, type, pointer, "");
+    V first = LLVMBuildLoad2(B, type, pointer, "");
     LLVMSetOrdering(first, LLVMAtomicOrderingSequentiallyConsistent);
     LLVMSetAlignment(first, LLVMGetIntTypeWidth(type) / 8);
     atomic_tag(ir, first);
-    entry = LLVMGetInsertBlock(B);
-    loop = ir_block(ir, "rmw");
-    done = ir_block(ir, "rmw_done");
+    LLVMBasicBlockRef entry = LLVMGetInsertBlock(B);
+    LLVMBasicBlockRef loop = ir_block(ir, "rmw");
+    LLVMBasicBlockRef done = ir_block(ir, "rmw_done");
     LLVMBuildBr(B, loop);
     LLVMPositionBuilderAtEnd(B, loop);
-    old = LLVMBuildPhi(B, type, "");
-    pair = LLVMBuildAtomicCmpXchg(B, pointer, old,
-                                  ir_guest_order(ir, rmw_value(ir, op, ir_guest_order(ir, old), operand)),
-                                  LLVMAtomicOrderingSequentiallyConsistent, LLVMAtomicOrderingSequentiallyConsistent,
-                                  0);
+    V old = LLVMBuildPhi(B, type, "");
+    V pair = LLVMBuildAtomicCmpXchg(B, pointer, old,
+                                    ir_guest_order(ir, rmw_value(ir, op, ir_guest_order(ir, old), operand)),
+                                    LLVMAtomicOrderingSequentiallyConsistent, LLVMAtomicOrderingSequentiallyConsistent,
+                                    0);
     atomic_tag(ir, pair);
-    seen = LLVMBuildExtractValue(B, pair, 0, "");
+    V seen = LLVMBuildExtractValue(B, pair, 0, "");
     LLVMAddIncoming(old, &first, &entry, 1);
     LLVMAddIncoming(old, &seen, &loop, 1);
     LLVMBuildCondBr(B, LLVMBuildExtractValue(B, pair, 1, ""), done, loop);
@@ -262,7 +260,7 @@ static V atomic_rmw(SnxIr* ir, LLVMAtomicRMWBinOp op, V address, V operand) {
 static void atomic_op(SnxIr* ir, const SnxA64Args* a, LLVMAtomicRMWBinOp op, int invert) {
     unsigned bits = 8u << (unsigned)a->sz;
     V address = ir_x(ir, (unsigned)a->rn);
-    V operand = ir_cast(ir, ir_rx(ir, (unsigned)a->rs), int_type(ir, bits), 0);
+    V operand = ir_cast(ir, ir_rx(ir, (unsigned)a->rs), ir_int_type(ir, bits), 0);
     if (invert) operand = LLVMBuildNot(B, operand, ""); /* LDCLR: AND NOT */
     ir_setx(ir, (unsigned)a->rt, ir_u64(ir, atomic_rmw(ir, op, address, operand)));
 }
@@ -278,7 +276,7 @@ static V compare_swap(SnxIr* ir, V address, V expected, V desired) {
 
 /* CAS, CASA, CASAL, CASL: Rs = the old value, Rt stored where it equalled Rs (gen_compare_and_swap) */
 static void cas(SnxIr* ir, const SnxA64Args* a) {
-    LLVMTypeRef type = int_type(ir, 8u << (unsigned)a->sz);
+    LLVMTypeRef type = ir_int_type(ir, 8u << (unsigned)a->sz);
     V expected = ir_cast(ir, ir_rx(ir, (unsigned)a->rs), type, 0), desired = ir_cast(ir, ir_rx(ir, (unsigned)a->rt), type, 0);
     ir_setx(ir, (unsigned)a->rs, ir_u64(ir, compare_swap(ir, ir_x(ir, (unsigned)a->rn), expected, desired)));
 }
@@ -289,18 +287,18 @@ static void cas(SnxIr* ir, const SnxA64Args* a) {
 static void compare_swap128(SnxIr* ir, V address, V cmp_low, V cmp_high, V new_low, V new_high, V* low, V* high) {
     LLVMTypeRef params[6];
     LLVMBasicBlockRef loop = ir_block(ir, "cas128"), done = ir_block(ir, "cas128_done");
-    V next = LLVMBuildAdd(B, address, ir_i64(ir, 8), ""), lo, hi, equal, n0, n1, ok, args[6];
+    V next = LLVMBuildAdd(B, address, ir_i64(ir, 8), ""), args[6];
     params[0] = ir->t_ptr;
     params[1] = ir->t_ptr;
     params[2] = params[3] = params[4] = params[5] = ir->t_i64;
     LLVMBuildBr(B, loop);
     LLVMPositionBuilderAtEnd(B, loop);
-    lo = ir_ldacq(ir, address, 64);
-    hi = ir_ldacq(ir, next, 64);
-    equal = LLVMBuildAnd(B, LLVMBuildICmp(B, LLVMIntEQ, lo, cmp_low, ""), LLVMBuildICmp(B, LLVMIntEQ, hi, cmp_high, ""),
-                         "");
-    n0 = LLVMBuildSelect(B, equal, new_low, lo, "");
-    n1 = LLVMBuildSelect(B, equal, new_high, hi, "");
+    V lo = ir_ldacq(ir, address, 64);
+    V hi = ir_ldacq(ir, next, 64);
+    V equal = LLVMBuildAnd(B, LLVMBuildICmp(B, LLVMIntEQ, lo, cmp_low, ""),
+                           LLVMBuildICmp(B, LLVMIntEQ, hi, cmp_high, ""), "");
+    V n0 = LLVMBuildSelect(B, equal, new_low, lo, "");
+    V n1 = LLVMBuildSelect(B, equal, new_high, hi, "");
     /* snx_cas128 takes the host's reads of the two doublewords */
     args[0] = ir->c;
     args[1] = ir_mp(ir, address);
@@ -308,7 +306,7 @@ static void compare_swap128(SnxIr* ir, V address, V cmp_low, V cmp_high, V new_l
     args[3] = ir_guest_order(ir, hi);
     args[4] = ir_guest_order(ir, n0);
     args[5] = ir_guest_order(ir, n1);
-    ok = ir_call(ir, ir_extern(ir, "snx_cas128", ir->t_i32, params, 6), args, 6);
+    V ok = ir_call(ir, ir_extern(ir, "snx_cas128", ir->t_i32, params, 6), args, 6);
     LLVMBuildCondBr(B, LLVMBuildICmp(B, LLVMIntNE, ok, ir_i32(ir, 0), ""), done, loop);
     LLVMPositionBuilderAtEnd(B, done);
     *low = lo;
@@ -354,21 +352,21 @@ static void structure_writeback(SnxIr* ir, const SnxA64Args* a, V base, unsigned
 static void ldst_mult(SnxIr* ir, const SnxA64Args* a, int store) {
     unsigned size = (unsigned)a->sz, esize = 1u << size, vbytes = a->q ? 16 : 8, elements = vbytes >> size;
     unsigned selem = (unsigned)a->selem, rpt = (unsigned)a->rpt, regs = rpt * selem, total = regs * vbytes;
-    unsigned rt = (unsigned)a->rt, mask[64], i, j;
+    unsigned rt = (unsigned)a->rt, mask[64];
     V base = ir_x(ir, (unsigned)a->rn);
     /* where byte o of the memory comes from, as register j's byte */
-    for (i = 0; i < total; ++i) {
+    for (unsigned i = 0; i < total; ++i) {
         unsigned k = i >> size, x = k % selem, e = (k / selem) % elements, r = k / (selem * elements);
         mask[i] = (r + x) * 16 + e * esize + (i & (esize - 1));
     }
     if (store) {
         V v[4], wide;
-        for (j = 0; j < regs; ++j) v[j] = vreg(ir, (rt + j) % 32);
+        for (unsigned j = 0; j < regs; ++j) v[j] = vreg(ir, (rt + j) % 32);
         if (regs == 1)
             wide = v[0];
         else {
             unsigned concat[64];
-            for (i = 0; i < 64; ++i) concat[i] = i;
+            for (unsigned i = 0; i < 64; ++i) concat[i] = i;
             wide = shuffle(ir, v[0], v[1], concat, 32);
             if (regs > 2)
                 wide = shuffle(ir, wide, shuffle(ir, v[2], regs > 3 ? v[3] : LLVMConstNull(bytes_type(ir, 16)), concat, 32),
@@ -377,10 +375,10 @@ static void ldst_mult(SnxIr* ir, const SnxA64Args* a, int store) {
         ir_wr_bytes(ir, base, shuffle(ir, wide, wide, mask, total));
     } else {
         V memory = ir_rd_bytes(ir, base, total), zero = LLVMConstNull(bytes_type(ir, total));
-        for (j = 0; j < regs; ++j) {
+        for (unsigned j = 0; j < regs; ++j) {
             unsigned lanes[16];
-            for (i = 0; i < 16; ++i) lanes[i] = total; /* zero */
-            for (i = 0; i < total; ++i)
+            for (unsigned i = 0; i < 16; ++i) lanes[i] = total; /* zero */
+            for (unsigned i = 0; i < total; ++i)
                 if (mask[i] / 16 == j) lanes[mask[i] % 16] = i;
             set_vreg(ir, (rt + j) % 32, shuffle(ir, memory, zero, lanes, 16));
         }
@@ -391,9 +389,9 @@ static void ldst_mult(SnxIr* ir, const SnxA64Args* a, int store) {
 /* LD1-LD4 and ST1-ST4 (single structure): element index of selem consecutive registers, the other elements kept
    (trans_LD_single, trans_ST_single) */
 static void ldst_single(SnxIr* ir, const SnxA64Args* a, int store) {
-    unsigned scale = (unsigned)a->scale, esize = 1u << scale, selem = (unsigned)a->selem, x;
+    unsigned scale = (unsigned)a->scale, esize = 1u << scale, selem = (unsigned)a->selem;
     V base = ir_x(ir, (unsigned)a->rn);
-    for (x = 0; x < selem; ++x) {
+    for (unsigned x = 0; x < selem; ++x) {
         unsigned t = ((unsigned)a->rt + x) % 32;
         V address = x ? LLVMBuildAdd(B, base, ir_i64(ir, x * esize), "") : base;
         if (store)
@@ -407,15 +405,15 @@ static void ldst_single(SnxIr* ir, const SnxA64Args* a, int store) {
 /* LD1R-LD4R: one element to every element of selem consecutive registers, the high half cleared for a 64-bit
    arrangement (trans_LD_single_repl) */
 static void ld_single_repl(SnxIr* ir, const SnxA64Args* a) {
-    unsigned scale = (unsigned)a->scale, esize = 1u << scale, selem = (unsigned)a->selem, lanes = 16 >> scale, x, i;
-    LLVMTypeRef type = int_type(ir, 8 * esize), vector = LLVMVectorType(type, lanes);
+    unsigned scale = (unsigned)a->scale, esize = 1u << scale, selem = (unsigned)a->selem, lanes = 16 >> scale;
+    LLVMTypeRef type = ir_int_type(ir, 8 * esize), vector = LLVMVectorType(type, lanes);
     V base = ir_x(ir, (unsigned)a->rn);
-    for (x = 0; x < selem; ++x) {
+    for (unsigned x = 0; x < selem; ++x) {
         unsigned mask[16];
-        V address = x ? LLVMBuildAdd(B, base, ir_i64(ir, x * esize), "") : base, value, splat;
-        value = ir_rd(ir, address, 8 * esize);
-        splat = LLVMBuildInsertElement(B, LLVMConstNull(vector), value, ir_i32(ir, 0), "");
-        for (i = 0; i < lanes; ++i) mask[i] = a->q || i < lanes / 2 ? 0 : lanes;
+        V address = x ? LLVMBuildAdd(B, base, ir_i64(ir, x * esize), "") : base;
+        V value = ir_rd(ir, address, 8 * esize);
+        V splat = LLVMBuildInsertElement(B, LLVMConstNull(vector), value, ir_i32(ir, 0), "");
+        for (unsigned i = 0; i < lanes; ++i) mask[i] = a->q || i < lanes / 2 ? 0 : lanes;
         splat = shuffle(ir, splat, LLVMConstNull(vector), mask, lanes);
         set_vreg(ir, ((unsigned)a->rt + x) % 32, ir_guest_order(ir, splat));
     }

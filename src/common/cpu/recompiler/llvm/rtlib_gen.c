@@ -6,11 +6,11 @@
 #include <string.h>
 
 static int embed(const char* input, const char* path, const char* symbol) {
-    FILE *in = fopen(input, "rb"), *out;
+    FILE* in = fopen(input, "rb");
     int c;
     unsigned long n = 0;
     if (!in) return 1;
-    out = fopen(path, "wb");
+    FILE* out = fopen(path, "wb");
     if (!out) {
         fclose(in);
         return 1;

@@ -639,8 +639,8 @@ typedef struct {
     u64 tex_int, tex_sint;
     u32 image, image_sint;
 } CsKey;
+static CsPipe g_cs_alloc_failed = {.failed = 1}; /* out of memory: not cached, retried */
 static CsPipe* cs_pipe(const u8* code, u32 lx, u32 ly, u32 lz, u32 shm, CsKey k) {
-    static CsPipe allocation_failed = {.failed = 1};
     u32 blen;
     u64 key = vk_shader_hash(code, 0x10000 + 80, &blen, cs_cb_read) ^ ((u64)lx << 40) ^ ((u64)ly << 48) ^
               ((u64)lz << 56) ^ ((u64)shm << 20) ^ ((u64)k.image << 32) ^ (u64)k.tex_int * 0x9E3779B97F4A7C15ull ^
@@ -649,7 +649,7 @@ static CsPipe* cs_pipe(const u8* code, u32 lx, u32 ly, u32 lz, u32 shm, CsKey k)
     while (p && (p->key != key || !vk_cb_reads_hold(&p->cbr, cs_cb_read))) p = p->next;
     if (p) return p;
     p = calloc(1, sizeof *p);
-    if (!p) return &allocation_failed;
+    if (!p) return &g_cs_alloc_failed;
     p->key = key;
     p->next = g_csp[key & 255];
     g_csp[key & 255] = p;
@@ -881,29 +881,37 @@ void vk_dispatch(const DispatchState* d) {
         gmem_read(d->cb_addr[i], g_cb[i], sz);
     }
     /* Recheck code at a new submit or instruction invalidation, as vk_shader_get does. */
-	struct cs_fast {
-		u64 addr;
-		u64 shader_generation;
-		u32 epoch, lx, ly, lz, shm;
-		CsPipe *p;
-	};
-	static struct cs_fast fc[64];
+    struct cs_fast {
+        u64 addr;
+        u64 shader_generation;
+        u64 code_hash; /* of the code window cs_pipe translated */
+        u32 epoch, lx, ly, lz, shm;
+        CsPipe* p;
+    };
+    static struct cs_fast fc[64];
     u64 pa = d->code;
-	struct cs_fast *fe = &fc[((pa >> 8) ^ (pa >> 16)) & 63];
+    struct cs_fast* fe = &fc[((pa >> 8) ^ (pa >> 16)) & 63];
     CsPipe* p = fe->p;
-	if (!p || fe->addr != pa || fe->shader_generation != g_vk.shader_generation ||
-	    fe->epoch != g_vk_epoch || fe->lx != lx || fe->ly != ly || fe->lz != lz ||
-        fe->shm != shm || !vk_cb_reads_hold(&p->cbr, cs_cb_read)) {
+    int same = p && fe->addr == pa && fe->lx == lx && fe->ly == ly && fe->lz == lz && fe->shm == shm &&
+               vk_cb_reads_hold(&p->cbr, cs_cb_read);
+    if (!same || fe->shader_generation != g_vk.shader_generation || fe->epoch != g_vk_epoch) {
         static u8 code_buf[0x10000 + 80]; /* compute programs have no header: 80 zero bytes stand in for one */
         CsKey unkeyed = {0};
         cs_read_code(pa, code_buf);
-        p = cs_pipe(code_buf, lx, ly, lz, shm, unkeyed);
-		*fe = (struct cs_fast){
-			.addr = pa,
-			.shader_generation = g_vk.shader_generation,
-			.epoch = g_vk_epoch,
-			.lx = lx, .ly = ly, .lz = lz, .shm = shm, .p = p,
-		};
+        /* same window and cbuf reads: same program, so skip vk_shader_hash's walk (5% of one game's GPU thread) */
+        u64 h = vk_hash(code_buf, sizeof code_buf);
+        if (!same || h != fe->code_hash) {
+            p = cs_pipe(code_buf, lx, ly, lz, shm, unkeyed);
+            fe->code_hash = h;
+        }
+        fe->addr = pa;
+        fe->shader_generation = g_vk.shader_generation;
+        fe->epoch = g_vk_epoch;
+        fe->lx = lx;
+        fe->ly = ly;
+        fe->lz = lz;
+        fe->shm = shm;
+        fe->p = p == &g_cs_alloc_failed ? NULL : p;
     }
     /* Stores default to unsigned for bindless images and float for bound ones. Descriptors of another class,
        signed stores, and integer sampled textures select a variant keyed on their numeric types. */

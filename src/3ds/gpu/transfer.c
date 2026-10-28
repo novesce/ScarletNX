@@ -19,20 +19,19 @@ unsigned snx_ctr_pixel_bytes(unsigned format) {
 }
 
 void snx_ctr_fill(unsigned char* dst, size_t size, uint32_t value, uint32_t control) {
-    size_t i;
     if (control & SNX_CTR_FILL_24BIT) {
         /* the blitter writes three bytes per step to the end (and past it by up to two bytes when the span is no
            multiple of 3); here the last value stops at the end */
-        for (i = 0; i < size; ++i) dst[i] = (unsigned char)(value >> ((i % 3) * 8));
+        for (size_t i = 0; i < size; ++i) dst[i] = (unsigned char)(value >> ((i % 3) * 8));
     } else if (control & SNX_CTR_FILL_32BIT) {
-        for (i = 0; i + 4 <= size; i += 4) {
+        for (size_t i = 0; i + 4 <= size; i += 4) {
             dst[i] = (unsigned char)value;
             dst[i + 1] = (unsigned char)(value >> 8);
             dst[i + 2] = (unsigned char)(value >> 16);
             dst[i + 3] = (unsigned char)(value >> 24);
         }
     } else {
-        for (i = 0; i + 2 <= size; i += 2) {
+        for (size_t i = 0; i + 2 <= size; i += 2) {
             dst[i] = (unsigned char)value;
             dst[i + 1] = (unsigned char)(value >> 8);
         }
@@ -106,7 +105,7 @@ typedef struct {
 
 static SnxCtrXferResult display_setup(const SnxCtrDisplayTransfer* t, Display* d) {
     uint32_t out_w = t->output_size & 0xffff, out_h = t->output_size >> 16;
-    memset(d, 0, sizeof(*d));
+    *d = (Display){0};
     d->in_w = t->input_size & 0xffff;
     d->in_h = t->input_size >> 16;
     if (!d->in_w || !d->in_h || !out_w || !out_h) return SNX_CTR_XFER_EMPTY;
@@ -159,10 +158,9 @@ static uint64_t source_reach(const Display* d) {
 bool snx_ctr_display_spans(const SnxCtrDisplayTransfer* t, size_t* input_bytes, size_t* output_bytes) {
     Display d;
     uint64_t in_end = 0, out_end = 0, src, dst;
-    uint32_t x, y;
     if (display_setup(t, &d) != SNX_CTR_XFER_OK) return false;
-    for (y = 0; y < d.out_h; ++y)
-        for (x = 0; x < d.out_w; ++x) {
+    for (uint32_t y = 0; y < d.out_h; ++y)
+        for (uint32_t x = 0; x < d.out_w; ++x) {
             display_offsets(&d, x, y, &src, &dst);
             if (src + source_reach(&d) > in_end) in_end = src + source_reach(&d);
             if (dst + d.out_bpp > out_end) out_end = dst + d.out_bpp;
@@ -177,22 +175,21 @@ SnxCtrXferResult snx_ctr_display_transfer(const SnxCtrDisplayTransfer* t, const 
                                           unsigned char* out, size_t out_size) {
     Display d;
     uint64_t src, dst;
-    uint32_t x, y;
     SnxCtrXferResult r = display_setup(t, &d);
     if (r != SNX_CTR_XFER_OK) return r;
-    for (y = 0; y < d.out_h; ++y)
-        for (x = 0; x < d.out_w; ++x) {
-            Color c, c1, c2, c3;
+    for (uint32_t y = 0; y < d.out_h; ++y)
+        for (uint32_t x = 0; x < d.out_w; ++x) {
+            Color c1;
             display_offsets(&d, x, y, &src, &dst);
             if (src + source_reach(&d) > in_size || dst + d.out_bpp > out_size) return SNX_CTR_XFER_BOUNDS;
-            c = decode(d.in_fmt, in + src);
+            Color c = decode(d.in_fmt, in + src);
             if (d.scaling == 1) {
                 c1 = decode(d.in_fmt, in + src + d.in_bpp);
                 c.r = (c.r + c1.r) / 2, c.g = (c.g + c1.g) / 2, c.b = (c.b + c1.b) / 2, c.a = (c.a + c1.a) / 2;
             } else if (d.scaling == 2) {
                 c1 = decode(d.in_fmt, in + src + d.in_bpp);
-                c2 = decode(d.in_fmt, in + src + 2 * d.in_bpp);
-                c3 = decode(d.in_fmt, in + src + 3 * d.in_bpp);
+                Color c2 = decode(d.in_fmt, in + src + 2 * d.in_bpp);
+                Color c3 = decode(d.in_fmt, in + src + 3 * d.in_bpp);
                 c.r = (c.r + c1.r + c2.r + c3.r) / 4, c.g = (c.g + c1.g + c2.g + c3.g) / 4;
                 c.b = (c.b + c1.b + c2.b + c3.b) / 4, c.a = (c.a + c1.a + c2.a + c3.a) / 4;
             }

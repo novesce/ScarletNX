@@ -8,6 +8,7 @@
 #include "3ds/gpu/pica.h"
 #include "3ds/gpu/raster.h"
 #include "3ds/gpu/shader.h"
+#include "common/utilities/endian.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -49,7 +50,7 @@ static unsigned element_bytes(unsigned format) { return format == FMT_FLOAT ? 4 
 static void loader_setup(const uint32_t* regs, Loader* l) {
     uint32_t lo = regs[ATTR_FORMAT_LO], hi = regs[ATTR_FORMAT_HI];
     unsigned format[12], elements[12];
-    memset(l, 0, sizeof *l);
+    *l = (Loader){0};
     for (unsigned i = 0; i < 16; ++i) l->source[i] = 0xdeadbeefu;
     for (unsigned n = 0; n < 12; ++n) {
         uint32_t word = n < 8 ? lo : hi, at = (n % 8) * 4;
@@ -97,10 +98,9 @@ static void load_vertex(const SnxCtrPica* p, SnxCtrMemory* m, const Loader* l, u
             switch (l->format[i]) {
                 case FMT_BYTE: input[i][c] = (float)(int8_t)bytes[c]; break;
                 case FMT_UBYTE: input[i][c] = (float)bytes[c]; break;
-                case FMT_SHORT: input[i][c] = (float)(int16_t)(bytes[c * 2] | (bytes[c * 2 + 1] << 8)); break;
+                case FMT_SHORT: input[i][c] = (float)(int16_t)snx_ld_le16(bytes + c * 2); break;
                 default: {
-                    uint32_t w = (uint32_t)bytes[c * 4] | (uint32_t)bytes[c * 4 + 1] << 8 |
-                                 (uint32_t)bytes[c * 4 + 2] << 16 | (uint32_t)bytes[c * 4 + 3] << 24;
+                    uint32_t w = snx_ld_le32(bytes + c * 4);
                     memcpy(&input[i][c], &w, 4);
                 }
             }

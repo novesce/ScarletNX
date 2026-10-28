@@ -4,7 +4,7 @@
    prints them: the header (main.c), the failure markers (crash.c, svc.c, rtapi.c, arm.c, plat_*.c), the register
    dump and backtrace (hle/kernel/debug.c), ipc.c's service command warnings, and what the runtime missed (gap_line) */
 #include "common/utilities/logscan.h"
-#include <ctype.h>
+#include "common/utilities/ascii.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,16 +47,14 @@ static long find(Span s, const char* lit) {
 /* lit, lower case, at s + i in any case. c | 0x20 is exact for the letters, and keeps ',' and ' ' (only the controls
    0x0c and 0x00 also land on them) */
 static int lower_at(Span s, size_t i, const char* lit) {
-    size_t j;
-    for (j = 0; lit[j]; j++)
+    for (size_t j = 0; lit[j]; j++)
         if (i + j >= s.n || (s.p[i + j] | 0x20) != lit[j]) return 0;
     return 1;
 }
 /* a warning's words, in any case, in one pass over the line: each starts with a 'u', but for "is unknown" (a "u" with
    "is " before it) and "not implemented" */
 static int warning_word(Span s) {
-    size_t i;
-    for (i = 0; i < s.n; i++) {
+    for (size_t i = 0; i < s.n; i++) {
         int c = s.p[i] | 0x20;
         if (c == 'u') {
             if (lower_at(s, i, "unsupported") || lower_at(s, i, "unimplemented") ||
@@ -68,8 +66,8 @@ static int warning_word(Span s) {
     }
     return 0;
 }
+/* lower case only, as the runtime prints addresses and hashes: an upper-case word (a format such as BC7) is a word */
 static int is_hex(char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); }
-static int is_space(char c) { return c == ' ' || c == '\t'; }
 static size_t hex_run(Span s) {
     size_t i = 0;
     while (i < s.n && is_hex(s.p[i])) i++;
@@ -82,12 +80,12 @@ static size_t dec_run(Span s) {
 }
 static size_t space_run(Span s) {
     size_t i = 0;
-    while (i < s.n && is_space(s.p[i])) i++;
+    while (i < s.n && snx_is_blank(s.p[i])) i++;
     return i;
 }
 static Span trim(Span s) {
-    while (s.n && (is_space(s.p[0]) || s.p[0] == '\r')) s = skip(s, 1);
-    while (s.n && (is_space(s.p[s.n - 1]) || s.p[s.n - 1] == '\r')) s.n--;
+    while (s.n && (snx_is_blank(s.p[0]) || s.p[0] == '\r')) s = skip(s, 1);
+    while (s.n && (snx_is_blank(s.p[s.n - 1]) || s.p[s.n - 1] == '\r')) s.n--;
     return s;
 }
 static int blank(Span s) { return trim(s).n == 0; }
@@ -95,17 +93,17 @@ static int blank(Span s) { return trim(s).n == 0; }
 /* "[   2.25] " before a line: its length, 0 without one, and the time in hundredths through *cs. The runtime prints it
    with %f, so a library that set the process's locale makes it "[   2,25] " */
 static size_t stamp(Span s, long* cs) {
-    size_t i = 1, d;
-    long whole = 0, frac = 0, k;
+    size_t i = 1;
+    long whole = 0, frac = 0;
     if (!s.n || s.p[0] != '[') return 0;
     while (i < s.n && s.p[i] == ' ') i++;
-    d = dec_run(skip(s, i));
+    size_t d = dec_run(skip(s, i));
     if (!d || d > 9 || i + d >= s.n || (s.p[i + d] != '.' && s.p[i + d] != ',')) return 0;
-    for (k = 0; k < (long)d; k++) whole = whole * 10 + (s.p[i + k] - '0');
+    for (long k = 0; k < (long)d; k++) whole = whole * 10 + (s.p[i + k] - '0');
     i += d + 1;
     d = dec_run(skip(s, i));
     if (!d || i + d >= s.n || s.p[i + d] != ']') return 0;
-    for (k = 0; k < 2; k++) frac = frac * 10 + (k < (long)d ? s.p[i + k] - '0' : 0);
+    for (long k = 0; k < 2; k++) frac = frac * 10 + (k < (long)d ? s.p[i + k] - '0' : 0);
     i += d + 1;
     if (i < s.n && s.p[i] == ' ') i++;
     if (cs) *cs = whole * 100 + frac;
@@ -161,12 +159,11 @@ static char* take(Buf* b) {
 /* ============================================================ the pool */
 /* the length of the valid UTF-8 sequence at p (1 to 4), or 0 for an invalid byte */
 static size_t utf8_len(const unsigned char* p, size_t n) {
-    size_t len, i;
     unsigned c = p[0];
     if (c < 0x80) return 1;
-    len = c >= 0xf0 && c < 0xf5 ? 4 : c >= 0xe0 ? 3 : c >= 0xc2 && c < 0xe0 ? 2 : 0;
+    size_t len = c >= 0xf0 && c < 0xf5 ? 4 : c >= 0xe0 ? 3 : c >= 0xc2 && c < 0xe0 ? 2 : 0;
     if (!len || len > n) return 0;
-    for (i = 1; i < len; i++)
+    for (size_t i = 1; i < len; i++)
         if ((p[i] & 0xc0) != 0x80) return 0;
     if (len == 3 && ((c == 0xe0 && p[1] < 0xa0) || (c == 0xed && p[1] >= 0xa0))) return 0;
     if (len == 4 && ((c == 0xf0 && p[1] < 0x90) || (c == 0xf4 && p[1] >= 0x90))) return 0;
@@ -180,12 +177,12 @@ static size_t utf8_len(const unsigned char* p, size_t n) {
 static size_t home_at(Span s) {
     static const char* const homes[] = {"/home/", "/var/home/", "/Users/", "/run/media/", "/media/"};
     size_t i = 0, k;
-    if (!s.n || (s.p[0] != '/' && !isalpha((unsigned char)s.p[0]))) return 0;
+    if (!s.n || (s.p[0] != '/' && !snx_is_alpha(s.p[0]))) return 0;
     for (k = 0; k < sizeof homes / sizeof homes[0] && !i; k++)
         if (starts(s, homes[k])) i = strlen(homes[k]);
-    if (!i && s.n > 9 && isalpha((unsigned char)s.p[0]) && s.p[1] == ':' && (s.p[2] == '\\' || s.p[2] == '/') &&
+    if (!i && s.n > 9 && snx_is_alpha(s.p[0]) && s.p[1] == ':' && (s.p[2] == '\\' || s.p[2] == '/') &&
         (s.p[8] == '\\' || s.p[8] == '/')) {
-        for (k = 0; k < 5 && tolower((unsigned char)s.p[3 + k]) == "users"[k]; k++) {}
+        for (k = 0; k < 5 && snx_to_lower(s.p[3 + k]) == "users"[k]; k++) {}
         if (k == 5) i = 9;
     }
     if (!i && starts(s, "/data/user/")) {
@@ -193,20 +190,19 @@ static size_t home_at(Span s) {
         if (i == 11 || i >= s.n || s.p[i] != '/') return 0;
         i++;
     }
-    if (!i || i >= s.n || s.p[i] == '/' || s.p[i] == '\\' || is_space(s.p[i])) return 0;
-    while (i < s.n && s.p[i] != '/' && s.p[i] != '\\' && !is_space(s.p[i])) i++;
+    if (!i || i >= s.n || s.p[i] == '/' || s.p[i] == '\\' || snx_is_blank(s.p[i])) return 0;
+    while (i < s.n && s.p[i] != '/' && s.p[i] != '\\' && !snx_is_blank(s.p[i])) i++;
     return i;
 }
 
 /* room for n more bytes in the pool: 0, or -1 out of memory, the pool as it was. Its offsets are unsigned */
 static int reserve(SnxLogScan* s, size_t n) {
     size_t cap;
-    char* grown;
     if (s->used + n <= s->cap) return 0;
     if (n > 0x7fffffffu - s->used) return -1;
     cap = s->cap ? s->cap : 4096;
     while (cap < s->used + n) cap *= 2;
-    grown = (char*)realloc(s->pool, cap);
+    char* grown = (char*)realloc(s->pool, cap);
     if (!grown) return -1;
     s->pool = grown;
     s->cap = cap;
@@ -218,10 +214,9 @@ static int reserve(SnxLogScan* s, size_t n) {
    bytes at most, so SNX_LOGSCAN_LINE + 8 is room enough. Its offset, 0 for an empty text or out of memory */
 static unsigned add(SnxLogScan* s, Span text) {
     size_t i = 0, n = 0, len, home;
-    char* out;
-    while (text.n && (is_space(text.p[text.n - 1]) || text.p[text.n - 1] == '\r')) text.n--;
+    while (text.n && (snx_is_blank(text.p[text.n - 1]) || text.p[text.n - 1] == '\r')) text.n--;
     if (blank(text) || reserve(s, SNX_LOGSCAN_LINE + 8)) return 0;
-    out = s->pool + s->used;
+    char* out = s->pool + s->used;
     while (i < text.n) {
         if (n >= SNX_LOGSCAN_LINE) {
             memcpy(out + n, "...", 3);
@@ -267,13 +262,12 @@ static SnxLogSym symbol(SnxLogScan* s, Span text) {
 
 /* "   #3 1683a358 <name+38>", a backtrace's frame */
 static int frame(SnxLogScan* s, Span line, SnxLogFrame* f) {
-    size_t i = space_run(line), d, h;
-    Span rest;
+    size_t i = space_run(line);
     if (!i || i >= line.n || line.p[i] != '#') return 0;
-    d = dec_run(skip(line, i + 1));
+    size_t d = dec_run(skip(line, i + 1));
     if (!d || i + 1 + d >= line.n || line.p[i + 1 + d] != ' ') return 0;
-    rest = skip(line, i + 2 + d);
-    h = hex_run(rest);
+    Span rest = skip(line, i + 2 + d);
+    size_t h = hex_run(rest);
     if (!h) return 0;
     f->address = add(s, span(rest.p, h));
     f->sym.name = f->sym.offset = 0;
@@ -287,9 +281,8 @@ static int frame(SnxLogScan* s, Span line, SnxLogFrame* f) {
 /* "  pc <sym>  lr <sym>" (kernel_dump_regs), what an older build printed more after; the pc's symbol through *pc */
 static int pc_line(Span line, Span* pc) {
     size_t i = space_run(line);
-    Span rest;
     if (!i || !starts(skip(line, i), "pc ")) return 0;
-    rest = skip(line, i + 3);
+    Span rest = skip(line, i + 3);
     *pc = span(rest.p, 0);
     if (rest.n && rest.p[0] == '<') {
         long end = find(rest, ">");
@@ -351,7 +344,7 @@ static int after(Span* s, const char* lit) {
 static int marker(Span line, Marker* m) {
     Span s = line, t;
     long at;
-    memset(m, 0, sizeof *m);
+    *m = (Marker){0};
     if (after(&s, "*** Crash (")) {
         if (take_lit(&s, "signal ")) {
             size_t d = dec_run(s);
@@ -457,7 +450,7 @@ static void header(SnxLogScan* s, Span title) {
             Span path = skip(title, i);
             if (path.n && title.p[title.n - 1] == ')' &&
                 (path.p[0] == '/' || path.p[0] == '~' ||
-                 (path.n > 2 && isalpha((unsigned char)path.p[0]) && path.p[1] == ':' &&
+                 (path.n > 2 && snx_is_alpha(path.p[0]) && path.p[1] == ':' &&
                   (path.p[2] == '\\' || path.p[2] == '/'))))
                 title.n = i - 2;
             break;
@@ -467,16 +460,15 @@ static void header(SnxLogScan* s, Span title) {
 
 /* "build: ScarletNX <branch> <commit> (<compiler>, <system>)" or the launcher's line without "build: " */
 static int build_line(SnxLogScan* s, Span line) {
-    Span rest = line, branch, commit;
-    long sp;
+    Span rest = line;
     if (!take_lit(&rest, "ScarletNX ") || !rest.n || rest.p[rest.n - 1] != ')') return 0;
-    sp = find(rest, " ");
+    long sp = find(rest, " ");
     if (sp <= 0) return 0;
-    branch = span(rest.p, (size_t)sp);
+    Span branch = span(rest.p, (size_t)sp);
     rest = skip(rest, (size_t)sp + 1);
     sp = find(rest, " (");
     if (sp <= 0) return 0;
-    commit = span(rest.p, (size_t)sp);
+    Span commit = span(rest.p, (size_t)sp);
     s->build = add(s, line);
     s->branch = add(s, branch);
     s->commit = add(s, commit);
@@ -486,10 +478,9 @@ static int build_line(SnxLogScan* s, Span line) {
 static int ipc_line(SnxLogScan* s, Span line) {
     static const char* const kinds[] = {"[bad request] ", "[undeclared] ", "[unknown] "};
     Span rest = line, iface;
-    int kind = -1, k;
+    int kind = -1;
     long at;
-    unsigned cmd = 0, i;
-    size_t d;
+    unsigned cmd = 0;
     if (take_lit(&rest, "ipc: ")) { /* "ipc: <name>: control request <n>, UnknownCommandId" */
         at = find(rest, ": control request ");
         if (at <= 0 || find(rest, ", UnknownCommandId") < 0) return 0;
@@ -499,7 +490,7 @@ static int ipc_line(SnxLogScan* s, Span line) {
     } else {
         if (!space_run(rest)) return 0;
         rest = skip(rest, space_run(rest));
-        for (k = 0; k < 3 && kind < 0; k++)
+        for (int k = 0; k < 3 && kind < 0; k++)
             if (take_lit(&rest, kinds[k])) kind = k;
         if (kind < 0) return 0;
         at = find(rest, " cmd ");
@@ -507,10 +498,10 @@ static int ipc_line(SnxLogScan* s, Span line) {
         iface = span(rest.p, (size_t)at);
         rest = skip(rest, (size_t)at + 5);
     }
-    d = dec_run(rest);
+    size_t d = dec_run(rest);
     if (!d || d > 9) return 0;
-    for (i = 0; i < d; i++) cmd = cmd * 10 + (unsigned)(rest.p[i] - '0');
-    for (k = 0; k < s->nipc; k++) {
+    for (unsigned i = 0; i < d; i++) cmd = cmd * 10 + (unsigned)(rest.p[i] - '0');
+    for (int k = 0; k < s->nipc; k++) {
         const char* name = snx_logscan_text(s, s->ipc[k].iface);
         if (s->ipc[k].kind == kind && s->ipc[k].command == cmd && strlen(name) == iface.n &&
             !memcmp(name, iface.p, iface.n)) {
@@ -530,9 +521,8 @@ static int ipc_line(SnxLogScan* s, Span line) {
 
 /* by kind, interface and command, as the summary lists them (an insertion sort: there are SNX_LOGSCAN_IPC at most) */
 static void sort_ipc(SnxLogScan* s) {
-    int i, j;
-    for (i = 1; i < s->nipc; i++)
-        for (j = i; j > 0; j--) {
+    for (int i = 1; i < s->nipc; i++)
+        for (int j = i; j > 0; j--) {
             SnxLogIpc a = s->ipc[j - 1], b = s->ipc[j];
             int c =
                 a.kind != b.kind ? a.kind - b.kind : strcmp(snx_logscan_text(s, a.iface), snx_logscan_text(s, b.iface));
@@ -544,10 +534,9 @@ static void sort_ipc(SnxLogScan* s) {
 
 static void warning(SnxLogScan* s, Span line) {
     size_t mark = s->used;
-    unsigned at;
     int k;
     if (!warning_word(line)) return;
-    at = add(s, line);
+    unsigned at = add(s, line);
     if (!at) return;
     for (k = 0; k < s->nwarnings; k++)
         if (!strcmp(snx_logscan_text(s, s->warnings[k].message), s->pool + at)) {
@@ -566,8 +555,8 @@ static void warning(SnxLogScan* s, Span line) {
 /* the number of decimal digits at the start of s, 0 without any */
 static unsigned long number(Span s) {
     unsigned long v = 0;
-    size_t i, d = dec_run(s);
-    for (i = 0; i < d && i < 18; i++) v = v * 10 + (unsigned long)(s.p[i] - '0');
+    size_t d = dec_run(s);
+    for (size_t i = 0; i < d && i < 18; i++) v = v * 10 + (unsigned long)(s.p[i] - '0');
     return v;
 }
 static void keep_line(char* raw, unsigned* len, Span line) {
@@ -694,9 +683,8 @@ static int gap_line(SnxLogScan* s, Span line) {
 
 /* by kind, then the most first (an insertion sort: there are SNX_LOGSCAN_GAPS at most) */
 static void sort_gaps(SnxLogScan* s) {
-    int i, j;
-    for (i = 1; i < s->ngaps; i++)
-        for (j = i; j > 0; j--) {
+    for (int i = 1; i < s->ngaps; i++)
+        for (int j = i; j > 0; j--) {
             SnxLogGap a = s->gaps[j - 1], b = s->gaps[j];
             if (a.kind < b.kind || (a.kind == b.kind && a.count >= b.count)) break;
             s->gaps[j - 1] = b;
@@ -710,7 +698,7 @@ static int report_line(SnxLogScan* s, Span line) {
     static const char* const places[] = {"inside the recompiled code of game function ", "inside the recompiled ",
                                          "in the runtime itself (exe offset +"};
     size_t mark = s->used;
-    Span pc, text, rest;
+    Span pc, rest;
     SnxLogFrame f;
     if (blank(line) || starts(line, "***") || starts(line, "FATAL:") || starts(line, "threads (")) return 0;
     if (frame(s, line, &f)) {
@@ -729,7 +717,7 @@ static int report_line(SnxLogScan* s, Span line) {
         return 1;
     }
     if (dump(line) || !starts(line, "  ")) return 1;
-    text = trim(line);
+    Span text = trim(line);
     if (!s->place) {
         rest = text;
         if (take_lit(&rest, places[0]) && hex_run(rest)) {
@@ -746,12 +734,12 @@ static int report_line(SnxLogScan* s, Span line) {
             s->place_detail[0] = add(s, span(rest.p, hex_run(rest)));
         } else if (rest = text, take_lit(&rest, "in ") && find(rest, " +") > 0) {
             /* "in <library> +<offset> (<symbol>), on ..." */
-            long sp = find(rest, " +"), open, close;
-            Span lib = span(rest.p, (size_t)sp), off;
+            long sp = find(rest, " +");
+            Span lib = span(rest.p, (size_t)sp);
             rest = skip(rest, (size_t)sp + 2);
-            off = span(rest.p, hex_run(rest));
-            open = find(rest, " (");
-            close = find(rest, ")");
+            Span off = span(rest.p, hex_run(rest));
+            long open = find(rest, " (");
+            long close = find(rest, ")");
             if (off.n && find(lib, " ") < 0 && open == (long)off.n && close > open) {
                 s->place = SNX_PLACE_LIBRARY;
                 s->place_detail[0] = add(s, lib);
@@ -793,17 +781,17 @@ const SnxLogSym* snx_logscan_function(const SnxLogScan* s) {
 /* numbers in a message as N, so the same message with other values is the same signature: a word of hex digits
    (optionally after 0x) holding a decimal digit */
 static void normalized(Buf* b, const char* text) {
-    size_t i = 0, j, k, m;
+    size_t i = 0, j, k;
     int digit;
     while (text[i]) {
-        if (!isalnum((unsigned char)text[i]) && text[i] != '_') {
+        if (!snx_is_alnum(text[i]) && text[i] != '_') {
             put_n(b, text + i++, 1);
             continue;
         }
-        for (j = i; isalnum((unsigned char)text[j]) || text[j] == '_'; j++) {}
+        for (j = i; snx_is_alnum(text[j]) || text[j] == '_'; j++) {}
         k = i + (text[i] == '0' && text[i + 1] == 'x' ? 2 : 0);
         digit = 0;
-        for (m = k; m < j; m++) digit |= text[m] >= '0' && text[m] <= '9';
+        for (size_t m = k; m < j; m++) digit |= text[m] >= '0' && text[m] <= '9';
         if (k < j && digit && hex_run(span(text + k, j - k)) == j - k)
             put(b, "N");
         else
@@ -899,7 +887,6 @@ none:
 static int frame_line(SnxLogScan* s, Span line) {
     static const char over[] = " frames over 50 ms in the last 600, the slowest ";
     Span rest = line;
-    long at;
     if (take_lit(&rest, "vulkan: a ") && dec_run(rest) && starts(skip(rest, dec_run(rest)), " ms frame: ")) {
         unsigned long ms = number(rest);
         int k, slot = s->nslow;
@@ -919,7 +906,7 @@ static int frame_line(SnxLogScan* s, Span line) {
         keep_line(s->memory_raw, &s->memory_len, skip(line, 8));
         return 1;
     }
-    at = find(line, over);
+    long at = find(line, over);
     if (at > 0 && starts(line, "vulkan: ")) {
         size_t d = (size_t)at;
         unsigned long ms = number(skip(line, (size_t)at + sizeof over - 1));
@@ -977,7 +964,6 @@ void snx_logscan_line(SnxLogScan* s, const char* p, size_t n) {
     Span line = span(p, n), rest;
     Marker m;
     long cs;
-    size_t st;
     if (line.n && line.p[line.n - 1] == '\r') line.n--;
     s->seen++;
     switch (s->phase) {
@@ -1008,7 +994,7 @@ void snx_logscan_line(SnxLogScan* s, const char* p, size_t n) {
             break;
         case PHASE_DONE: return;
     }
-    st = stamp(line, &cs);
+    size_t st = stamp(line, &cs);
     if (st) s->centiseconds = cs;
     line = skip(line, st);
     if (!blank(line) && !dump(line)) keep_raw(s->tail_raw, s->tail_len, &s->tail_seen, SNX_LOGSCAN_TAIL, line);
@@ -1036,8 +1022,7 @@ void snx_logscan_line(SnxLogScan* s, const char* p, size_t n) {
             if (!s->title_id && take_lit(&rest, "game: ") && hex_run(rest) == 16 &&
                 starts(skip(rest, 16), ", version ")) {
                 char id[17];
-                int k;
-                for (k = 0; k < 16; k++) id[k] = (char)toupper((unsigned char)rest.p[k]);
+                for (int k = 0; k < 16; k++) id[k] = (char)snx_to_upper(rest.p[k]);
                 id[16] = 0;
                 s->title_id = add_c(s, id);
                 s->game_version = add(s, skip(rest, 26));
@@ -1088,7 +1073,7 @@ void snx_logscan_line(SnxLogScan* s, const char* p, size_t n) {
         s->report_left = 400;
         return;
     }
-    if (!is_space(line.p[0])) warning(s, line);
+    if (!snx_is_blank(line.p[0])) warning(s, line);
 }
 
 /* the rings of newest lines into the summary's texts, oldest first */
@@ -1105,7 +1090,6 @@ static int from_ring(SnxLogScan* s, char (*raw)[SNX_LOGSCAN_RAW], const unsigned
 }
 
 void snx_logscan_end(SnxLogScan* s) {
-    int i;
     sort_ipc(s);
     sort_gaps(s);
     /* the macro calls' line only when some were interpreted: "..., <n> compiled and <n> interpreted" */
@@ -1113,7 +1097,7 @@ void snx_logscan_end(SnxLogScan* s) {
     s->mme_most = add(s, span(s->mme_most_raw, s->mme_most_len));
     s->noutput = from_ring(s, s->output_raw, s->output_len, s->output_seen, SNX_LOGSCAN_OUTPUT, s->output);
     s->ntail = from_ring(s, s->tail_raw, s->tail_len, s->tail_seen, SNX_LOGSCAN_TAIL, s->tail);
-    for (i = 0; i < s->nslow; i++) s->slow_line[i] = add(s, span(s->slow_raw[i], s->slow_len[i]));
+    for (int i = 0; i < s->nslow; i++) s->slow_line[i] = add(s, span(s->slow_raw[i], s->slow_len[i]));
     s->frame_stats = add(s, span(s->frame_stats_raw, s->frame_stats_len));
     s->memory = add(s, span(s->memory_raw, s->memory_len));
     if (!s->build && s->launcher_build) build_line(s, cstr(snx_logscan_text(s, s->launcher_build)));
@@ -1139,11 +1123,11 @@ int snx_logscan(SnxLogScan* s, const char* text, size_t size) {
 #define CHUNK     (1 << 20)
 #define LINE_KEEP (64 << 10)
 int snx_logscan_file(SnxLogScan* s, FILE* f) {
-    char *buf, *nl;
+    char* nl;
     size_t have = 0, got, start, end;
     int over = 0; /* the line being read went past LINE_KEEP: its first part was scanned, the rest is dropped */
     if (snx_logscan_begin(s)) return -1;
-    buf = (char*)malloc(LINE_KEEP + CHUNK);
+    char* buf = (char*)malloc(LINE_KEEP + CHUNK);
     if (!buf) return -1;
     while ((got = fread(buf + have, 1, CHUNK, f)) > 0) {
         start = 0;
@@ -1177,10 +1161,10 @@ void snx_logscan_free(SnxLogScan* s) {
 
 /* the kept slow frames' indexes, the slowest first */
 static void slowest_first(const SnxLogScan* s, int* order) {
-    int i, j, t;
-    for (i = 0; i < s->nslow; i++) order[i] = i;
-    for (i = 1; i < s->nslow; i++)
-        for (j = i; j > 0 && s->slow_ms[order[j]] > s->slow_ms[order[j - 1]]; j--) {
+    int t;
+    for (int i = 0; i < s->nslow; i++) order[i] = i;
+    for (int i = 1; i < s->nslow; i++)
+        for (int j = i; j > 0 && s->slow_ms[order[j]] > s->slow_ms[order[j - 1]]; j--) {
             t = order[j];
             order[j] = order[j - 1];
             order[j - 1] = t;
@@ -1219,13 +1203,12 @@ static void json_field(Buf* b, const SnxLogScan* s, const char* key, unsigned at
 }
 static void json_sym(Buf* b, const SnxLogScan* s, const SnxLogSym* sym, SnxDemangle demangle) {
     const char* name;
-    char* plain;
     if (!sym || !sym->name) {
         put(b, "null");
         return;
     }
     name = snx_logscan_text(s, sym->name);
-    plain = demangle && !strncmp(name, "_Z", 2) ? demangle(name) : NULL;
+    char* plain = demangle && !strncmp(name, "_Z", 2) ? demangle(name) : NULL;
     put(b, "{\"name\": ");
     json_string(b, name);
     put(b, ", \"offset\": ");
@@ -1236,9 +1219,8 @@ static void json_sym(Buf* b, const SnxLogScan* s, const SnxLogSym* sym, SnxDeman
     free(plain);
 }
 static void json_list(Buf* b, const SnxLogScan* s, const unsigned* items, int n) {
-    int i;
     put(b, "[");
-    for (i = 0; i < n; i++) {
+    for (int i = 0; i < n; i++) {
         if (i) put(b, ", ");
         json_text(b, s, items[i]);
     }
@@ -1261,7 +1243,7 @@ char* snx_logscan_json(const SnxLogScan* s, SnxDemangle demangle) {
     static const char* const area_names[] = {"gpu", "mme", "cpu"};
     Buf b = {0};
     char num[32];
-    int i, n;
+    int n;
     put(&b, "{\"schema\": ");
     put_num(&b, SNX_LOGSCAN_SCHEMA);
     json_field(&b, s, "title", s->title, 0);
@@ -1294,7 +1276,7 @@ char* snx_logscan_json(const SnxLogScan* s, SnxDemangle demangle) {
         put(&b, ", \"pc\": ");
         json_sym(&b, s, s->pc.name ? &s->pc : NULL, demangle);
         put(&b, ", \"frames\": [");
-        for (i = 0; i < s->nframes; i++) {
+        for (int i = 0; i < s->nframes; i++) {
             put(&b, i ? ", {\"address\": " : "{\"address\": ");
             json_text(&b, s, s->frames[i].address);
             put(&b, ", \"symbol\": ");
@@ -1335,7 +1317,7 @@ char* snx_logscan_json(const SnxLogScan* s, SnxDemangle demangle) {
         put_num(&b, s->slowest_ms);
         put(&b, ", \"slowest\": [");
         slowest_first(s, order);
-        for (i = 0; i < s->nslow; i++) {
+        for (int i = 0; i < s->nslow; i++) {
             put(&b, i ? ", {\"ms\": " : "{\"ms\": ");
             put_num(&b, s->slow_ms[order[i]]);
             json_field(&b, s, "line", s->slow_line[order[i]], 0);
@@ -1348,7 +1330,7 @@ char* snx_logscan_json(const SnxLogScan* s, SnxDemangle demangle) {
     } else
         put(&b, "null");
     put(&b, ", \"ipc\": [");
-    for (i = 0; i < s->nipc; i++) {
+    for (int i = 0; i < s->nipc; i++) {
         put(&b, i ? ", {\"kind\": " : "{\"kind\": ");
         json_string(&b, ipc_kinds[s->ipc[i].kind]);
         json_field(&b, s, "interface", s->ipc[i].iface, 0);
@@ -1359,7 +1341,7 @@ char* snx_logscan_json(const SnxLogScan* s, SnxDemangle demangle) {
         put(&b, "}");
     }
     put(&b, "], \"missed\": [");
-    for (i = 0; i < s->ngaps; i++) {
+    for (int i = 0; i < s->ngaps; i++) {
         put(&b, i ? ", {\"area\": " : "{\"area\": ");
         json_string(&b, area_names[gap_area(s->gaps[i].kind)]);
         put(&b, ", \"kind\": ");
@@ -1397,7 +1379,7 @@ char* snx_logscan_json(const SnxLogScan* s, SnxDemangle demangle) {
     } else
         put(&b, "null");
     put(&b, ", \"warnings\": [");
-    for (i = 0; i < s->nwarnings; i++) {
+    for (int i = 0; i < s->nwarnings; i++) {
         put(&b, i ? ", {\"message\": " : "{\"message\": ");
         json_text(&b, s, s->warnings[i].message);
         put(&b, ", \"count\": ");
@@ -1473,7 +1455,6 @@ char* snx_logscan_markdown(const SnxLogScan* s, const char* name, const char* he
     static const char* const ipc_kinds[] = {"bad request", "undeclared", "unknown", "unknown control"};
     Buf b = {0};
     char num[32];
-    int i;
     put(&b, heading);
     put(&b, " ");
     md_code(&b, s->title ? snx_logscan_text(s, s->title) : name);
@@ -1530,12 +1511,12 @@ char* snx_logscan_markdown(const SnxLogScan* s, const char* name, const char* he
         put(&b, "\n");
         if (s->ndetails) {
             put(&b, "\n```\n");
-            for (i = 0; i < s->ndetails; i++) md_line(&b, snx_logscan_text(s, s->details[i]));
+            for (int i = 0; i < s->ndetails; i++) md_line(&b, snx_logscan_text(s, s->details[i]));
             put(&b, "```\n");
         }
         if (s->nframes) {
             md_fold_start(&b, "Backtrace");
-            for (i = 0; i < s->nframes; i++) {
+            for (int i = 0; i < s->nframes; i++) {
                 Buf sym = {0};
                 put(&sym, "#");
                 put_num(&sym, (unsigned long)i);
@@ -1564,14 +1545,14 @@ char* snx_logscan_markdown(const SnxLogScan* s, const char* name, const char* he
         put(&b, "\n");
         md_fold_start(&b, "What the slowest frames did, and the GPU's counts");
         slowest_first(s, order);
-        for (i = 0; i < s->nslow; i++) md_line(&b, snx_logscan_text(s, s->slow_line[order[i]]));
+        for (int i = 0; i < s->nslow; i++) md_line(&b, snx_logscan_text(s, s->slow_line[order[i]]));
         if (s->frame_stats) md_line(&b, snx_logscan_text(s, s->frame_stats));
         if (s->memory) md_line(&b, snx_logscan_text(s, s->memory));
         md_fold_end(&b);
     }
     if (s->nipc) {
         put(&b, "\n**Service commands the runtime does not implement:**\n\n");
-        for (i = 0; i < s->nipc; i++) {
+        for (int i = 0; i < s->nipc; i++) {
             put(&b, "- ");
             md_code(&b, snx_logscan_text(s, s->ipc[i].iface));
             put(&b, " cmd ");
@@ -1585,11 +1566,10 @@ char* snx_logscan_markdown(const SnxLogScan* s, const char* name, const char* he
     }
     if (s->ngaps || s->mme || s->mme_most || jit_missed(s)) {
         static const char* const areas[] = {"GPU", "Macros (MME)", "CPU"};
-        int area;
         put(&b, "\n**What else the runtime missed:**\n\n");
-        for (area = 0; area < 3; area++) {
+        for (int area = 0; area < 3; area++) {
             int any = (area == 1 && (s->mme || s->mme_most)) || (area == 2 && jit_missed(s));
-            for (i = 0; i < s->ngaps && !any; i++) any = gap_area(s->gaps[i].kind) == area;
+            for (int i = 0; i < s->ngaps && !any; i++) any = gap_area(s->gaps[i].kind) == area;
             if (!any) continue;
             put(&b, "- **");
             put(&b, areas[area]);
@@ -1618,7 +1598,7 @@ char* snx_logscan_markdown(const SnxLogScan* s, const char* name, const char* he
                 put_num(&b, s->jit_queued);
                 put(&b, " still queued)\n");
             }
-            for (i = 0; i < s->ngaps; i++) {
+            for (int i = 0; i < s->ngaps; i++) {
                 int kind = s->gaps[i].kind;
                 if (gap_area(kind) != area) continue;
                 put(&b, "  - ");
@@ -1636,7 +1616,7 @@ char* snx_logscan_markdown(const SnxLogScan* s, const char* name, const char* he
     }
     if (s->nwarnings) {
         md_fold_start(&b, "Warnings");
-        for (i = 0; i < s->nwarnings; i++) {
+        for (int i = 0; i < s->nwarnings; i++) {
             Buf sym = {0};
             put(&sym, snx_logscan_text(s, s->warnings[i].message));
             if (s->warnings[i].count > 1) {
@@ -1651,12 +1631,12 @@ char* snx_logscan_markdown(const SnxLogScan* s, const char* name, const char* he
     }
     if (s->noutput) {
         md_fold_start(&b, "The game's last output");
-        for (i = 0; i < s->noutput; i++) md_line(&b, snx_logscan_text(s, s->output[i]));
+        for (int i = 0; i < s->noutput; i++) md_line(&b, snx_logscan_text(s, s->output[i]));
         md_fold_end(&b);
     }
     if (!brief && s->ntail) {
         md_fold_start(&b, "The log's last lines");
-        for (i = 0; i < s->ntail; i++) md_line(&b, snx_logscan_text(s, s->tail[i]));
+        for (int i = 0; i < s->ntail; i++) md_line(&b, snx_logscan_text(s, s->tail[i]));
         md_fold_end(&b);
     }
     return take(&b);
@@ -1682,14 +1662,13 @@ int snx_logscan_main(int argc, char** argv, SnxDemangle demangle) {
         return 2;
     }
     for (i = 1; i < argc; i++) {
-        FILE* f;
         char* out;
         SnxLogScan s;
         if (!strcmp(argv[i], "--format") || !strcmp(argv[i], "--name")) {
             i++;
             continue;
         }
-        f = strcmp(argv[i], "-") ? fopen(argv[i], "rb") : stdin;
+        FILE* f = strcmp(argv[i], "-") ? fopen(argv[i], "rb") : stdin;
         if (!f) {
             fprintf(stderr, "%s: %s cannot be read\n", argv[0], argv[i]);
             rc = 1;

@@ -8,6 +8,7 @@
    Independent serialized implementation; no reference runtime dependency. */
 #include "3ds/kernel/ctr_kernel.h"
 #include "3ds/runtime/internal.h"
+#include "common/utilities/endian.h"
 #include <stdlib.h>
 #include "3ds/services/gsp.h"
 #include <string.h>
@@ -77,12 +78,12 @@ uint32_t snx_ctr_handle_close(SnxCtrProcess* p, uint32_t handle) {
 static uint32_t read32(SnxCtrProcess* p, uint32_t va, uint32_t* out) {
     unsigned char b[4];
     if (snx_ctr_read_ram(p->space, va, b, 4) != SNX_CTR_MEM_OK) return INVALID_ADDRESS;
-    *out = (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24;
+    *out = snx_ld_le32(b);
     return OK;
 }
 static uint32_t write32(SnxCtrProcess* p, uint32_t va, uint32_t value) {
     unsigned char b[4];
-    for (unsigned i = 0; i < 4; ++i) b[i] = (unsigned char)(value >> (8 * i));
+    snx_st_le32(b, value);
     return snx_ctr_write_ram(p->space, va, b, 4) == SNX_CTR_MEM_OK ? OK : INVALID_ADDRESS;
 }
 static bool available(SnxCtrProcess* p, uint32_t va, uint32_t size) {

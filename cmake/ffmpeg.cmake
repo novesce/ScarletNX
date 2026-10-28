@@ -124,11 +124,6 @@ if(SNX_TARGET_FLAGS)
     list(APPEND snx_ffmpeg_args "--extra-cflags=${snx_ffmpeg_target_flags}"
          "--extra-ldflags=${snx_ffmpeg_target_flags} ${snx_ffmpeg_target_ldflags}")
 endif()
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(ppc64|ppc64le|powerpc64|powerpc64le)$")
-    # configure's name for both byte orders (cmake/cross.cmake's SNX_PPC64_CPU); its AltiVec and VSX code is chosen
-    # by --cpu
-    list(APPEND snx_ffmpeg_args --cpu=${SNX_PPC64_CPU})
-endif()
 if(CMAKE_CROSSCOMPILING)
     # configure builds a few helper programs for the machine doing the build, which needs its own C compiler
     include("${CMAKE_CURRENT_LIST_DIR}/host_cc.cmake")

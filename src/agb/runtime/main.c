@@ -119,29 +119,13 @@ bool snx_agb_game_name(const char* argv0) {
 
 /* The game's folder: in outdir, else the data folder's recompiled/ as the Switch and 3DS drivers make theirs. Made,
    resolved; NULL with a line saying why */
-static char* game_folder(const char* data, const char* outdir, const char* argv0, const char* name) {
-    char *exe = data || outdir ? NULL : snx_executable(argv0), *dir = exe ? snx_dirname(exe) : NULL;
-    char* base = outdir ? NULL : data ? snx_strdup(data) : snx_data_dir(dir);
-    char* folder = outdir ? snx_path_join(outdir, name) : base ? snx_recompiled_game(base, name) : NULL;
-    char* resolved = folder && !snx_mkdirs(folder) ? snx_absolute(folder) : NULL;
-    if (!resolved) {
-        char why[256];
-        fprintf(stderr, "scarletnx-agb: cannot make the game's folder %s: %s\n", folder ? folder : name,
-                snx_os_error(why, sizeof why));
-    }
-    free(folder);
-    free(base);
-    free(dir);
-    free(exe);
-    return resolved;
-}
 
 /* The save into the board's save memory from path, at most its kind's size: 1 read, 0 no file, -1 a file it cannot */
 static int save_read(AgbBoard* board, const char* path) {
     size_t size = 0;
-    unsigned char* bytes;
     if (!snx_is_file(path)) return 0;
-    if (!(bytes = snx_read_file(path, &size))) return -1;
+    unsigned char* bytes = snx_read_file(path, &size);
+    if (!bytes) return -1;
     if (board->save.type == AGB_SAVE_EEPROM && size > agb_save_size(board)) board->save.type = AGB_SAVE_EEPROM8K;
     memcpy(board->memory.sram, bytes, size < agb_save_size(board) ? size : agb_save_size(board));
     free(bytes);
@@ -230,7 +214,12 @@ int snx_agb_main(int argc, char** argv) {
         /* a ROM's game is made in its folder; a game's folder (--game=, or the copy's own) names its ROM */
         if (path) {
             name = game_name(path);
-            folder = game_folder(data, outdir, argv[0], name);
+            folder = snx_game_folder(data, outdir, argv[0], name, 1);
+            if (!folder) {
+                char why[256];
+                fprintf(stderr, "scarletnx-agb: cannot make the folder of %s: %s\n", name,
+                        snx_os_error(why, sizeof why));
+            }
             rom = folder ? snx_absolute(path) : NULL;
         } else {
             folder = own ? own : snx_absolute(game);

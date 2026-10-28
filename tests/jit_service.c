@@ -15,6 +15,7 @@
    code changed (and compiles the new code), and reads the records before one a run left unfinished. A change in the
    middle of a function drops its whole unit */
 #include "common/cpu/recompiler/llvm/jit_service.h"
+#include "common/cpu/recompiler/llvm/jit_cache.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -428,6 +429,18 @@ static void test_cache(void) {
     snx_jit_stats(service, &stats);
     printf("cache: second run %lu units loaded, %lu pcs compiled\n", stats.cached, stats.compiled);
     CHECK(stats.cached >= 1 && !stats.compiled);
+    /* 0x3000 invalidated with its code unchanged (a permission change over it, as a mod loader's patching makes): its
+       next miss loads its unit again instead of compiling it */
+    {
+        unsigned long loaded = stats.cached;
+        snx_jit_invalidate(service, 0x3000, 8);
+        CHECK(run_pair() == expected);
+        snx_jit_drain(service);
+        snx_jit_stats(service, &stats);
+        printf("cache: after an invalidation of unchanged code %lu units loaded, %lu pcs compiled\n", stats.cached,
+               stats.compiled);
+        CHECK(stats.cached > loaded && !stats.compiled);
+    }
     snx_jit_service_free(service);
     /* 0x3000 changes: its unit is refused, the new code compiles */
     put(0x3000, f3_changed, 2);
@@ -462,6 +475,28 @@ static void test_cache(void) {
         CHECK(run_pair() == expected);
         snx_jit_service_free(service);
     }
+#ifndef _WIN32
+    /* a file past the cache's limit (an earlier build's appends had none) keeps the records the limit holds: the
+       service loads them and rewrites the file with them alone. Refused whole, a full cache ran cold every other run.
+       The padding is a hole, so the file takes no disk */
+    f = fopen(path, "r+b"); /* not "ab", whose writes all go to the end */
+    CHECK(f && !fseek(f, (long)(SNX_JIT_CACHE_MAX + 4096), SEEK_SET) && fputc(0, f) == 0);
+    if (f) fclose(f);
+    service = start(0, 1);
+    if (service) {
+        CHECK(run_pair() == expected);
+        snx_jit_drain(service);
+        snx_jit_stats(service, &stats);
+        printf("cache: a file past the limit: %lu units loaded, %lu pcs compiled\n", stats.cached, stats.compiled);
+        CHECK(stats.cached >= 1 && !stats.compiled);
+        snx_jit_service_free(service);
+    }
+    f = fopen(path, "rb");
+    size = -1;
+    if (f && !fseek(f, 0, SEEK_END)) size = ftell(f);
+    if (f) fclose(f);
+    CHECK(size > 64 && size < (1 << 20));
+#endif
     remove(path);
     cache_path = NULL;
 }

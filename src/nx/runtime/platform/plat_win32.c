@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
    Copyright 2026 the ScarletNX contributors */
 /* The platform layer on Windows: threads, condition variables, the guest's address space with its write watch, file
-   reads and maps, the environment, the text entry dialog and the crash handler (plat_sdl.c has the clocks, sleeping,
+   reads and maps, the environment and the crash handler (plat_sdl.c has the clocks, sleeping,
    libraries and path queries). Paths are UTF-8, converted to wide for the W functions (the
    manifest's UTF-8 code page makes the A functions and the CRT take UTF-8 too) */
 #include "nx/runtime/platform/plat.h"
@@ -396,125 +396,6 @@ void plat_file_unmap(PFileMap* m) {
     else if (m->data && !m->borrowed) UnmapViewOfFile(m->data);
     file_map_clear(m);
 }
-/* ================================================================ text entry */
-enum { TI_EDIT = 100, TI_W = 420, TI_H = 150 };
-typedef struct {
-    HWND edit;
-    char* out;
-    size_t cap;
-    int result; /* -2 while open */
-} TextInput;
-
-static void text_input_ok(HWND wnd, TextInput* t) {
-    int n = GetWindowTextLengthW(t->edit), bytes;
-    wchar_t* w = malloc(((size_t)n + 1) * sizeof *w);
-    if (!w) {
-        t->result = -1;
-        return;
-    }
-    GetWindowTextW(t->edit, w, n + 1);
-    bytes = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
-    if (bytes <= 0 || (size_t)bytes > t->cap) {
-        free(w);
-        MessageBoxW(wnd, L"Text is too long.", L"ScarletNX", MB_OK | MB_ICONWARNING);
-        return; /* the dialog stays */
-    }
-    WideCharToMultiByte(CP_UTF8, 0, w, -1, t->out, bytes, NULL, NULL);
-    free(w);
-    t->result = 0;
-}
-
-static LRESULT CALLBACK text_input_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
-    TextInput* t = (TextInput*)GetWindowLongPtrW(wnd, GWLP_USERDATA);
-    if (t && msg == WM_COMMAND) {
-        if (LOWORD(wp) == IDOK) text_input_ok(wnd, t);
-        if (LOWORD(wp) == IDCANCEL) t->result = 1;
-        return 0;
-    }
-    if (t && msg == WM_CLOSE) {
-        t->result = 1;
-        return 0;
-    }
-    return DefWindowProcW(wnd, msg, wp, lp);
-}
-
-int plat_text_input(char* out, size_t cap, const char* initial) {
-    static const wchar_t cls[] = L"ScarletNXTextInput";
-    WNDCLASSW wc;
-    TextInput t;
-    HINSTANCE inst = GetModuleHandleW(NULL);
-    HFONT font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-    HWND wnd, child[4];
-    wchar_t* w;
-    MSG m;
-    int x, y, i;
-    if (!cap) return -1;
-    memset(&wc, 0, sizeof wc);
-    wc.lpfnWndProc = text_input_proc;
-    wc.hInstance = inst;
-    wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    wc.lpszClassName = cls;
-    if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return -1;
-    x = (GetSystemMetrics(SM_CXSCREEN) - TI_W) / 2;
-    y = (GetSystemMetrics(SM_CYSCREEN) - TI_H) / 2;
-    wnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_DLGMODALFRAME, cls, L"ScarletNX text entry",
-                          WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, TI_W, TI_H, NULL, NULL, inst, NULL);
-    if (!wnd) return -1;
-    memset(&t, 0, sizeof t);
-    t.out = out;
-    t.cap = cap;
-    t.result = -2;
-    w = snx_host_wpath(initial ? initial : "");
-    child[0] = CreateWindowExW(0, L"STATIC", L"Enter text:", WS_CHILD | WS_VISIBLE, 12, 12, 380, 20, wnd, NULL, inst,
-                               NULL);
-    child[1] = t.edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", w ? w : L"",
-                                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 12, 36, 380, 24, wnd,
-                                        (HMENU)(INT_PTR)TI_EDIT, inst, NULL);
-    child[2] = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 212, 72, 85,
-                               26, wnd, (HMENU)(INT_PTR)IDOK, inst, NULL);
-    child[3] = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 307, 72, 85, 26, wnd,
-                               (HMENU)(INT_PTR)IDCANCEL, inst, NULL);
-    free(w);
-    if (!t.edit) {
-        DestroyWindow(wnd);
-        return -1;
-    }
-    for (i = 0; i < 4; i++)
-        if (child[i]) SendMessageW(child[i], WM_SETFONT, (WPARAM)font, TRUE);
-    SetWindowLongPtrW(wnd, GWLP_USERDATA, (LONG_PTR)&t);
-    ShowWindow(wnd, SW_SHOW);
-    SetForegroundWindow(wnd);
-    SetFocus(t.edit);
-    SendMessageW(t.edit, EM_SETSEL, 0, -1);
-    while (t.result == -2) {
-        BOOL r = GetMessageW(&m, NULL, 0, 0);
-        if (r == -1) {
-            t.result = -1;
-            break;
-        }
-        if (!r) { /* the application is quitting: leave the quit for the loop that owns it */
-            PostQuitMessage((int)m.wParam);
-            t.result = 1;
-            break;
-        }
-        if (m.message == WM_KEYDOWN && m.wParam == VK_RETURN && m.hwnd == t.edit) {
-            text_input_ok(wnd, &t);
-            continue;
-        }
-        if (m.message == WM_KEYDOWN && m.wParam == VK_ESCAPE && (m.hwnd == wnd || IsChild(wnd, m.hwnd))) {
-            t.result = 1;
-            continue;
-        }
-        if (IsDialogMessageW(wnd, &m)) continue;
-        TranslateMessage(&m);
-        DispatchMessageW(&m);
-    }
-    SetWindowLongPtrW(wnd, GWLP_USERDATA, 0);
-    DestroyWindow(wnd);
-    return t.result;
-}
-
 /* ================================================================ the crash handler */
 static LONG g_crash_reporting;
 static LONG g_shutdown_said;

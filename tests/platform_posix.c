@@ -6,6 +6,7 @@
 #include "nx/runtime/platform/plat_posix.c"
 #include <stdarg.h>
 #include <stdio.h>
+#include <sys/wait.h>
 
 void logf_(int lvl, const char* fmt, ...) {
     va_list ap;

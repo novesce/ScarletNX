@@ -108,8 +108,7 @@ void ctr_host_faults(unsigned char* base, const uint32_t* pc, bool (*resolve)(vo
                 g_host.stack.ss_sp = NULL;
             }
         }
-        struct sigaction action;
-        memset(&action, 0, sizeof action);
+        struct sigaction action = {0};
         action.sa_sigaction = fault;
         action.sa_flags = SA_SIGINFO | SA_ONSTACK;
         sigemptyset(&action.sa_mask);

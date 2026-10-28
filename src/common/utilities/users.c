@@ -21,9 +21,9 @@ void snx_users_uid_text(const uint64_t uid[2], char text[33]) {
 }
 /* 32 hex digits, uid[0] the first 16 as snx_users_uid_text writes them */
 static int users_uid_parse(const char* text, uint64_t uid[2]) {
-    int i, d;
+    int d;
     uid[0] = uid[1] = 0;
-    for (i = 0; i < 32; i++) {
+    for (int i = 0; i < 32; i++) {
         char c = text[i];
         if (c >= '0' && c <= '9')
             d = c - '0';
@@ -37,8 +37,7 @@ static int users_uid_parse(const char* text, uint64_t uid[2]) {
 }
 
 const SnxUser* snx_users_find(const uint64_t uid[2]) {
-    int i;
-    for (i = 0; i < g_user_count; i++)
+    for (int i = 0; i < g_user_count; i++)
         if (g_users[i].uid[0] == uid[0] && g_users[i].uid[1] == uid[1]) return &g_users[i];
     return NULL;
 }
@@ -50,9 +49,9 @@ const unsigned char* snx_users_picture(const SnxUser* user, uint32_t* size) {
 }
 
 int snx_users_nickname_valid(const char* nickname) {
-    size_t n = strlen(nickname), i;
+    size_t n = strlen(nickname);
     if (n < SNX_USERS_NICKNAME_MIN || n > SNX_USERS_NICKNAME_MAX) return 0;
-    for (i = 0; i < n; i++) {
+    for (size_t i = 0; i < n; i++) {
         char c = nickname[i];
         if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == ' ' || c == '.' ||
               c == '_' || c == '-'))
@@ -96,12 +95,12 @@ static const char* users_lines(const char* text, int* count) {
 static int users_read_pictures(const char* dir, char* why, size_t why_size) {
     unsigned char* data[SNX_USERS_MAX];
     size_t size[SNX_USERS_MAX], total = 0;
-    int i, read = 0, rc = 0;
-    for (i = 0; i < g_user_count && !rc; i++) {
-        char name[40], *path;
+    int read = 0, rc = 0;
+    for (int i = 0; i < g_user_count && !rc; i++) {
+        char name[40];
         snx_users_uid_text(g_users[i].uid, name);
         strcat(name, ".jpg");
-        path = snx_path_join(dir, name);
+        char* path = snx_path_join(dir, name);
         size[i] = 0;
         data[i] = snx_is_file(path) ? snx_read_file(path, &size[i]) : NULL;
         read++;
@@ -120,14 +119,14 @@ static int users_read_pictures(const char* dir, char* why, size_t why_size) {
     if (!rc && total) {
         g_user_pictures = (unsigned char*)snx_alloc(total);
         total = 0;
-        for (i = 0; i < g_user_count; i++) {
+        for (int i = 0; i < g_user_count; i++) {
             g_users[i].picture_at = (uint32_t)total;
             g_users[i].picture_size = (uint32_t)size[i];
             if (size[i]) memcpy(g_user_pictures + total, data[i], size[i]);
             total += size[i];
         }
     }
-    for (i = 0; i < read; i++) free(data[i]);
+    for (int i = 0; i < read; i++) free(data[i]);
     return rc;
 }
 

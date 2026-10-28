@@ -3,8 +3,10 @@
 /* The build-side reader of the runtime JIT's cache: the profile run writes a unit,
    the reader hands the AOT build its metadata and object, and a wrong key or a
    cut-off record is refused instead of linked. */
+#include "common/cpu/recompiler/llvm/ir.h"
 #include "common/cpu/recompiler/llvm/jit_cache.h"
 #include "common/cpu/recompiler/llvm/jit_service.h"
+#include <llvm-c/TargetMachine.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -96,6 +98,23 @@ int main(void) {
 
     key = snx_jit_cache_key('2', 0, 0, 0);
     CHECK(key != NULL);
+    CHECK(key && strstr(key, "fpsr=1") != NULL);
+    if (key) {
+        char expected[32];
+        char* triple = LLVMGetDefaultTargetTriple();
+        snprintf(expected, sizeof(expected), "obj=%d", SNX_IR_OBJECT_VERSION);
+        CHECK(strstr(key, expected) != NULL);
+        CHECK(triple != NULL && strstr(key, triple) != NULL);
+        if (triple) LLVMDisposeMessage(triple);
+    }
+    if (key) {
+        char* loose;
+        snx_ir_fpsr_flags(0);
+        loose = snx_jit_cache_key('2', 0, 0, 0);
+        CHECK(loose != NULL && strstr(loose, "fpsr=0") != NULL && strcmp(key, loose));
+        free(loose);
+        snx_ir_fpsr_flags(1);
+    }
     cache = snx_jit_cache_open(path, key, error, sizeof(error));
     CHECK(cache != NULL);
     if (cache) {

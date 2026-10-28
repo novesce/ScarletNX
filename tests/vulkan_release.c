@@ -359,8 +359,12 @@ int main(void) {
     assert(memory[4096] == 13 && memory[1] == 0);
     pending = 0;
     value = 17;
-    vk_release_write(0x10000, &value, 1); /* immediate writes hold the mapping lock */
-    assert(memory[1] == 17 && payload_writes == 4);
+    /* with no work before it, the release waits only for the stream to stop (the commands after it read guest memory
+       first), then goes at once, holding the mapping lock */
+    vk_release_write(0x10000, &value, 1);
+    assert(memory[1] == 0 && payload_writes == 3 && g_rhead == g_rtail + 1);
+    vk_release_submit();
+    assert(memory[1] == 17 && payload_writes == 4 && g_rhead == g_rtail);
     pending = 1;
     vk_release_incr(5);
     vk_release_retire(5);

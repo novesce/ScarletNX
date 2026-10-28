@@ -102,8 +102,7 @@ static SnxAddrInfo** append(SnxAddrInfo** tail, const struct addrinfo* list, int
 int snx_net_getaddrinfo(const char* host, const char* service, const SnxAddrInfo* hints, SnxAddrInfo** out) {
     *out = NULL;
     if (snx_net_init()) return SNX_EAI_FAIL;
-    struct addrinfo h, *res = NULL;
-    memset(&h, 0, sizeof h);
+    struct addrinfo h = {0}, *res = NULL;
     if (hints) {
         h.ai_flags = aiflags_to_host(hints->flags);
         h.ai_family = snx_net_domain_to_host(hints->family);

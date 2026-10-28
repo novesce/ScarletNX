@@ -101,7 +101,7 @@ static void vector_transfer(ArmIR* a, const SnxArmVector* v) {
 }
 static void vector_fp(ArmIR* a, const SnxArmVector* v) {
     LLVMValueRef x[4], y[4], z[4], r[4];
-    unsigned width = v->width, outwidth = width, lanes, param = 0;
+    unsigned width = v->width, outwidth = width, param = 0;
     int unary = v->op == AV_MOV || (v->op >= AV_FABS && v->op <= AV_FSQRT) || v->op == AV_FCVT || v->op == AV_FTOI ||
                 v->op == AV_ITOF || v->op == AV_FROUND || v->op == AV_FRECPE || v->op == AV_FRSQRTE ||
                 v->op == AV_URECPE || v->op == AV_URSQRTE;
@@ -109,7 +109,7 @@ static void vector_fp(ArmIR* a, const SnxArmVector* v) {
         outwidth = v->aux;
     else if (v->op == AV_FTOI)
         outwidth = v->flags & AV_SIMD ? v->aux : v->bytes * 8;
-    lanes = v->flags & AV_SIMD ? v->bytes * 8 / outwidth : 1;
+    unsigned lanes = v->flags & AV_SIMD ? v->bytes * 8 / outwidth : 1;
     if (v->flags & AV_SIMD) param |= 1u << 30;
     if (v->flags & AV_UNSIGNED) param |= 1u << 28;
     if (v->op == AV_FCVT) param |= v->aux | ((uint32_t)v->imm << 24);

@@ -35,7 +35,7 @@ if(IOS AND NOT CMAKE_INSTALL_DATADIR)
 elseif(APPLE AND NOT IOS AND (NOT CMAKE_INSTALL_BINDIR OR CMAKE_INSTALL_BINDIR STREQUAL "bin"))
     set(CMAKE_INSTALL_BINDIR MacOS)
 endif()
-# the CPU baseline (POWER8 on PowerPC64) and a Linux cross build's target and sysroot, for FFmpeg, OpenSSL and the
+# the CPU baseline (POWER4 on PowerPC64) and a Linux cross build's target and sysroot, for FFmpeg, OpenSSL and the
 # recompiler's runtime library
 include(cmake/cross.cmake)
 # the iOS and macOS apps' frontend (src/gui/apple.m and dist/apple's Swift, docs/APPLE.md), which the runtime links

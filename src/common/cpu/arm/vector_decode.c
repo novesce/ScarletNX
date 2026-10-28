@@ -8,7 +8,6 @@
    Copyright (c) 2018 Linaro
    Copyright (C) 2013 - 2018 Linaro Ltd <ard.biesheuvel@linaro.org> */
 #include "common/cpu/arm/simd.h"
-#include <string.h>
 
 static unsigned vd(uint32_t w) { return (((w >> 12) & 15) | ((w >> 18) & 16)) * 8; }
 static unsigned vn(uint32_t w) { return (((w >> 16) & 15) | ((w >> 3) & 16)) * 8; }
@@ -23,7 +22,7 @@ static uint64_t fpimm(unsigned imm, unsigned width) {
 }
 /* VFP register transfers and loads/stores precede the arithmetic space. */
 static int vfp(uint32_t w, SnxArmVector* v) {
-    unsigned sz = (w >> 8) & 1, op, k;
+    unsigned sz = (w >> 8) & 1;
     if ((w & 0x0fe00f7f) == 0x0e000a10) {
         v->op = AV_CORE;
         v->d = sn(w);
@@ -74,8 +73,8 @@ static int vfp(uint32_t w, SnxArmVector* v) {
     v->d = sz ? vd(w) : sd(w);
     v->n = sz ? vn(w) : sn(w);
     v->m = sz ? vm(w) : sm(w);
-    op = (w >> 20) & 11; /* D bit is not an opcode */
-    k = (w >> 6) & 1;
+    unsigned op = (w >> 20) & 11; /* D bit is not an opcode */
+    unsigned k = (w >> 6) & 1;
     switch (op) {
         case 0: v->op = k ? AV_FMLS : AV_FMLA; return 1;
         case 1: v->op = k ? AV_FNMLA : AV_FNMLS; return 1;
@@ -209,7 +208,7 @@ static int neon(uint32_t w, SnxArmVector* v);
 static int structures(uint32_t w, SnxArmVector* v);
 static int core_lane(uint32_t w, SnxArmVector* v);
 int snx_arm_vector_decode(uint32_t w, SnxArmVector* v) {
-    memset(v, 0, sizeof(*v));
+    *v = (SnxArmVector){0};
     if ((w >> 28) != 15) return vfp(w, v) || core_lane(w, v);
     return vfp_v8(w, v) || neon(w, v) || structures(w, v);
 }

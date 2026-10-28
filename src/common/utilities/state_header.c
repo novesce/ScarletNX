@@ -15,10 +15,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-static void why_set(char* why, size_t n, const char* text) {
-    if (why && n) snprintf(why, n, "%s", text);
-}
-
 void snx_state_header_write(uint8_t b[SNX_STATE_HEADER], const SnxStateHeader* h, uint64_t table_off,
                             uint32_t sections) {
     memset(b, 0, SNX_STATE_HEADER);
@@ -39,10 +35,10 @@ void snx_state_header_write(uint8_t b[SNX_STATE_HEADER], const SnxStateHeader* h
 int snx_state_header_read(const uint8_t b[SNX_STATE_HEADER], SnxStateHeader* h, uint64_t* table_off,
                           uint32_t* sections, char* why, size_t whysize) {
     if (memcmp(b, "SNXSTATE", 8)) {
-        why_set(why, whysize, "it is not a save state");
+        snx_state_why(why, whysize, "it is not a save state");
         return -1;
     }
-    memset(h, 0, sizeof *h);
+    *h = (SnxStateHeader){0};
     h->format = snx_ld_le32(b + 8);
     h->abi = snx_ld_le32(b + 12);
     h->title_id = snx_ld_le64(b + 16);
@@ -56,11 +52,11 @@ int snx_state_header_read(const uint8_t b[SNX_STATE_HEADER], SnxStateHeader* h, 
     memcpy(h->stamp, b + 160, sizeof h->stamp - 1);
     memcpy(h->game, b + 224, sizeof h->game - 1);
     if (h->format != SNX_STATE_FORMAT) {
-        why_set(why, whysize, "it was saved in another layout of the state file");
+        snx_state_why(why, whysize, "it was saved in another layout of the state file");
         return -1;
     }
     if (*sections > SNX_STATE_SECTIONS || h->thumb_w > 4096 || h->thumb_h > 4096) {
-        why_set(why, whysize, "its header is damaged");
+        snx_state_why(why, whysize, "its header is damaged");
         return -1;
     }
     return 0;
@@ -73,11 +69,11 @@ int snx_state_peek(const char* path, SnxStateHeader* h, uint8_t** thumb, char* w
     int r = -1;
     if (thumb) *thumb = NULL;
     if (!f) {
-        why_set(why, whysize, "it can't be opened");
+        snx_state_why(why, whysize, "it can't be opened");
         return -1;
     }
     if (fread(b, 1, sizeof b, f) != sizeof b)
-        why_set(why, whysize, "it is too short to be a save state");
+        snx_state_why(why, whysize, "it is too short to be a save state");
     else if (!snx_state_header_read(b, h, &table, &sections, why, whysize)) {
         size_t size = (size_t)h->thumb_w * h->thumb_h * 4;
         r = 0;
@@ -91,7 +87,7 @@ int snx_state_peek(const char* path, SnxStateHeader* h, uint8_t** thumb, char* w
 }
 int snx_state_fits(const SnxStateHeader* h, uint64_t title, const char* stamp, char* why, size_t whysize) {
     if (h->title_id != title) {
-        why_set(why, whysize, "it is another game's");
+        snx_state_why(why, whysize, "it is another game's");
         return -1;
     }
     if (h->abi != SNX_ABI) {
@@ -101,7 +97,7 @@ int snx_state_fits(const SnxStateHeader* h, uint64_t title, const char* stamp, c
         return -1;
     }
     if (strcmp(stamp, h->stamp)) {
-        why_set(why, whysize, "it was saved with another update or other mods");
+        snx_state_why(why, whysize, "it was saved with another update or other mods");
         return -1;
     }
     return 0;

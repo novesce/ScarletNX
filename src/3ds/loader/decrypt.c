@@ -17,7 +17,6 @@
    layer: their NCCHs' own is the same layer a CIA's contents carry, and it is taken off where each NCCH lies, the
    whole image copied through, the copy checked as any image is before it is published. */
 #include "3ds/loader/internal.h"
-#include <ctype.h>
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,16 +27,15 @@ typedef struct {
     uint64_t have_x, have_y;
     unsigned have_common, have_generator;
 } Keys;
-static int hex_value(int c) { return isdigit(c) ? c - '0' : tolower(c) - 'a' + 10; }
 /* name=32 hex digits; anything else on the line (comments, :AES sections, RSA moduli) is not a key read here */
 static void key_line(Keys* k, const char* line) {
     const char* equals = strchr(line, '=');
     if (!equals) return;
     size_t name = (size_t)(equals - line), digits = 0;
     unsigned char key[16] = {0};
-    for (const char* p = equals + 1; *p && !isspace((unsigned char)*p); ++p, ++digits) {
-        if (!isxdigit((unsigned char)*p) || digits >= 32) return;
-        key[digits / 2] |= (unsigned char)(hex_value((unsigned char)*p) << (digits & 1 ? 0 : 4));
+    for (const char* p = equals + 1; *p && !snx_is_space(*p); ++p, ++digits) {
+        if (!snx_is_hex(*p) || digits >= 32) return;
+        key[digits / 2] |= (unsigned char)(snx_hex_value(*p) << (digits & 1 ? 0 : 4));
     }
     if (digits != 32) return;
     unsigned slot;
@@ -144,7 +142,7 @@ typedef struct {
 } Ncch;
 static void counter(const unsigned char* h, unsigned type, uint64_t offset, unsigned char out[16]) {
     memset(out, 0, 16);
-    if (ctr_le16(h + 0x112) == 1) {
+    if (snx_ld_le16(h + 0x112) == 1) {
         memcpy(out, h + 0x108, 8);
         for (unsigned i = 0; i < 4; ++i) out[12 + i] = (unsigned char)(offset >> (24 - 8 * i));
     } else {
@@ -162,12 +160,12 @@ static void add_range(Ncch* n, uint64_t offset, uint64_t size, uint64_t origin, 
 /* the NCCH header of a content, decrypted by the CIA's layer: its sections' ranges and keys, and the header marked
    NoCrypto. A header that is not NCCH, or says NoCrypto already, leaves the content as it is */
 static bool ncch_begin(CtrReader* r, const Keys* k, unsigned char* h, uint64_t content_size, Ncch* n) {
-    memset(n, 0, sizeof *n);
+    *n = (Ncch){0};
     if (memcmp(h + 0x100, "NCCH", 4) || (h[0x18f] & 4)) return true;
     if (h[0x18f] & 0x20)
         return ctr_fail(r, SNX_CTR_EXTRACT_UNSUPPORTED, "NCCH seed crypto (a title's seed from seeddb) is not supported");
     if (h[0x18f] & 1) { /* FixedCryptoKey: zeros for an application */
-        if ((ctr_le64(h + 0x118) >> 32) & 0x10)
+        if ((snx_ld_le64(h + 0x118) >> 32) & 0x10)
             return ctr_fail(r, SNX_CTR_EXTRACT_UNSUPPORTED, "a system title's fixed NCCH key is not supported");
     } else {
         static const unsigned secondary[] = {[0x00] = 0x2c, [0x01] = 0x25, [0x0a] = 0x18, [0x0b] = 0x1b};
@@ -177,17 +175,17 @@ static bool ncch_begin(CtrReader* r, const Keys* k, unsigned char* h, uint64_t c
         if (!slot_key(r, k, 0x2c, h, n->key[0]) || !slot_key(r, k, secondary[method], h, n->key[1])) return false;
     }
     unsigned char base[16];
-    uint64_t exheader = ctr_le32(h + 0x180);
+    uint64_t exheader = snx_ld_le32(h + 0x180);
     if (exheader) {
         counter(h, 1, 0x200, base);
         add_range(n, 0x200, 0x800, 0x200, base, 0);
     }
-    n->exefs = (uint64_t)ctr_le32(h + 0x1a0) * 512, n->exefs_size = (uint64_t)ctr_le32(h + 0x1a4) * 512;
+    n->exefs = (uint64_t)snx_ld_le32(h + 0x1a0) * 512, n->exefs_size = (uint64_t)snx_ld_le32(h + 0x1a4) * 512;
     if (n->exefs_size) {
         counter(h, 2, n->exefs, n->exefs_counter);
         add_range(n, n->exefs, 0x200, n->exefs, n->exefs_counter, 0); /* the ExeFS header: the files follow from it */
     }
-    uint64_t romfs = (uint64_t)ctr_le32(h + 0x1b0) * 512, romfs_size = (uint64_t)ctr_le32(h + 0x1b4) * 512;
+    uint64_t romfs = (uint64_t)snx_ld_le32(h + 0x1b0) * 512, romfs_size = (uint64_t)snx_ld_le32(h + 0x1b4) * 512;
     if (romfs_size) {
         counter(h, 3, romfs, base);
         add_range(n, romfs, romfs_size, romfs, base, 1);
@@ -207,7 +205,7 @@ static bool ncch_begin(CtrReader* r, const Keys* k, unsigned char* h, uint64_t c
 static void exefs_files(Ncch* n, const unsigned char* header) {
     for (unsigned i = 0; i < 10; ++i) {
         const unsigned char* f = header + i * 16;
-        uint64_t offset = ctr_le32(f + 8), size = ctr_le32(f + 12);
+        uint64_t offset = snx_ld_le32(f + 8), size = snx_ld_le32(f + 12);
         if (!f[0] || !size || !ctr_fits(n->exefs_size - 0x200, offset, size)) continue;
         bool primary = !strncmp((const char*)f, "icon", 8) || !strncmp((const char*)f, "banner", 8);
         add_range(n, n->exefs + 0x200 + offset, size, n->exefs, n->exefs_counter, primary ? 0 : 1);
@@ -236,15 +234,6 @@ static bool ncch_chunk(CtrReader* r, Ncch* n, uint64_t at, unsigned char* data, 
     return apply(r, n, first, at, data, size);
 }
 
-static uint64_t align64(uint64_t n) { return (n + 63) & ~UINT64_C(63); }
-static size_t signed_body(uint32_t signature) {
-    switch (signature) {
-        case 0x10000: case 0x10003: return 0x240;
-        case 0x10001: case 0x10004: return 0x140;
-        case 0x10002: case 0x10005: return 0x40;
-        default: return 0;
-    }
-}
 static bool copy_span(CtrReader* r, FILE* out, uint64_t at, uint64_t size, unsigned char* buffer) {
     for (uint64_t done = 0; done < size;) {
         size_t n = size - done < CHUNK ? (size_t)(size - done) : CHUNK;
@@ -257,7 +246,7 @@ static bool copy_span(CtrReader* r, FILE* out, uint64_t at, uint64_t size, unsig
 static bool pad64(CtrReader* r, FILE* out) {
     static const unsigned char zero[64];
     long at = ftell(out);
-    size_t n = at < 0 ? 0 : (size_t)(align64((uint64_t)at) - (uint64_t)at);
+    size_t n = at < 0 ? 0 : (size_t)(snx_align_up((uint64_t)at, 64) - (uint64_t)at);
     return (at >= 0 && fwrite(zero, 1, n, out) == n) ||
            ctr_fail(r, SNX_CTR_EXTRACT_IO, "cannot write the decrypted game");
 }
@@ -269,11 +258,11 @@ static bool cia_layers(CtrReader* r, const unsigned char* header, const unsigned
     uint64_t at = contents;
     for (size_t i = 0; i < chunks && !*encrypted; ++i) {
         const unsigned char* chunk = tmd_body + 0x9c4 + i * 0x30;
-        unsigned index = ctr_be16(chunk + 4);
+        unsigned index = snx_ld_be16(chunk + 4);
         if (!(header[0x20 + (index >> 3)] & (0x80u >> (index & 7)))) continue;
-        uint64_t size = ctr_be64(chunk + 8);
+        uint64_t size = snx_ld_be64(chunk + 8);
         unsigned char h[0x200];
-        if (ctr_be16(chunk + 6) & 1)
+        if (snx_ld_be16(chunk + 6) & 1)
             *encrypted = true;
         else if (size >= sizeof h && ctr_fits(contents + contents_size, at, size)) {
             if (!ctr_read(r, (CtrSpan){0, r->size}, at, h, sizeof h)) return false;
@@ -334,7 +323,7 @@ static bool ncch_image(CtrReader* r, const char* keys_path, const char* output, 
     } else {
         for (unsigned index = 0; index < 8; ++index) {
             const unsigned char* p = header + 0x120 + index * 8;
-            uint64_t at = (uint64_t)ctr_le32(p) * 0x200, size = (uint64_t)ctr_le32(p + 4) * 0x200;
+            uint64_t at = (uint64_t)snx_ld_le32(p) * 0x200, size = (uint64_t)snx_ld_le32(p + 4) * 0x200;
             if (!size || !at || !ctr_fits(r->size, at, size)) continue;
             if (!ctr_read(r, (CtrSpan){0, r->size}, at, layers[count].header, sizeof layers[count].header))
                 goto done;
@@ -437,16 +426,16 @@ static bool decrypt(CtrReader* r, const char* keys_path, const char* output, boo
         ok = ncch_image(r, keys_path, output, encrypted);
         goto done;
     }
-    if (ctr_le32(header) != 0x2020) {
+    if (snx_ld_le32(header) != 0x2020) {
         ctr_fail(r, SNX_CTR_EXTRACT_FORMAT,
                  "the game is not a CIA, a cartridge image (a CCI or a .3ds) or an NCCH");
         goto done;
     }
-    uint64_t cert = 0x2040, cert_size = ctr_le32(header + 8);
-    uint64_t tik = align64(cert + cert_size), tik_size = ctr_le32(header + 12);
-    uint64_t tmd_at = align64(tik + tik_size), tmd_size = ctr_le32(header + 16);
-    uint64_t contents = align64(tmd_at + tmd_size), contents_size = ctr_le64(header + 24);
-    uint64_t meta = align64(contents + contents_size), meta_size = ctr_le32(header + 20);
+    uint64_t cert = 0x2040, cert_size = snx_ld_le32(header + 8);
+    uint64_t tik = snx_align_up(cert + cert_size, 64), tik_size = snx_ld_le32(header + 12);
+    uint64_t tmd_at = snx_align_up(tik + tik_size, 64), tmd_size = snx_ld_le32(header + 16);
+    uint64_t contents = snx_align_up(tmd_at + tmd_size, 64), contents_size = snx_ld_le64(header + 24);
+    uint64_t meta = snx_align_up(contents + contents_size, 64), meta_size = snx_ld_le32(header + 20);
     if (tik_size > CTR_METADATA_LIMIT || tmd_size > CTR_METADATA_LIMIT || !ctr_fits(r->size, tik, tik_size) ||
         !ctr_fits(r->size, tmd_at, tmd_size) || !ctr_fits(r->size, contents, contents_size) ||
         (meta_size && !ctr_fits(r->size, meta, meta_size))) {
@@ -461,13 +450,14 @@ static bool decrypt(CtrReader* r, const char* keys_path, const char* output, boo
     if (!ctr_read(r, (CtrSpan){0, r->size}, tik, ticket, (size_t)tik_size) ||
         !ctr_read(r, (CtrSpan){0, r->size}, tmd_at, tmd, (size_t)tmd_size))
         goto done;
-    size_t tb = tik_size >= 4 ? signed_body(ctr_be32(ticket)) : 0, mb = tmd_size >= 4 ? signed_body(ctr_be32(tmd)) : 0;
+    size_t tb = tik_size >= 4 ? ctr_signed_body(snx_ld_be32(ticket)) : 0,
+        mb = tmd_size >= 4 ? ctr_signed_body(snx_ld_be32(tmd)) : 0;
     if (!tb || !mb || !ctr_fits(tik_size, tb, 0xb2) || !ctr_fits(tmd_size, mb, 0x9c4)) {
         ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "invalid ticket/TMD signature");
         goto done;
     }
     unsigned char* body = tmd + mb;
-    size_t chunks = ctr_be16(body + 0x9e);
+    size_t chunks = snx_ld_be16(body + 0x9e);
     if (!chunks || !ctr_fits(tmd_size, mb + 0x9c4, chunks * 0x30)) {
         ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "invalid TMD content count");
         goto done;
@@ -498,10 +488,10 @@ static bool decrypt(CtrReader* r, const char* keys_path, const char* output, boo
     uint64_t at = contents;
     for (size_t i = 0; i < chunks; ++i) {
         unsigned char* chunk = body + 0x9c4 + i * 0x30;
-        unsigned index = ctr_be16(chunk + 4);
+        unsigned index = snx_ld_be16(chunk + 4);
         if (!(header[0x20 + (index >> 3)] & (0x80u >> (index & 7)))) continue;
-        uint64_t size = ctr_be64(chunk + 8);
-        bool cbc = ctr_be16(chunk + 6) & 1;
+        uint64_t size = snx_ld_be64(chunk + 8);
+        bool cbc = snx_ld_be16(chunk + 6) & 1;
         if (!ctr_fits(contents + contents_size, at, size) || (cbc && size % 16)) {
             ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "invalid CIA content length");
             goto done;
@@ -538,7 +528,7 @@ static bool decrypt(CtrReader* r, const char* keys_path, const char* output, boo
     /* the content-info records hash the chunk records, the TMD's header the records */
     for (size_t i = 0; i < 64; ++i) {
         unsigned char* info = body + 0xc4 + i * 0x24;
-        size_t first = ctr_be16(info), count = ctr_be16(info + 2);
+        size_t first = snx_ld_be16(info), count = snx_ld_be16(info + 2);
         if (count && first < chunks && count <= chunks - first &&
             !ctr_sha256(r, body + 0x9c4 + first * 0x30, count * 0x30, info + 4))
             goto done;

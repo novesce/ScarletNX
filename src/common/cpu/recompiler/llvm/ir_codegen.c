@@ -30,9 +30,8 @@ static void function_attributes(SnxIr* ir, LLVMValueRef function) {
 
 LLVMValueRef snx_ir_guest_function(SnxIr* ir, SnxU64 address) {
     char name[32];
-    LLVMValueRef function;
     sprintf(name, "F_%llX", (unsigned long long)address);
-    function = LLVMGetNamedFunction(ir->mod, name);
+    LLVMValueRef function = LLVMGetNamedFunction(ir->mod, name);
     if (function) return function;
     function = LLVMAddFunction(ir->mod, name, ir->t_guest);
     LLVMSetVisibility(function, LLVMHiddenVisibility); /* -fvisibility=hidden */
@@ -64,10 +63,10 @@ static void must_tail(SnxIr* ir, LLVMValueRef site) {
 
 /* CALLDYN(t): snx_lookup(c,t)(c,t) */
 static LLVMValueRef call_dynamic(SnxIr* ir, LLVMValueRef target) {
-    LLVMValueRef args[2], function;
+    LLVMValueRef args[2];
     args[0] = ir->c;
     args[1] = target;
-    function = ir_call_helper(ir, SNX_IR_LOOKUP, args, 2);
+    LLVMValueRef function = ir_call_helper(ir, SNX_IR_LOOKUP, args, 2);
     ir_state_invalidate(ir);
     return LLVMBuildCall2(B, ir->t_guest, function, args, 2, "");
 }
@@ -144,8 +143,8 @@ static void branch(SnxIr* ir, const SnxCodegen* codegen, const SnxFunction* func
 
 /* snx_stale[ir->stale_index] != 0, read with a relaxed load (the runtime sets it while guest threads run) */
 static LLVMValueRef stale_flag(SnxIr* ir) {
-    LLVMValueRef at = ir_i64(ir, ir->stale_index), flag;
-    flag = LLVMBuildLoad2(B, ir->t_i8, LLVMBuildInBoundsGEP2(B, ir->t_i8, ir->stale, &at, 1, ""), "");
+    LLVMValueRef at = ir_i64(ir, ir->stale_index);
+    LLVMValueRef flag = LLVMBuildLoad2(B, ir->t_i8, LLVMBuildInBoundsGEP2(B, ir->t_i8, ir->stale, &at, 1, ""), "");
     LLVMSetOrdering(flag, LLVMAtomicOrderingMonotonic);
     LLVMSetAlignment(flag, 1);
     return LLVMBuildICmp(B, LLVMIntNE, flag, LLVMConstInt(ir->t_i8, 0, 0), "");
@@ -269,29 +268,28 @@ static SnxA64Flow decode(SnxU32 word, SnxU64 features, SnxA64Insn* insn) {
 }
 
 void snx_ir_emit(SnxIr* ir, SnxCodegen* codegen, const SnxFunction* function) {
-    LLVMValueRef fn = snx_ir_guest_function(ir, function->start), e, sw;
-    LLVMBasicBlockRef *labels, mismatch, body, dispatch_block = NULL;
-    size_t i;
+    LLVMValueRef fn = snx_ir_guest_function(ir, function->start), sw;
+    LLVMBasicBlockRef dispatch_block = NULL;
     SnxU64 address, next, target;
     SnxU32 word;
     SnxA64Insn insn;
     SnxA64Flow flow;
-    int dispatch, terminal;
-    labels = (LLVMBasicBlockRef*)calloc(function->count ? function->count : 1, sizeof(*labels));
+    int terminal;
+    LLVMBasicBlockRef* labels = (LLVMBasicBlockRef*)calloc(function->count ? function->count : 1, sizeof(*labels));
     ir->guest_features = snx_a64_features(codegen->features);
     snx_ir_begin(ir, fn);
-    e = LLVMGetParam(fn, 1);
+    LLVMValueRef e = LLVMGetParam(fn, 1);
     if (ir->stale) {
         ir->stale_index = (size_t)(function - codegen->functions);
         stale_check(ir, e);
     }
-    for (i = 0; i < function->count; ++i)
+    for (size_t i = 0; i < function->count; ++i)
         if (function->leaders[i]) labels[i] = ir_block(ir, "L");
-    dispatch = function->leader_count > 1;
+    int dispatch = function->leader_count > 1;
     if (dispatch) dispatch_block = ir_block(ir, "D");
     /* if(UNLIKELY(e!=start)){ c->pc=e; goto D_; } or { CALLDYN(e); return; } */
-    mismatch = ir_block(ir, "entry_mismatch");
-    body = ir_block(ir, "body");
+    LLVMBasicBlockRef mismatch = ir_block(ir, "entry_mismatch");
+    LLVMBasicBlockRef body = ir_block(ir, "body");
     ir_unlikely(ir,
                 LLVMBuildCondBr(B, LLVMBuildICmp(B, LLVMIntNE, e, ir_i64(ir, function->start), ""), mismatch, body));
     LLVMPositionBuilderAtEnd(B, mismatch);
@@ -304,7 +302,7 @@ void snx_ir_emit(SnxIr* ir, SnxCodegen* codegen, const SnxFunction* function) {
     LLVMPositionBuilderAtEnd(B, body);
     if (function->count && snx_function_address(function, 0) != function->start)
         LLVMBuildBr(B, labels[index_of(function, function->start)]);
-    for (i = 0; i < function->count; ++i) {
+    for (size_t i = 0; i < function->count; ++i) {
         address = snx_function_address(function, i);
         next = address + 4;
         if (function->leaders[i]) {
@@ -391,17 +389,18 @@ void snx_ir_emit(SnxIr* ir, SnxCodegen* codegen, const SnxFunction* function) {
         /* D_: if(UNLIKELY(poll)) c->rt->poll(c); switch(c->pc){ case <leader>: goto L_<leader>; ...
            default: CALLDYN(c->pc); return; } */
         LLVMBasicBlockRef other = ir_block(ir, "D_default");
-        LLVMValueRef pc;
         LLVMPositionBuilderAtEnd(B, dispatch_block);
         poll(ir, NULL);
-        pc = ir_pc(ir);
+        LLVMValueRef pc = ir_pc(ir);
         sw = LLVMBuildSwitch(B, pc, other, (unsigned)function->leader_count);
-        for (i = 0; i < function->count; ++i)
+        for (size_t i = 0; i < function->count; ++i)
             if (function->leaders[i]) LLVMAddCase(sw, ir_i64(ir, snx_function_address(function, i)), labels[i]);
         LLVMPositionBuilderAtEnd(B, other);
         must_tail(ir, call_dynamic(ir, ir_pc(ir)));
     }
-    ir_promote_registers(ir, fn);
+    /* At O0 LLVM runs no SROA or mem2reg, so the locals promotion makes stay stack slots and its site copies remain:
+       call-heavy code regresses and the JIT's batch arena grows. O1 and above only (ir_promote.c) */
+    if (ir->promote) ir_promote_registers(ir, fn);
     free(labels);
 }
 

@@ -27,6 +27,24 @@
 
 u8* g_mem;
 u64 g_as_size = AS_MAX; /* the reservation's size, mem.c's, which this test does not link */
+/* The guest memory this test models: the g_mem calloc at address 0, TEST_GUEST_SIZE bytes, mapped and writable for
+   its whole length and free below it. mem.c's blocks are what the file system's transfer buffers are checked against
+   (fs.c's buffer_valid), so they answer as the flat buffer they stand in for. */
+#define TEST_GUEST_SIZE 0x10000
+void mem_query(u64 addr, MemBlock* out) {
+    memset(out, 0, sizeof *out);
+    out->addr = 0;
+    out->size = TEST_GUEST_SIZE;
+    if (addr >= TEST_GUEST_SIZE) {
+        out->state = MS_FREE;
+        out->perm = PERM_NONE;
+        out->size = AS_SIZE - addr;
+        out->addr = addr;
+    } else {
+        out->state = MS_NORMAL;
+        out->perm = PERM_RW;
+    }
+}
 char g_datadir[1024], g_exename[256], g_exedir[1024], g_confdir[1024], g_addondir[1024], g_gamename[256];
 u64 g_addon;
 const u64 g_user_id[2] = {0x0123456789ABCDEFull, 0xFEDCBA9876543210ull}; /* am.c's: the first user */

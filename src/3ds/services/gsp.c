@@ -8,6 +8,7 @@
    transfer engine (gpu/transfer.c), PICA command lists (SubmitCmdList) through the
    command processor (gpu/pica.c), which draws on the GPU (gpu/vk/render.c); the save-VRAM paths stop. */
 #include "3ds/runtime/internal.h"
+#include "common/utilities/endian.h"
 #include "snx_settings.h"
 #include "3ds/services/gsp.h"
 #include "3ds/gpu/present.h"
@@ -49,11 +50,11 @@ static void queue_interrupt(SnxCtrProcess* p, uint32_t thread, uint32_t id) {
         if (header[3] & 1) return;
         if (header[1] >= 0x20) {
             unsigned char missed[4];
-            uint32_t counter = at + (id == 2 ? 4 : 8), n;
+            uint32_t counter = at + (id == 2 ? 4 : 8);
             if (snx_ctr_read_ram(p->space, counter, missed, 4) != SNX_CTR_MEM_OK) return;
-            n = (uint32_t)missed[0] | (uint32_t)missed[1] << 8 | (uint32_t)missed[2] << 16 | (uint32_t)missed[3] << 24;
+            uint32_t n = snx_ld_le32(missed);
             ++n;
-            for (unsigned i = 0; i < 4; ++i) missed[i] = (unsigned char)(n >> (i * 8));
+            snx_st_le32(missed, n);
             (void)snx_ctr_write_ram(p->space, counter, missed, 4);
             return;
         }

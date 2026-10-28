@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
    Copyright 2026 the ScarletNX contributors */
 /* The platform layer on Linux, Android, FreeBSD and Apple systems: threads, condition variables, the guest's address
-   space with written-page tracking, file reads and maps, the environment, the text entry dialog and the crash handler
+   space with written-page tracking, file reads and maps, the environment and the crash handler
    (plat_sdl.c has the clocks, sleeping, libraries and path queries) */
 #if defined(__linux__) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE /* REG_RIP, pipe2 */
@@ -15,13 +15,11 @@
 #include <limits.h>
 #include <sched.h>
 #include <signal.h>
-#include <spawn.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
@@ -60,8 +58,6 @@
 #ifndef MAP_ANONYMOUS
 #define MAP_ANONYMOUS MAP_ANON
 #endif
-
-extern char** environ;
 
 /* the crash report needs about 12 KiB of stack; a thread whose own stack overflowed has none left */
 #define ALT_STACK_SIZE 32768
@@ -1690,111 +1686,6 @@ void plat_file_unmap(PFileMap* m) {
     else if (m->data && !m->borrowed) munmap((void*)m->data, (size_t)m->size);
     file_map_clear(m);
 }
-/* ================================================================ text entry */
-#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
-int plat_text_input(char* out, size_t cap, const char* initial) {
-    (void)out;
-    (void)cap;
-    (void)initial;
-    return -1;
-}
-#else
-enum { DIALOG_OK = 0, DIALOG_CANCELLED = 1, DIALOG_FAILED = -1, DIALOG_MISSING = -2 };
-
-/* Runs a dialog program (no shell: the initial text is the game's data) and takes the first line it prints */
-static int run_dialog(char* const argv[], char* out, size_t cap) {
-    posix_spawn_file_actions_t fa;
-    pid_t pid;
-    int pipefd[2], r, status, len_ok = 1;
-    size_t len = 0;
-    int line_done = 0;
-    char buf[512];
-    if (pipe(pipefd)) return DIALOG_FAILED;
-    fcntl(pipefd[0], F_SETFD, FD_CLOEXEC);
-    fcntl(pipefd[1], F_SETFD, FD_CLOEXEC); /* dup2 onto stdout clears it for the child's copy */
-    posix_spawn_file_actions_init(&fa);
-    posix_spawn_file_actions_adddup2(&fa, pipefd[1], 1);
-    r = posix_spawnp(&pid, argv[0], &fa, NULL, argv, environ);
-    posix_spawn_file_actions_destroy(&fa);
-    close(pipefd[1]);
-    if (r) {
-        close(pipefd[0]);
-        return r == ENOENT ? DIALOG_MISSING : DIALOG_FAILED;
-    }
-    for (;;) {
-        ssize_t n = read(pipefd[0], buf, sizeof buf);
-        ssize_t i;
-        if (n < 0 && errno == EINTR) continue;
-        if (n < 0) len_ok = 0;
-        if (n <= 0) break;
-        for (i = 0; i < n && !line_done; i++) {
-            if (buf[i] == '\n')
-                line_done = 1;
-            else if (len + 1 < cap)
-                out[len++] = buf[i];
-            else
-                len_ok = 0; /* longer than the game's buffer */
-        }
-    }
-    close(pipefd[0]);
-    while (waitpid(pid, &status, 0) < 0)
-        if (errno != EINTR) return DIALOG_FAILED;
-    if (!WIFEXITED(status)) return DIALOG_FAILED;
-    switch (WEXITSTATUS(status)) {
-        case 0:
-            if (!len_ok || !cap) return DIALOG_FAILED;
-            out[len] = 0;
-            return DIALOG_OK;
-        case 1: return DIALOG_CANCELLED;
-        case 127: return DIALOG_MISSING; /* posix_spawnp may report a missing program this way */
-        default: return DIALOG_FAILED;
-    }
-}
-
-#ifndef __APPLE__
-/* zenity takes the initial text joined to its option, so it goes through a buffer. kdialog takes it as an argument of
-   its own, so a long text only fails the dialog that needs the buffer */
-static int run_text_dialog(int kdialog_dialog, const char* initial, char* out, size_t cap) {
-    if (kdialog_dialog) {
-        char* kdialog[] = {"kdialog", "--title", "ScarletNX", "--inputbox", "Enter text", NULL, NULL};
-        kdialog[5] = (char*)initial;
-        return run_dialog(kdialog, out, cap);
-    }
-    char entry[1100];
-    char* zenity[] = {"zenity", "--entry", "--title=ScarletNX", "--text=Enter text", NULL, NULL};
-    if ((size_t)snprintf(entry, sizeof entry, "--entry-text=%s", initial) >= sizeof entry) return DIALOG_FAILED;
-    zenity[4] = entry;
-    return run_dialog(zenity, out, cap);
-}
-#endif
-
-int plat_text_input(char* out, size_t cap, const char* initial) {
-    int r;
-#if defined(__APPLE__)
-    /* the text goes in as an argument of the script, never spliced into its source */
-    char* argv[] = {"osascript",
-                    "-e",
-                    "on run argv",
-                    "-e",
-                    "return text returned of (display dialog \"Enter text\" default answer (item 1 of argv) with title "
-                    "\"ScarletNX\")",
-                    "-e",
-                    "end run",
-                    "--",
-                    NULL,
-                    NULL};
-    argv[8] = (char*)initial;
-    r = run_dialog(argv, out, cap);
-#else
-    const char* desk = getenv("XDG_CURRENT_DESKTOP");
-    int kde_first = desk && (strstr(desk, "KDE") || strstr(desk, "Plasma"));
-    r = run_text_dialog(kde_first, initial, out, cap);
-    if (r == DIALOG_MISSING) r = run_text_dialog(!kde_first, initial, out, cap);
-#endif
-    return r < 0 ? -1 : r;
-}
-#endif
-
 /* ================================================================ the crash handler */
 static int g_crash_reporting; /* a thread is reporting a crash */
 static __thread int t_crashed; /* this thread faulted already */

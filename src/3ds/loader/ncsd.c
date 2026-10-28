@@ -29,7 +29,7 @@ static bool is_game(const unsigned char* h) {
    table's offset and size do not fit in the image (*present true, malformed data) */
 static bool partition_span(const unsigned char* ncsd, unsigned index, uint64_t image, CtrSpan* out, bool* present) {
     const unsigned char* p = ncsd + NCSD_PARTITIONS + index * 8;
-    uint64_t at = (uint64_t)ctr_le32(p) * NCSD_MEDIA_UNIT, size = (uint64_t)ctr_le32(p + 4) * NCSD_MEDIA_UNIT;
+    uint64_t at = (uint64_t)snx_ld_le32(p) * NCSD_MEDIA_UNIT, size = (uint64_t)snx_ld_le32(p + 4) * NCSD_MEDIA_UNIT;
     *present = size != 0;
     if (!*present || !at || !ctr_fits(image, at, size)) return false;
     *out = (CtrSpan){at, size};
@@ -40,13 +40,13 @@ static bool partition_span(const unsigned char* ncsd, unsigned index, uint64_t i
 static bool ncch_span(CtrReader* r, CtrSpan partition, uint64_t* title, CtrSpan* out) {
     unsigned char h[0x200];
     if (!ctr_read(r, partition, 0, h, sizeof h)) return false;
-    unsigned units = ctr_le32(h + 0x104);
+    unsigned units = snx_ld_le32(h + 0x104);
     uint64_t size = (uint64_t)units * NCSD_MEDIA_UNIT;
     if (size != partition.size && (size = units) != partition.size &&
         (size < 0x200 || !ctr_fits(partition.size, 0, size)))
         return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "the NCCH's size does not match its NCSD partition");
     *out = (CtrSpan){partition.offset, size};
-    *title = ctr_le64(h + 0x118);
+    *title = snx_ld_le64(h + 0x118);
     return true;
 }
 bool ctr_ncsd_load(CtrReader* r, CtrSource* s) {
@@ -77,7 +77,7 @@ bool ctr_ncsd_load(CtrReader* r, CtrSource* s) {
             uint64_t title = 0;
             if (!partition_span(ncsd, index, r->size, &part, &there)) continue;
             if (!ctr_read(r, part, 0, header, sizeof header) || !is_game(header) ||
-                ctr_le64(header + 0x118) != ctr_update_title(base))
+                snx_ld_le64(header + 0x118) != ctr_update_title(base))
                 continue;
             if (ncch_span(r, part, &title, &s->update)) s->overlay = true;
             break;
@@ -94,10 +94,10 @@ bool ctr_ncch_load(CtrReader* r, CtrSource* s) {
         return ctr_fail(r, SNX_CTR_EXTRACT_UNSUPPORTED, "the file is too short to be an NCCH");
     if (!is_game(header))
         return ctr_fail(r, SNX_CTR_EXTRACT_UNSUPPORTED, "the file is not an executable application NCCH");
-    unsigned units = ctr_le32(header + 0x104);
+    unsigned units = snx_ld_le32(header + 0x104);
     uint64_t content = (uint64_t)units * NCSD_MEDIA_UNIT;
     if (content != r->size && units != r->size)
         return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT, "the NCCH's size does not match the file");
-    s->title_id = ctr_le64(header + 0x118);
+    s->title_id = snx_ld_le64(header + 0x118);
     return r->quick || (s->input_hashed = ctr_hash(r, (CtrSpan){0, r->size}, s->input_hash));
 }

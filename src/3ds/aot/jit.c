@@ -8,6 +8,7 @@
 #include "3ds/aot/ctr_module.h"
 #include "3ds/aot/ctr_discover.h"
 #include "3ds/runtime/internal.h"
+#include "common/utilities/endian.h"
 #include "common/cpu/arm/exec.h"
 #include "common/utilities/common.h"
 #include "snx_settings.h"
@@ -56,7 +57,7 @@ static SnxArmBlock compile(void* context, uint32_t pc, bool thumb, bool stale) {
     for (; count < SNX_CTR_AOT_BLOCK_WORDS; ++count) {
         unsigned char b[4];
         if (snx_ctr_fetch(j->process->space, pc + count * width, b, width) != SNX_CTR_MEM_OK) break;
-        words[count] = (uint32_t)b[0] | (uint32_t)b[1] << 8 | (thumb ? 0 : (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24);
+        words[count] = thumb ? snx_ld_le16(b) : snx_ld_le32(b);
         halves[count] = (uint16_t)words[count];
     }
     if (!count) return NULL;

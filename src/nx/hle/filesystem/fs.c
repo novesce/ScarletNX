@@ -1180,7 +1180,43 @@ size_t fs_dlcs(const u64** ids) {
     return g_hle.fs.ndlcs;
 }
 
-static int buffer_valid(u64 addr, u64 size) { return addr <= AS_SIZE && size <= AS_SIZE - addr; }
+/* Whether [addr, addr + size) is a span the guest can hand a file system command: the range has to sit inside the
+   address space, and every block of it has to be mapped and writable. A command that names a buffer the guest never
+   reserved would otherwise let the runtime write past its reservation: one such buffer, in
+   nn::fs::RomFsFileSystem::GetRequiredWorkingMemorySize's probe of the RomFS header, faulted on Windows where the
+   page happened to be unmapped, and on Linux silently wrote over black because it was mapped. */
+static int buffer_valid(u64 addr, u64 size) {
+    u64 end = addr + size;
+    MemBlock b;
+    /* a span of no bytes needs no buffer: a read that runs past the end of a file has its length clamped to what is
+       there, and one that starts at it is clamped to none, which the console answers with success and no bytes */
+    if (end < addr || end > AS_SIZE) return 0;
+    while (addr < end) {
+        mem_query(addr, &b);
+        if (b.state == MS_FREE || b.state == MS_INACCESSIBLE || !(b.perm & PERM_W) || b.addr > addr ||
+            b.size > AS_SIZE - b.addr || b.addr + b.size <= addr)
+            return 0;
+        addr = b.addr + b.size;
+    }
+    return 1;
+}
+/* The same for a span the runtime only reads, as a path or a file's contents: the permission needed is a read one.
+   A guest maps its paths and its read buffers in whatever mode its own code asked for, and demanding a write
+   permission of a page the guest made read-only refused a command the console answers (a Card's file opened by path
+   was one). */
+static int readable_span(u64 addr, u64 size) {
+    u64 end = addr + size;
+    MemBlock b;
+    if (end < addr || end > AS_SIZE) return 0;
+    while (addr < end) {
+        mem_query(addr, &b);
+        if (b.state == MS_FREE || b.state == MS_INACCESSIBLE || !(b.perm & PERM_R) || b.addr > addr ||
+            b.size > AS_SIZE - b.addr || b.addr + b.size <= addr)
+            return 0;
+        addr = b.addr + b.size;
+    }
+    return 1;
+}
 /* 64-bit file offsets: long is 32 bits on Windows. */
 static int file_seek(FILE* f, u64 off) {
 #if defined(_WIN32)
@@ -1271,7 +1307,8 @@ static int nn_fssrv_sf_IStorage_OperateRange(SvcObj* self, i32 operation_id, i64
 
 /* ============================================================ Indexed IFileSystem */
 static u32 read_path(IpcBuf b, char out[0x301]) {
-    R_UNLESS(b.addr && b.size && buffer_valid(b.addr, b.size), FS_DIR_UNOBTAINABLE);
+    /* the path is read, never written: it has to be mapped and readable, not writable (ldr.c's ro_readable) */
+    R_UNLESS(b.addr && b.size && readable_span(b.addr, b.size), FS_DIR_UNOBTAINABLE);
     size_t limit = b.size < 0x301 ? (size_t)b.size : 0x301;
     const char* start = (const char*)GP(b.addr);
     const char* end = memchr(start, 0, limit);
@@ -1349,7 +1386,7 @@ static int nn_fssrv_sf_IFile_Write(SvcObj* self, nn_fs_WriteOption option, i64 o
     if (!sz) return (option & 1) && f->f && fflush(f->f) ? FS_NO_SPACE : 0;
     R_UNLESS(sz <= (u64)INT64_MAX - off, FS_OUT_OF_RANGE);
     R_UNLESS((f->mode & 2) && !f->node->readonly, FS_WRITE_NOT_PERMITTED);
-    R_UNLESS(buffer_valid(a, sz), FS_OUT_OF_RANGE);
+    R_UNLESS(readable_span(a, sz), FS_OUT_OF_RANGE); /* the buffer's bytes are read out, not written into */
     if (off + sz > f->node->size && !(f->mode & 4)) R_THROW(FS_NO_APPEND);
     R_UNLESS(!file_seek(f->f, off), FS_OUT_OF_RANGE);
     own_acquire(a, sz); /* write() can't wait on memory the GPU holds: it lands first */

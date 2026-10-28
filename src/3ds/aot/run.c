@@ -8,6 +8,7 @@
 #include "common/utilities/common.h"
 #include "common/utilities/game_ini.h"
 #include "3ds/runtime/internal.h"
+#include "common/utilities/endian.h"
 #include "3ds/gpu/present.h"
 #include "common/utilities/build_info.h"
 #include "3ds/audio/output.h"
@@ -42,13 +43,13 @@ static void report_stack(SnxCtrProcess* p, const SnxArmCPU* cpu) {
     for (uint32_t at = cpu->r[13] & ~3u; shown < 12 && at - (cpu->r[13] & ~3u) < 0x2000; at += 4) {
         unsigned char b[4];
         if (snx_ctr_read_ram(p->space, at, b, 4) != SNX_CTR_MEM_OK) break;
-        uint32_t w = (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24;
+        uint32_t w = snx_ld_le32(b);
         bool thumb = w & 1;
         uint32_t ret = w & ~1u;
         if (ret < text->address + 4 || ret >= text->address + text->bytes || (!thumb && (ret & 3))) continue;
         unsigned char c[4];
         if (snx_ctr_read_ram(p->space, ret - (thumb ? 2 : 4), c, thumb ? 2 : 4) != SNX_CTR_MEM_OK) continue;
-        uint32_t i = (uint32_t)c[0] | (uint32_t)c[1] << 8 | (thumb ? 0 : (uint32_t)c[2] << 16 | (uint32_t)c[3] << 24);
+        uint32_t i = thumb ? snx_ld_le16(c) : snx_ld_le32(c);
         bool call = thumb ? (i & 0xe800) == 0xe800 /* BL or BLX suffix */
                           : (i & 0x0f000000) == 0x0b000000 || (i & 0xfe000000) == 0xfa000000 ||
                                 (i & 0x0ffffff0) == 0x012fff30;

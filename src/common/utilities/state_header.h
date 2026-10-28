@@ -7,6 +7,7 @@
 #define SNX_STATE_HEADER_H
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #define SNX_STATE_FORMAT   1   /* the file's layout: the header, the thumbnail, the sections and their table */
 #define SNX_STATE_HEADER   512 /* the header's bytes, the thumbnail right after them */
@@ -40,5 +41,10 @@ int snx_state_fits(const SnxStateHeader* h, uint64_t title, const char* stamp, c
 void snx_state_stamp(const char* program, char* out, size_t size);
 /* a state file's name, program.slot.snxstate, as its program and slot: 1, or 0 for a name of no state */
 int snx_state_name(const char* name, char* program, size_t psize, char* slot, size_t ssize);
+
+/* text into a caller's why buffer of n bytes, when it gave one */
+static inline void snx_state_why(char* why, size_t n, const char* text) {
+    if (why && n) snprintf(why, n, "%s", text);
+}
 
 #endif

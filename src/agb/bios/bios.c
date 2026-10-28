@@ -12,7 +12,6 @@
    the absolute quotient in r3. The real BIOS hangs on a zero denominator; the HLE call returns the values a
    trapped caller observes instead. */
 static void bios_div(uint32_t regs[16], int32_t numerator, int32_t denominator) {
-    int64_t quotient;
     if (!denominator) {
         regs[0] = (uint32_t)(numerator < 0 ? -1 : 1);
         regs[1] = (uint32_t)numerator;
@@ -25,7 +24,7 @@ static void bios_div(uint32_t regs[16], int32_t numerator, int32_t denominator) 
         regs[3] = (uint32_t)INT32_MIN;
         return;
     }
-    quotient = numerator / denominator;
+    int64_t quotient = numerator / denominator;
     regs[0] = (uint32_t)quotient;
     regs[1] = (uint32_t)(numerator % denominator);
     quotient = quotient < 0 ? -quotient : quotient;

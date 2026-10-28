@@ -32,8 +32,7 @@ static const SnxIrFeatures generic_features;
 
 static int has_feature(const char* features, const char* name) {
     size_t n = strlen(name);
-    const char* p;
-    for (p = features; (p = strstr(p, name)) != NULL; p += n)
+    for (const char* p = features; (p = strstr(p, name)) != NULL; p += n)
         if (p > features && p[-1] == '+' && (p[n] == ',' || !p[n])) return 1;
     return 0;
 }
@@ -55,8 +54,6 @@ int snx_ir_fpsr_exact(void) { return !g_ir.fpsr_loose; }
 void snx_ir_volatile_memory(int on) { g_ir.volatile_memory = on != 0; }
 int snx_ir_volatile(void) { return g_ir.volatile_memory; }
 int snx_ir_init(char* error, size_t error_size) {
-    char* triple;
-    int x86, arm, ppc, other;
     /* the asm parser for the runtime library's inline assembly (rtlib.c's divq, cpu.h's compiler barrier) */
     if (LLVMInitializeNativeTarget() || LLVMInitializeNativeAsmPrinter() || LLVMInitializeNativeAsmParser()) {
         snprintf(error, error_size, "LLVM has no code generator for this host");
@@ -66,11 +63,11 @@ int snx_ir_init(char* error, size_t error_size) {
        are fences and seq_cst atomics (cpu.h), so its plain accesses need no ordering of their own from the host. POWER
        is not multi-copy atomic as ARMv8 is, which only a program ordering plain accesses on three threads without
        barriers could see; its seq_cst fence (hwsync) is cumulative, as DMB is */
-    triple = LLVMGetDefaultTargetTriple();
-    x86 = !strncmp(triple, "x86_64", 6);
-    arm = !strncmp(triple, "aarch64", 7) || !strncmp(triple, "arm64", 5); /* Apple names AArch64 arm64 */
-    ppc = !strncmp(triple, "powerpc64", 9) || !strncmp(triple, "ppc64", 5);
-    other = riscv_triple(triple) || loongarch_triple(triple);
+    char* triple = LLVMGetDefaultTargetTriple();
+    int x86 = !strncmp(triple, "x86_64", 6);
+    int arm = !strncmp(triple, "aarch64", 7) || !strncmp(triple, "arm64", 5); /* Apple names AArch64 arm64 */
+    int ppc = !strncmp(triple, "powerpc64", 9) || !strncmp(triple, "ppc64", 5);
+    int other = riscv_triple(triple) || loongarch_triple(triple);
     if (!x86 && !arm && !ppc && !other)
         snprintf(error, error_size,
                  "the LLVM backend targets x86-64, AArch64, PowerPC64, RISC-V and LoongArch hosts, this one is %s",
@@ -161,15 +158,13 @@ SnxIr* snx_ir_new_target(const char* name, char opt, const char* target_triple, 
 }
 
 static SnxIr* new_ir(const char* name, char opt, const char* target_triple, int jit, char* error, size_t error_size) {
-    SnxIr* ir;
-    char *triple, *cpu, *features, *message = NULL, *layout;
-    int ppc;
+    char *cpu, *features, *message = NULL;
     LLVMTargetRef target;
-    LLVMTargetDataRef data;
     LLVMTypeRef params[2];
-    ir = (SnxIr*)calloc(1, sizeof(*ir));
+    SnxIr* ir = (SnxIr*)calloc(1, sizeof(*ir));
     if (!ir) return NULL;
-    triple = target_triple ? LLVMCreateMessage(target_triple) : host_triple(jit);
+    ir->promote = opt != '0';
+    char* triple = target_triple ? LLVMCreateMessage(target_triple) : host_triple(jit);
     if (LLVMGetTargetFromTriple(triple, &target, &message)) {
         snprintf(error, error_size, "LLVM target %s: %s", triple, message ? message : "unavailable");
         LLVMDisposeMessage(message);
@@ -180,7 +175,7 @@ static SnxIr* new_ir(const char* name, char opt, const char* target_triple, int 
     /* -march=native -mtune=native, -fPIC (toolchain.c). Another triple gets its architecture's baseline: x86-64 with
        CMPXCHG16B as rtlib is built, POWER8 on PowerPC64, rv64gc and LA64 below, anything else (AArch64) the generic CPU,
        since an x86 CPU name crashes another target's instruction selection */
-    ppc = !strncmp(triple, "powerpc64", 9) || !strncmp(triple, "ppc64", 5);
+    int ppc = !strncmp(triple, "powerpc64", 9) || !strncmp(triple, "ppc64", 5);
     if (!target_triple) {
         cpu = LLVMGetHostCPUName();
         features = LLVMGetHostCPUFeatures();
@@ -251,9 +246,9 @@ static SnxIr* new_ir(const char* name, char opt, const char* target_triple, int 
     ir->ctx = LLVMContextCreate();
     ir->mod = LLVMModuleCreateWithNameInContext(name, ir->ctx);
     LLVMSetTarget(ir->mod, triple);
-    data = LLVMCreateTargetDataLayout(ir->tm);
+    LLVMTargetDataRef data = LLVMCreateTargetDataLayout(ir->tm);
     ir->big_endian = LLVMByteOrder(data) == LLVMBigEndian;
-    layout = LLVMCopyStringRepOfTargetData(data);
+    char* layout = LLVMCopyStringRepOfTargetData(data);
     LLVMSetDataLayout(ir->mod, layout);
     LLVMDisposeMessage(layout);
     LLVMDisposeTargetData(data);
@@ -274,14 +269,14 @@ static SnxIr* new_ir(const char* name, char opt, const char* target_triple, int 
     ir->t_guest = LLVMFunctionType(ir->t_void, params, 2, 0);
     {
         /* !alias.scope/!noalias: one domain, two scopes, uniqued by name */
-        LLVMMetadataRef domain, cpu[2], guest[2], list;
+        LLVMMetadataRef cpu[2], guest[2];
         LLVMMetadataRef name = LLVMMDStringInContext2(ir->ctx, "snx.domain", 10);
-        domain = LLVMMDNodeInContext2(ir->ctx, &name, 1);
+        LLVMMetadataRef domain = LLVMMDNodeInContext2(ir->ctx, &name, 1);
         cpu[0] = LLVMMDStringInContext2(ir->ctx, "snx.cpu", 7);
         cpu[1] = domain;
         guest[0] = LLVMMDStringInContext2(ir->ctx, "snx.guest", 9);
         guest[1] = domain;
-        list = LLVMMDNodeInContext2(ir->ctx, cpu, 2);
+        LLVMMetadataRef list = LLVMMDNodeInContext2(ir->ctx, cpu, 2);
         ir->scope_cpu = LLVMMetadataAsValue(ir->ctx, LLVMMDNodeInContext2(ir->ctx, &list, 1));
         list = LLVMMDNodeInContext2(ir->ctx, guest, 2);
         ir->scope_guest = LLVMMetadataAsValue(ir->ctx, LLVMMDNodeInContext2(ir->ctx, &list, 1));
@@ -308,27 +303,22 @@ void snx_ir_free(SnxIr* ir) {
    without touching r2 or the arguments. A declared callee's stub is a branch to it, which the linker points at its
    local entry (ELFv2) or code (ELFv1's descriptor); a pointer's stub repeats snx_lookup (cpu.h) and jumps through the
    count register, with r12 at the global entry as ELFv2 expects, or through the descriptor (ELFv1) */
-static void attribute(SnxIr* ir, LLVMValueRef function, LLVMAttributeIndex index, const char* name) {
-    unsigned kind = LLVMGetEnumAttributeKindForName(name, strlen(name));
-    LLVMAddAttributeAtIndex(function, index, LLVMCreateEnumAttribute(ir->ctx, kind, 0));
-}
 static int ppc_target(const SnxIr* ir) {
     const char* target = LLVMGetTarget(ir->mod);
     return !strncmp(target, "powerpc64", 9) || !strncmp(target, "ppc64", 5);
 }
 static LLVMValueRef ppc_stub(SnxIr* ir, LLVMTypeRef type, const char* name, const char* text) {
-    LLVMValueRef stub = LLVMGetNamedFunction(ir->mod, name), body;
-    LLVMBuilderRef b;
+    LLVMValueRef stub = LLVMGetNamedFunction(ir->mod, name);
     if (stub) return stub;
     stub = LLVMAddFunction(ir->mod, name, type);
     LLVMSetLinkage(stub, LLVMInternalLinkage);
-    attribute(ir, stub, LLVMAttributeFunctionIndex, "naked");
-    attribute(ir, stub, LLVMAttributeFunctionIndex, "noinline");
-    attribute(ir, stub, LLVMAttributeFunctionIndex, "nounwind");
-    b = LLVMCreateBuilderInContext(ir->ctx);
+    ir_attribute(ir, stub, LLVMAttributeFunctionIndex, "naked");
+    ir_attribute(ir, stub, LLVMAttributeFunctionIndex, "noinline");
+    ir_attribute(ir, stub, LLVMAttributeFunctionIndex, "nounwind");
+    LLVMBuilderRef b = LLVMCreateBuilderInContext(ir->ctx);
     LLVMPositionBuilderAtEnd(b, LLVMAppendBasicBlockInContext(ir->ctx, stub, "entry"));
-    body = LLVMGetInlineAsm(LLVMFunctionType(ir->t_void, NULL, 0, 0), text, strlen(text), "", 0, 1, 0,
-                            LLVMInlineAsmDialectATT, 0);
+    LLVMValueRef body = LLVMGetInlineAsm(LLVMFunctionType(ir->t_void, NULL, 0, 0), text, strlen(text), "", 0, 1, 0,
+                                         LLVMInlineAsmDialectATT, 0);
     LLVMBuildCall2(b, LLVMFunctionType(ir->t_void, NULL, 0, 0), body, NULL, 0, "");
     LLVMBuildUnreachable(b);
     LLVMDisposeBuilder(b);
@@ -358,18 +348,16 @@ static LLVMValueRef ppc_dynamic_stub(SnxIr* ir, LLVMTypeRef type) {
     return ppc_stub(ir, type, "snx_ppc_tail_dynamic", text);
 }
 static void ppc_tail_calls(SnxIr* ir) {
-    LLVMValueRef function, inst, next;
-    LLVMBasicBlockRef block;
-    for (function = LLVMGetFirstFunction(ir->mod); function; function = LLVMGetNextFunction(function))
-        for (block = LLVMGetFirstBasicBlock(function); block; block = LLVMGetNextBasicBlock(block))
-            for (inst = LLVMGetFirstInstruction(block); inst; inst = next) {
-                LLVMValueRef callee, stub, args[2], site;
-                LLVMTypeRef type;
+    LLVMValueRef next;
+    for (LLVMValueRef function = LLVMGetFirstFunction(ir->mod); function; function = LLVMGetNextFunction(function))
+        for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(function); block; block = LLVMGetNextBasicBlock(block))
+            for (LLVMValueRef inst = LLVMGetFirstInstruction(block); inst; inst = next) {
+                LLVMValueRef stub, args[2];
                 char name[160], text[160];
                 next = LLVMGetNextInstruction(inst);
                 if (!LLVMIsACallInst(inst) || LLVMGetTailCallKind(inst) != LLVMTailCallKindMustTail) continue;
-                callee = LLVMGetCalledValue(inst);
-                type = LLVMGetCalledFunctionType(inst);
+                LLVMValueRef callee = LLVMGetCalledValue(inst);
+                LLVMTypeRef type = LLVMGetCalledFunctionType(inst);
                 if (LLVMIsAFunction(callee) && !LLVMIsDeclaration(callee)) continue; /* LLVM jumps there itself */
                 if (LLVMCountParamTypes(type) != 2) continue; /* only guest calls (c, pc) are musttail */
                 if (LLVMIsAFunction(callee)) {
@@ -384,7 +372,7 @@ static void ppc_tail_calls(SnxIr* ir) {
                 args[0] = LLVMGetOperand(inst, 0);
                 args[1] = LLVMGetOperand(inst, 1);
                 LLVMPositionBuilderBefore(ir->b, inst);
-                site = LLVMBuildCall2(ir->b, type, stub, args, 2, "");
+                LLVMValueRef site = LLVMBuildCall2(ir->b, type, stub, args, 2, "");
                 LLVMSetTailCallKind(site, LLVMTailCallKindMustTail);
                 LLVMInstructionEraseFromParent(inst);
             }
@@ -417,8 +405,7 @@ static void size_attributes(LLVMModuleRef module, char opt) {
     unsigned optsize = LLVMGetEnumAttributeKindForName("optsize", 7);
     unsigned minsize = LLVMGetEnumAttributeKindForName("minsize", 7);
     unsigned optnone = LLVMGetEnumAttributeKindForName("optnone", 7);
-    LLVMValueRef fn;
-    for (fn = LLVMGetFirstFunction(module); fn; fn = LLVMGetNextFunction(fn)) {
+    for (LLVMValueRef fn = LLVMGetFirstFunction(module); fn; fn = LLVMGetNextFunction(fn)) {
         if (LLVMIsDeclaration(fn) || LLVMGetEnumAttributeAtIndex(fn, LLVMAttributeFunctionIndex, optnone)) continue;
         LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex, LLVMCreateEnumAttribute(ctx, optsize, 0));
         if (opt == 'z')
@@ -430,8 +417,6 @@ static void size_attributes(LLVMModuleRef module, char opt) {
 int snx_ir_module_object(SnxIr* ir, LLVMModuleRef module, char opt, unsigned char** data, size_t* size, char* error,
                          size_t error_size) {
     char pipeline[16], *message = NULL;
-    LLVMPassBuilderOptionsRef options;
-    LLVMErrorRef failure;
     LLVMMemoryBufferRef buffer;
     *data = NULL;
     *size = 0;
@@ -443,9 +428,10 @@ int snx_ir_module_object(SnxIr* ir, LLVMModuleRef module, char opt, unsigned cha
     LLVMDisposeMessage(message);
     if (opt == 's' || opt == 'z') size_attributes(module, opt);
     sprintf(pipeline, "default<O%c>", opt == 's' || opt == 'z' ? '2' : opt);
-    options = LLVMCreatePassBuilderOptions();
+    LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
     if (ir->tuning && ir->tuning->builder) ir->tuning->builder(options);
-    failure = LLVMRunPasses(module, ir->tuning && ir->tuning->pipeline ? ir->tuning->pipeline : pipeline, ir->tm, options);
+    LLVMErrorRef failure =
+        LLVMRunPasses(module, ir->tuning && ir->tuning->pipeline ? ir->tuning->pipeline : pipeline, ir->tm, options);
     LLVMDisposePassBuilderOptions(options);
     if (failure) {
         message = LLVMGetErrorMessage(failure);
@@ -506,20 +492,15 @@ extern const unsigned long snx_armlib_bitcode_size;
 static int library_object(const char* name, const unsigned char* bitcode, unsigned long bitcode_size, char opt,
                           unsigned char** data, size_t* size, char* error, size_t error_size) {
     static const char* const target_attributes[] = {"target-cpu", "target-features", "tune-cpu", "probe-stack"};
-    SnxIr* ir;
-    LLVMMemoryBufferRef buffer;
     LLVMModuleRef library;
-    LLVMValueRef fn;
-    unsigned i;
-    int rc;
     *data = NULL;
     *size = 0;
-    ir = snx_ir_new(name, opt, error, error_size);
+    SnxIr* ir = snx_ir_new(name, opt, error, error_size);
     if (!ir) return -1;
     /* The embedded bitcode has process lifetime. Parsing it needs a view, not
        another heap allocation and copy of the complete runtime library. */
-    buffer = LLVMCreateMemoryBufferWithMemoryRange((const char*)bitcode, bitcode_size, name, 0);
-    rc = LLVMParseBitcodeInContext2(ir->ctx, buffer, &library);
+    LLVMMemoryBufferRef buffer = LLVMCreateMemoryBufferWithMemoryRange((const char*)bitcode, bitcode_size, name, 0);
+    int rc = LLVMParseBitcodeInContext2(ir->ctx, buffer, &library);
     LLVMDisposeMemoryBuffer(buffer);
     if (rc) {
         snprintf(error, error_size, "the runtime library's bitcode does not load into LLVM %s", LLVM_VERSION_STRING);
@@ -529,8 +510,8 @@ static int library_object(const char* name, const unsigned char* bitcode, unsign
     /* Clang wrote the build machine's baseline CPU into every function, which would override the target machine's:
        without them the library is compiled for this CPU, as the generated code is.
        Apple's Clang also names __chkstk_darwin as the probe, which LLVM's AArch64 backend rejects */
-    for (fn = LLVMGetFirstFunction(library); fn; fn = LLVMGetNextFunction(fn))
-        for (i = 0; i < sizeof(target_attributes) / sizeof(*target_attributes); ++i)
+    for (LLVMValueRef fn = LLVMGetFirstFunction(library); fn; fn = LLVMGetNextFunction(fn))
+        for (unsigned i = 0; i < sizeof(target_attributes) / sizeof(*target_attributes); ++i)
             LLVMRemoveStringAttributeAtIndex(fn, LLVMAttributeFunctionIndex, target_attributes[i],
                                              (unsigned)strlen(target_attributes[i]));
     LLVMSetTarget(library, LLVMGetTarget(ir->mod));

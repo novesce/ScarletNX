@@ -28,8 +28,13 @@ the first time.
 
 The Vulkan driver is MoltenVK, Ryujinx's build of it ([V380-Ori/Ryujinx.MoltenVK](https://github.com/V380-Ori/Ryujinx.MoltenVK)),
 which carries the patches an emulator's pipelines need and mainline MoltenVK lacks. Both apps carry it in their
-`Frameworks`, where the runtime has SDL load it (`backend/sdl3.c`). The bare `scarletnx` outside the app uses the
-system's Vulkan loader instead (Homebrew's `molten-vk` and `vulkan-loader`).
+`Frameworks`, and a game's folder gets that library beside its copy of the runtime (`snx_deploy_runtime`), a second name
+where the disk allows one and a copy where it does not, as a read-only app image or one macOS translocated leaves. A
+game plays as `<data folder>/recompiled/<id>/<id>`, outside the bundle, where SDL's own search of
+`@executable_path/../Frameworks` reaches nothing. The runtime hands SDL the library its own folder holds
+(`backend/sdl3.c`), and a run with no window loads the same file without SDL's video. The bare `scarletnx` of a
+checkout has no library to deploy and no bundle around it, so it uses the system's Vulkan loader (Homebrew's
+`molten-vk` and `vulkan-loader`).
 
 ### iOS
 

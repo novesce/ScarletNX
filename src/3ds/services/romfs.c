@@ -6,6 +6,8 @@
    level 3 read where it lies in the mapped CIA. */
 #include "3ds/services/romfs.h"
 #include "common/filesystem/tree.h"
+#include "common/utilities/bits.h"
+#include "common/utilities/endian.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,13 +38,6 @@ typedef struct {
 } Measure;
 static File* files(SnxCtrRomfs* r) { return (File*)(r->dir + r->dirs); }
 static unsigned char* meta(SnxCtrRomfs* r) { return (unsigned char*)(files(r) + r->files); }
-static void put32(unsigned char* b, uint32_t v) {
-    for (unsigned i = 0; i < 4; ++i) b[i] = (unsigned char)(v >> (i * 8));
-}
-static void put64(unsigned char* b, uint64_t v) {
-    for (unsigned i = 0; i < 8; ++i) b[i] = (unsigned char)(v >> (i * 8));
-}
-static uint64_t align16(uint64_t n) { return (n + 15) & ~15ull; }
 static uint32_t buckets(uint32_t n) { return n < 3 ? 3 : n | 1; }
 static bool name16(const char* s, uint16_t out[256], uint32_t* bytes) {
     unsigned n = 0;
@@ -94,7 +89,7 @@ static bool measure(FsNode* node, Measure* m, bool root) {
     } else {
         ++m->files;
         m->file_bytes += 32 + ((bytes + 3) & ~3u);
-        uint64_t aligned = align16(m->data);
+        uint64_t aligned = snx_align_up(m->data, 16);
         if (aligned > LIMIT || node->size > LIMIT - aligned) return false;
         m->data = aligned + node->size;
     }
@@ -140,7 +135,7 @@ static void fill(SnxCtrRomfs* r, FsNode* node, uint32_t parent, Measure* m) {
             last_file = next;
             (void)name16(c->name, name, &bytes);
             m->file_bytes += 32 + ((bytes + 3) & ~3u);
-            m->data = align16(m->data);
+            m->data = snx_align_up(m->data, 16);
             f->data = r->meta_size + m->data;
             m->data += c->size;
         }
@@ -159,7 +154,7 @@ static void serialize(SnxCtrRomfs* r, const Measure* m) {
                          ft,
                          m->file_bytes,
                          (uint32_t)r->meta_size};
-    for (unsigned i = 0; i < 10; ++i) put32(b + i * 4, header[i]);
+    for (unsigned i = 0; i < 10; ++i) snx_st_le32(b + i * 4, header[i]);
     memset(b + dh, 0xff, 4 * buckets(r->dirs));
     memset(b + fh, 0xff, 4 * buckets(r->files));
     for (unsigned type = 0; type < 2; ++type) {
@@ -174,20 +169,20 @@ static void serialize(SnxCtrRomfs* r, const Measure* m) {
             unsigned char* record = b + table + off;
             uint32_t slot = hash(parent, name, bytes) % buckets(count), previous = 0;
             for (unsigned j = 0; j < 4; ++j) previous |= (uint32_t)b[ht + slot * 4 + j] << (j * 8);
-            put32(b + ht + slot * 4, off);
-            put32(record, parent);
+            snx_st_le32(b + ht + slot * 4, off);
+            snx_st_le32(record, parent);
             uint32_t next = type ? f->next : d->next;
-            put32(record + 4, next == NONE ? NONE : type ? files(r)[next].off : r->dir[next].off);
+            snx_st_le32(record + 4, next == NONE ? NONE : type ? files(r)[next].off : r->dir[next].off);
             if (type) {
-                put64(record + 8, f->data - r->meta_size);
-                put64(record + 16, f->node->size);
-                put32(record + 24, previous);
-                put32(record + 28, bytes);
+                snx_st_le64(record + 8, f->data - r->meta_size);
+                snx_st_le64(record + 16, f->node->size);
+                snx_st_le32(record + 24, previous);
+                snx_st_le32(record + 28, bytes);
             } else {
-                put32(record + 8, d->child == NONE ? NONE : r->dir[d->child].off);
-                put32(record + 12, d->file == NONE ? NONE : files(r)[d->file].off);
-                put32(record + 16, previous);
-                put32(record + 20, bytes);
+                snx_st_le32(record + 8, d->child == NONE ? NONE : r->dir[d->child].off);
+                snx_st_le32(record + 12, d->file == NONE ? NONE : files(r)[d->file].off);
+                snx_st_le32(record + 16, previous);
+                snx_st_le32(record + 20, bytes);
             }
             for (uint32_t j = 0; j < bytes / 2; ++j) {
                 record[(type ? 32 : 24) + j * 2] = (unsigned char)name[j];
@@ -208,7 +203,8 @@ bool snx_ctr_romfs_open(FsTree* tree, SnxCtrRomfs** out) {
     }
     Measure m = {0};
     if (rc || !root->is_dir || !measure(root, &m, true)) goto fail;
-    uint64_t meta_size = align16(40 + 4ull * buckets(m.dirs) + m.dir_bytes + 4ull * buckets(m.files) + m.file_bytes);
+    uint64_t meta_size = snx_align_up(40 + 4ull * buckets(m.dirs) + m.dir_bytes + 4ull * buckets(m.files)
+                                      + m.file_bytes, 16);
     uint64_t alloc =
         sizeof(SnxCtrRomfs) + (uint64_t)m.dirs * sizeof(Dir) + (uint64_t)m.files * sizeof(File) + meta_size;
     if (meta_size + m.data > LIMIT || alloc > SIZE_MAX) goto fail;
@@ -239,7 +235,8 @@ bool snx_ctr_romfs_open_image(const unsigned char* image, uint64_t size, uint64_
         FsNode root = {.is_dir = 1};
         Measure m = {0}, pos = {0};
         if (!measure(&root, &m, true)) return false;
-        size_t meta_size = (size_t)align16(40 + 4ull * buckets(m.dirs) + m.dir_bytes + 4ull * buckets(m.files));
+        size_t meta_size = (size_t)snx_align_up(40 + 4ull * buckets(m.dirs) + m.dir_bytes + 4ull * buckets(m.files),
+                                                16);
         SnxCtrRomfs* r = calloc(1, sizeof *r + sizeof(Dir) + meta_size);
         if (!r) return false;
         r->dirs = 1;
@@ -265,7 +262,7 @@ void snx_ctr_romfs_free(SnxCtrRomfs* r) { free(r); /* the shared tree, or the CI
 static uint32_t image32(const SnxCtrRomfs* r, uint64_t at) {
     if (at > r->image_size || r->image_size - at < 4) return NONE;
     const unsigned char* p = r->image + at;
-    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+    return snx_ld_le32(p);
 }
 /* whether path (relative, '/'-separated UTF-8) names an entry of the image's level-3 tables: the root for "", then
    each component among the folder's child folders, the last also among its files. The loader walked the tables

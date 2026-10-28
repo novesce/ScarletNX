@@ -3,14 +3,12 @@
 #include "3ds/loader/ctr_image.h"
 #include "3ds/loader/ctr_loader.h"
 #include "common/utilities/common.h"
+#include "common/utilities/endian.h"
 #include <openssl/evp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-static uint32_t le32(const unsigned char* p) {
-    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
-}
 static bool read_exact(const char* root, const char* name, void* out, size_t size) {
     char* path = snx_path_join(root, name);
     FILE* f = !snx_is_link(path) && snx_is_file(path) ? snx_fopen(path, "rb") : NULL;
@@ -23,18 +21,18 @@ static bool read_exact(const char* root, const char* name, void* out, size_t siz
 void snx_ctr_image_free(SnxCtrImage* image) {
     if (image) {
         free(image->code);
-        memset(image, 0, sizeof *image);
+        *image = (SnxCtrImage){0};
     }
 }
 /* the image an ExHeader describes, its expanded .code read exact and bounded by code(source, out, size) */
 static bool image_parse(const unsigned char* ex, bool (*code)(const void*, unsigned char*, size_t),
                         const void* source, SnxCtrImage* image, char* error, size_t error_size) {
-    image->stack_size = le32(ex + 0x1c);
-    image->bss_size = le32(ex + 0x3c);
-    image->title_id = (uint64_t)le32(ex + 0x200) | (uint64_t)le32(ex + 0x204) << 32;
+    image->stack_size = snx_ld_le32(ex + 0x1c);
+    image->bss_size = snx_ld_le32(ex + 0x3c);
+    image->title_id = (uint64_t)snx_ld_le32(ex + 0x200) | (uint64_t)snx_ld_le32(ex + 0x204) << 32;
     memcpy(image->name, ex, sizeof image->name);
     image->main_priority = ex[0x20f];
-    for (unsigned i = 0; i < 28; ++i) image->kernel_caps[i] = le32(ex + 0x370 + i * 4);
+    for (unsigned i = 0; i < 28; ++i) image->kernel_caps[i] = snx_ld_le32(ex + 0x370 + i * 4);
     const char* reason = "invalid ExHeader main thread priority";
     if (image->main_priority > 63) goto fail;
     const unsigned offsets[] = {0x10, 0x20, 0x30};
@@ -43,7 +41,7 @@ static bool image_parse(const unsigned char* ex, bool (*code)(const void*, unsig
     for (unsigned i = 0; i < 3; ++i) {
         const unsigned char* p = ex + offsets[i];
         SnxCtrSegment* s = &image->segment[i];
-        *s = (SnxCtrSegment){le32(p), le32(p + 4), le32(p + 8)};
+        *s = (SnxCtrSegment){snx_ld_le32(p), snx_ld_le32(p + 4), snx_ld_le32(p + 8)};
         uint64_t bytes = (uint64_t)s->pages * 4096;
         sizes[i] = bytes + (i == 2 ? ((uint64_t)image->bss_size + 4095) & ~4095ull : 0);
         /* Match extraction: some homebrew .data byte counts include BSS. */
@@ -91,7 +89,7 @@ static const char* not_folder(const char* path) {
 bool snx_ctr_image_load(const char* directory, SnxCtrImage* image, char* error, size_t error_size) {
     if (error_size) error[0] = 0;
     if (!image) return false;
-    memset(image, 0, sizeof *image);
+    *image = (SnxCtrImage){0};
     if (!directory) {
         snprintf(error, error_size, "no extraction folder given");
         return false;
@@ -120,7 +118,7 @@ static bool source_code(const void* source, unsigned char* out, size_t size) {
 bool snx_ctr_image_from_source(const SnxCtrSource* source, SnxCtrImage* image, char* error, size_t error_size) {
     if (error_size) error[0] = 0;
     if (!image) return false;
-    memset(image, 0, sizeof *image);
+    *image = (SnxCtrImage){0};
     if (!source) {
         if (error_size) snprintf(error, error_size, "no game to read the image from");
         return false;

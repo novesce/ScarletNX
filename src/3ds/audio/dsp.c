@@ -182,8 +182,7 @@ bool snx_ctr_dsp_tick(SnxCtrDsp* dsp, int16_t frame[SNX_CTR_DSP_SAMPLES][2]) {
     (void)ram_read(dsp, read + DSP_INTERMEDIATE, &read_samples, sizeof read_samples);
     (void)ram_read(dsp, write + DSP_INTERMEDIATE, &write_samples, sizeof write_samples);
     /* the intermediate mixes: every source's frame mixed into each with its gains */
-    DspQuadFrame mixes[3];
-    memset(mixes, 0, sizeof mixes);
+    DspQuadFrame mixes[3] = {0};
     for (unsigned i = 0; i < DSP_SOURCES; i++) {
         uint32_t dirty = configs[i].dirty;
         uint16_t buffers_dirty = configs[i].buffers_dirty;

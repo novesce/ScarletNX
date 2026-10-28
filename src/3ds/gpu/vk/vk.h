@@ -3,10 +3,10 @@
 #ifndef SNX_CTR_VK_H
 #define SNX_CTR_VK_H
 #include "3ds/memory/ctr_memory.h"
-#include <SDL3/SDL.h>
+#include "common/gpu/vk/ring.h"
+#include "common/gpu/vk/window.h"
 #include <stdbool.h>
 #include <stdint.h>
-#include <volk.h>
 /* The 3DS's one Vulkan device, which the PICA renderer, the transfer engine and the presenter share (device.c).
    The board's RAM regions (FCRAM, VRAM, DSP RAM, the New 3DS's extra RAM) are the host memory the guest runs in,
    imported into Vulkan as buffers (VK_EXT_external_memory_host): vertex and index data, textures, render targets'
@@ -22,7 +22,7 @@ typedef struct {
     uint32_t base, size; /* the physical range it holds */
 } SnxCtrVkRam;
 typedef struct {
-    VkInstance instance;
+    SnxVkWindow host; /* the window (none headless), the instance and the surface */
     VkPhysicalDevice phys;
     VkDevice device;
     VkQueue queue;
@@ -34,21 +34,10 @@ typedef struct {
     bool preserve_infnan;  /* shaderSignedZeroInfNanPreserveFloat32: the generated shaders keep infinities and NaNs */
     SnxCtrVkRam ram[8];
     unsigned ram_count;
-    SDL_Window* window;
-    VkSurfaceKHR surface;
     SnxCtrMemory* memory; /* the board's, whose RAM the renderer tracks */
-    VkCommandPool pool;
-    /* the submissions in flight, a ring: each recording's command buffer, fence and descriptor sets, free again once
-       its fence passed and its serial is completed */
-    struct {
-        VkCommandBuffer cb;
-        VkFence fence;
-        VkDescriptorPool descriptors;
-        uint64_t serial; /* 0: never submitted */
-    } slots[SNX_CTR_VK_SLOTS];
-    unsigned slot; /* the recording's, or the next one's */
-    bool recording;
-    uint64_t submitted, completed;
+    /* the submissions in flight, SNX_CTR_VK_SLOTS of them: each recording's command buffer, fence and descriptor
+       sets, free again once its fence passed and its serial is completed */
+    SnxVkRing ring;
 } SnxCtrVk;
 /* the device, once snx_ctr_vk_init made it; NULL before */
 SnxCtrVk* snx_ctr_vk(void);

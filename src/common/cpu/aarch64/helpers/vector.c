@@ -117,12 +117,11 @@ static u64 vec_uqrshl_d(u64 src, i64 shift, int round, u32* sat) {
    unsigned, 2 rounding, 4 saturating; the signed low byte of each lane of Vm shifts the lane of Vn, left or (negative)
    right; the lanes above the operation's are zeroed */
 void snx_vec_shl(CPU* c, u32 d, u32 n, u32 m, u32 desc) {
-    u32 esz = desc & 3, lanes = (desc >> 2) & 63, flags = desc >> 8, i, sat = 0, bits = 8u << esz;
+    u32 esz = desc & 3, lanes = (desc >> 2) & 63, flags = desc >> 8, sat = 0, bits = 8u << esz;
     int uns = flags & 1, round = (flags >> 1) & 1;
     u32* qc = (flags & 4) ? &sat : NULL;
-    V128 r;
-    memset(&r, 0, sizeof(r));
-    for (i = 0; i < lanes; ++i) {
+    V128 r = {0};
+    for (u32 i = 0; i < lanes; ++i) {
         u64 x = vec_get(&c->v[n], esz, i), y;
         i32 shift = (i8)vec_get(&c->v[m], esz, i);
         if (esz == 3)
@@ -182,15 +181,15 @@ static u32 vec_rol32(u32 x, u32 s) { return vec_ror32(x, (32 - s) & 31); }
 
 /* SM3PARTW1 (op 0), SM3PARTW2 (1), SM3TT1A, SM3TT1B, SM3TT2A, SM3TT2B (2-5, with imm2) */
 void snx_vec_sm3(CPU* c, u32 op, u32 d, u32 n, u32 m, u32 imm2) {
-    u32 x[4], y[4], z[4], t, i;
-    for (i = 0; i < 4; ++i) {
+    u32 x[4], y[4], z[4], t;
+    for (u32 i = 0; i < 4; ++i) {
         x[i] = SNX_VS(c->v[d], i);
         y[i] = SNX_VS(c->v[n], i);
         z[i] = SNX_VS(c->v[m], i);
     }
     switch (op) {
         case 0:
-            for (i = 0; i < 4; ++i) {
+            for (u32 i = 0; i < 4; ++i) {
                 t = x[i] ^ y[i] ^ vec_ror32(i < 3 ? z[i + 1] : x[0], 17);
                 x[i] = t ^ vec_ror32(t, 17) ^ vec_ror32(t, 9);
             }
@@ -225,7 +224,7 @@ void snx_vec_sm3(CPU* c, u32 op, u32 d, u32 n, u32 m, u32 imm2) {
             break;
         }
     }
-    for (i = 0; i < 4; ++i) SNX_VSET_S(c->v[d], i, x[i]);
+    for (u32 i = 0; i < 4; ++i) SNX_VSET_S(c->v[d], i, x[i]);
 }
 
 /* ---- SM4 ---- */
@@ -253,19 +252,19 @@ static u32 sm4_subword(u32 x) {
 
 /* SM4E (op 0: Vd's state, Vn's round keys) and SM4EKEY (1: Vn's key, Vm's constants) */
 void snx_vec_sm4(CPU* c, u32 op, u32 d, u32 n, u32 m) {
-    u32 x[4], k[4], t, i;
-    for (i = 0; i < 4; ++i) {
+    u32 x[4], k[4];
+    for (u32 i = 0; i < 4; ++i) {
         x[i] = SNX_VS(c->v[op ? n : d], i);
         k[i] = SNX_VS(c->v[op ? m : n], i);
     }
-    for (i = 0; i < 4; ++i) {
-        t = sm4_subword(x[(i + 1) % 4] ^ x[(i + 2) % 4] ^ x[(i + 3) % 4] ^ k[i]);
+    for (u32 i = 0; i < 4; ++i) {
+        u32 t = sm4_subword(x[(i + 1) % 4] ^ x[(i + 2) % 4] ^ x[(i + 3) % 4] ^ k[i]);
         if (op)
             x[i] ^= t ^ vec_rol32(t, 13) ^ vec_rol32(t, 23);
         else
             x[i] ^= t ^ vec_rol32(t, 2) ^ vec_rol32(t, 10) ^ vec_rol32(t, 18) ^ vec_rol32(t, 24);
     }
-    for (i = 0; i < 4; ++i) SNX_VSET_S(c->v[d], i, x[i]);
+    for (u32 i = 0; i < 4; ++i) SNX_VSET_S(c->v[d], i, x[i]);
 }
 
 /* ---- BFDOT, BFMMLA (vec_helper.c's bfdotadd with FPCR.EBF 0) ---- */
@@ -274,12 +273,11 @@ void snx_vec_sm4(CPU* c, u32 op, u32 d, u32 n, u32 m) {
    (overflowing to infinity), denormals flushed, default NaNs, whatever FPCR says, and no FPSR flag */
 u32 snx_vec_bfdot(CPU* c, u32 sum, u32 e1, u32 e2) {
     CPU fixed;
-    u64 t1, t2;
     (void)c;
     fixed.fpcr = FPCR_DN | FPCR_FZ;
     fixed.fpsr = 0;
-    t1 = fp_binary_rm(&fixed, (u64)(e1 << 16), (u64)(e2 << 16), 32, SNX_FP_MUL, 6);
-    t2 = fp_binary_rm(&fixed, (u64)(e1 & 0xFFFF0000u), (u64)(e2 & 0xFFFF0000u), 32, SNX_FP_MUL, 6);
+    u64 t1 = fp_binary_rm(&fixed, (u64)(e1 << 16), (u64)(e2 << 16), 32, SNX_FP_MUL, 6);
+    u64 t2 = fp_binary_rm(&fixed, (u64)(e1 & 0xFFFF0000u), (u64)(e2 & 0xFFFF0000u), 32, SNX_FP_MUL, 6);
     t1 = fp_binary_rm(&fixed, t1, t2, 32, SNX_FP_ADD, 6);
     return (u32)fp_binary_rm(&fixed, sum, t1, 32, SNX_FP_ADD, 6);
 }

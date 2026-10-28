@@ -163,7 +163,7 @@ void snx_ctr_plan_free(SnxCtrPlan* p) {
     if (p) {
         free(p->arm);
         free(p->thumb);
-        memset(p, 0, sizeof *p);
+        *p = (SnxCtrPlan){0};
     }
 }
 unsigned snx_ctr_plan_length(const SnxCtrPlan* p, uint32_t pc, bool thumb_mode) {
@@ -181,7 +181,7 @@ unsigned snx_ctr_plan_length(const SnxCtrPlan* p, uint32_t pc, bool thumb_mode) 
 bool snx_ctr_discover(const SnxCtrImage* image, const uint32_t* seeds, size_t seed_count, SnxCtrPlan* p, char* error,
                       size_t size) {
     if (!p) return false;
-    memset(p, 0, sizeof *p);
+    *p = (SnxCtrPlan){0};
     const char* reason = "invalid static discovery image";
     uint32_t* queue = NULL;
     if (!image || !image->code || !image->segment[0].bytes || (image->segment[0].bytes & 3) ||

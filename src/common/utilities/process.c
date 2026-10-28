@@ -33,16 +33,14 @@ static wchar_t* stage_wide(const char* text) {
 }
 /* Quote argv according to the Windows CRT rules, never through a shell. */
 static wchar_t* stage_command(const char* const* argv) {
-    size_t cap = 1, i, j, slashes, n = 0;
-    char* text;
-    wchar_t* out;
-    for (i = 0; argv[i]; ++i) cap += 2 * strlen(argv[i]) + 4;
-    text = (char*)snx_alloc(cap);
-    for (i = 0; argv[i]; ++i) {
+    size_t cap = 1, slashes, n = 0;
+    for (size_t i = 0; argv[i]; ++i) cap += 2 * strlen(argv[i]) + 4;
+    char* text = (char*)snx_alloc(cap);
+    for (size_t i = 0; argv[i]; ++i) {
         if (i) text[n++] = ' ';
         text[n++] = '"';
         slashes = 0;
-        for (j = 0; argv[i][j]; ++j) {
+        for (size_t j = 0; argv[i][j]; ++j) {
             if (argv[i][j] == '\\') {
                 ++slashes;
                 continue;
@@ -62,23 +60,20 @@ static wchar_t* stage_command(const char* const* argv) {
         text[n++] = '"';
     }
     text[n] = 0;
-    out = stage_wide(text);
+    wchar_t* out = stage_wide(text);
     free(text);
     return out;
 }
 static int run_stage(const char* const* argv, const char* cwd, const char* stage, int debugger) {
-    STARTUPINFOW startup;
-    PROCESS_INFORMATION process;
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
+    STARTUPINFOW startup = {0};
+    PROCESS_INFORMATION process = {0};
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
     HANDLE job;
     wchar_t *command = stage_command(argv), *directory = cwd ? stage_wide(cwd) : NULL;
     DWORD code = 1, error = 0, waited;
     int rc = 1, handler = 0;
     (void)debugger;
-    memset(&startup, 0, sizeof(startup));
     startup.cb = sizeof(startup);
-    memset(&process, 0, sizeof(process));
-    memset(&limits, 0, sizeof(limits));
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     job = CreateJobObjectW(NULL, NULL);
     interrupted = 0;
@@ -253,14 +248,14 @@ void snx_set_stage_runner(int (*run)(int argc, char** argv)) {
 }
 /* a stage run in this process: its own copy of argv, as a driver's main may rearrange it */
 static int run_stage_here(const char* const* argv, const char* stage) {
-    int argc = 0, rc, i;
+    int argc = 0;
     char** copy;
     while (argv[argc]) ++argc;
     copy = (char**)snx_alloc((size_t)(argc + 1) * sizeof(*copy));
-    for (i = 0; i < argc; ++i) copy[i] = snx_strdup(argv[i]);
+    for (int i = 0; i < argc; ++i) copy[i] = snx_strdup(argv[i]);
     copy[argc] = NULL;
-    rc = stage_runner(argc, copy);
-    for (i = 0; i < argc; ++i) free(copy[i]);
+    int rc = stage_runner(argc, copy);
+    for (int i = 0; i < argc; ++i) free(copy[i]);
     free(copy);
     if (rc) snx_error("%s failed (exit status %d). You can run the same command again.", stage, rc);
     return rc;

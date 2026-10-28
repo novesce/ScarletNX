@@ -35,10 +35,9 @@ static int by_site(const void* a, const void* b) {
 static BranchProfile* read_profile(void) {
     const char* path = getenv("SNX_LLVM_BRANCH_PROFILE");
     FILE* file;
-    BranchProfile* profile;
     size_t count = 0, capacity = 64;
     if (!path || !*path || !(file = fopen(path, "r"))) return NULL;
-    profile = malloc(sizeof(*profile) + capacity * sizeof(BranchCount));
+    BranchProfile* profile = malloc(sizeof(*profile) + capacity * sizeof(BranchCount));
     if (!profile) {
         fclose(file);
         return NULL;

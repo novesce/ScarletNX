@@ -47,7 +47,7 @@ float snx_ctr_pica_mul(float a, float b) {
 }
 
 void snx_ctr_pica_init(SnxCtrPica* p) {
-    memset(p, 0, sizeof(*p));
+    memset(p, 0, sizeof *p); /* 100 KB: no compound-literal temporary */
     /* values GSP initializes */
     p->regs[SNX_PICA_IRQ_AUTOSTOP] = 1;
     p->regs[SNX_PICA_IRQ_MASK] = 0xfffffff0u;
@@ -93,9 +93,8 @@ static void uniform_ints(SnxCtrShaderSetup* s, unsigned index, uint32_t value) {
 static int uniform_float(SnxCtrPica* p, unsigned block, SnxCtrShaderSetup* s, uint32_t value) {
     uint32_t* setup = &p->regs[block + SNX_PICA_SH_UNIFORM_SETUP];
     float v[4];
-    unsigned index;
     if (!pack(s->queue, &s->queued, value, (*setup >> 31) != 0, v)) return -1;
-    index = *setup & 0x7f;
+    unsigned index = *setup & 0x7f;
     if (index >= 96) return -1;
     memcpy(s->f[index], v, sizeof(v));
     *setup = (*setup & ~0x7fu) | ((index + 1) & 0x7f);
@@ -105,9 +104,8 @@ static int uniform_float(SnxCtrPica* p, unsigned block, SnxCtrShaderSetup* s, ui
 static SnxCtrPicaResult jump(SnxCtrPica* p, SnxCtrMemory* memory, unsigned channel) {
     uint32_t address = (p->regs[SNX_PICA_CMDBUF_ADDR + channel] & 0x0fffffff) * 8;
     uint32_t size = (p->regs[SNX_PICA_CMDBUF_SIZE + channel] & 0xfffff) * 8;
-    uint32_t* list;
     if (size > LIST_LIMIT) return SNX_CTR_PICA_UNSUPPORTED;
-    list = (uint32_t*)malloc(size ? size : 4);
+    uint32_t* list = (uint32_t*)malloc(size ? size : 4);
     if (!list) return SNX_CTR_PICA_UNSUPPORTED;
     if (size && snx_ctr_phys_read(memory, address, list, size) != SNX_CTR_MEM_OK) {
         free(list);
@@ -139,7 +137,7 @@ static SnxCtrPicaResult special(SnxCtrPica* p, SnxCtrMemory* memory, uint32_t id
             }
             return SNX_CTR_PICA_OK;
         case SNX_PICA_TOPOLOGY: /* PrimitiveAssembler::Reconfigure */
-            memset(&p->assembler, 0, sizeof p->assembler);
+            p->assembler = (SnxCtrAssembler){0};
             p->assembler.topology = (p->regs[id] >> 8) & 3;
             return SNX_CTR_PICA_OK;
         case SNX_PICA_RESTART_PRIMITIVE:
@@ -254,14 +252,13 @@ static SnxCtrPicaResult end_vertices(SnxCtrPica* p, SnxCtrMemory* memory, const 
 
 SnxCtrPicaResult snx_ctr_pica_write(SnxCtrPica* p, SnxCtrMemory* memory, uint32_t id, uint32_t value, uint32_t mask,
                                     const SnxCtrPicaHost* host, bool* stop) {
-    uint32_t m;
     if (id >= SNX_CTR_PICA_REGS) return SNX_CTR_PICA_OK; /* writes past the register file do nothing */
     /* the immediate vertices given are drawn with the state they were given in */
     if (p->immediate_given && (id < SNX_PICA_DEFAULT_ATTR_VALUE || id > SNX_PICA_DEFAULT_ATTR_VALUE + 2)) {
         SnxCtrPicaResult r = end_vertices(p, memory, host);
         if (r != SNX_CTR_PICA_OK) return r;
     }
-    m = byte_mask[mask & 15];
+    uint32_t m = byte_mask[mask & 15];
     p->regs[id] = (p->regs[id] & ~m) | (value & m);
     /* the handlers take the unmasked value, as WriteInternalReg passes it */
     return special(p, memory, id, value, host, stop);
@@ -270,7 +267,6 @@ SnxCtrPicaResult snx_ctr_pica_write(SnxCtrPica* p, SnxCtrMemory* memory, uint32_
 SnxCtrPicaResult snx_ctr_pica_run(SnxCtrPica* p, SnxCtrMemory* memory, uint32_t address, uint32_t size,
                                   const SnxCtrPicaHost* host) {
     bool stop = false;
-    SnxCtrPicaResult r;
     /* GPU::SubmitCmdList: a list outside memory raises P3D and is not run */
     if (size > LIST_LIMIT) return SNX_CTR_PICA_UNSUPPORTED;
     free(p->list);
@@ -284,16 +280,15 @@ SnxCtrPicaResult snx_ctr_pica_run(SnxCtrPica* p, SnxCtrMemory* memory, uint32_t 
     p->list_words = size / 4;
     p->list_index = 0;
     while (p->list_index < p->list_words && !stop) {
-        uint32_t value, header, id, mask, count, group, i;
         if (p->list_index % 2) ++p->list_index; /* commands are 8-byte aligned */
         if (p->list_index + 1 >= p->list_words) break;
-        value = p->list[p->list_index++];
-        header = p->list[p->list_index++];
-        id = header & 0xffff;
-        mask = (header >> 16) & 15;
-        count = (header >> 20) & 0xff;
-        group = header >> 31;
-        r = snx_ctr_pica_write(p, memory, id, value, mask, host, &stop);
+        uint32_t value = p->list[p->list_index++];
+        uint32_t header = p->list[p->list_index++];
+        uint32_t id = header & 0xffff;
+        uint32_t mask = (header >> 16) & 15;
+        uint32_t count = (header >> 20) & 0xff;
+        uint32_t group = header >> 31;
+        SnxCtrPicaResult r = snx_ctr_pica_write(p, memory, id, value, mask, host, &stop);
         if (r != SNX_CTR_PICA_OK) {
             p->stop_register = id;
             return r;
@@ -301,7 +296,7 @@ SnxCtrPicaResult snx_ctr_pica_run(SnxCtrPica* p, SnxCtrMemory* memory, uint32_t 
         /* a jump started a new list: its words follow, not this command's extra data */
         if (p->list_index == 0) continue;
         if (count > p->list_words - p->list_index) count = p->list_words - p->list_index;
-        for (i = 0; i < count && !stop; ++i) {
+        for (uint32_t i = 0; i < count && !stop; ++i) {
             uint32_t extra = p->list[p->list_index++], at = id + (group ? i + 1 : 0);
             r = snx_ctr_pica_write(p, memory, at, extra, mask, host, &stop);
             if (r != SNX_CTR_PICA_OK) {

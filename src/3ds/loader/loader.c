@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
    Copyright 2026 the ScarletNX contributors */
 #include "3ds/loader/internal.h"
-#include <ctype.h>
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -122,7 +121,7 @@ bool ctr_name(const char* name) {
     char base[8] = {0};
     size_t n = strcspn(name, ".");
     if (n <= 7) {
-        for (size_t i = 0; i < n; ++i) base[i] = (char)toupper((unsigned char)name[i]);
+        for (size_t i = 0; i < n; ++i) base[i] = (char)snx_to_upper(name[i]);
         if (!strcmp(base, "CON") || !strcmp(base, "PRN") || !strcmp(base, "AUX") || !strcmp(base, "NUL") ||
             !strcmp(base, "CONIN$") || !strcmp(base, "CONOUT$") || !strcmp(base, "CLOCK$"))
             return false;
@@ -165,7 +164,7 @@ static bool container(CtrReader* r, CtrSource* s) {
     }
     if (!memcmp(h + 0x100, "NCSD", 4)) return ctr_ncsd_load(r, s);
     if (!memcmp(h + 0x100, "NCCH", 4)) return ctr_ncch_load(r, s);
-    if (have >= 0x2020 && ctr_le32(h) == 0x2020) return ctr_cia_load(r, s);
+    if (have >= 0x2020 && snx_ld_le32(h) == 0x2020) return ctr_cia_load(r, s);
     return ctr_fail(r, SNX_CTR_EXTRACT_FORMAT,
                     "the game is not a CIA, a cartridge image (a CCI or a .3ds) or an NCCH");
 }

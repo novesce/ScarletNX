@@ -9,6 +9,7 @@
    shader interlock or barycentrics, a [0, 1] depth range, and no custom border colours (emulated in the shader).
    The GLSL Azahar generates is written here directly as SPIR-V (common/utilities/spirv_emit.h). */
 #include "3ds/gpu/vk/fsgen.h"
+#include "3ds/gpu/pica_internal.h"
 #include "common/utilities/spirv_emit.h"
 #include <stddef.h>
 #include <string.h>
@@ -74,9 +75,8 @@ _Static_assert(offsetof(SnxCtrFsUniforms, tex_border_color) == 1264, "fs_data la
 _Static_assert(offsetof(SnxCtrFsUniforms, blend_color) == 1312, "fs_data layout");
 _Static_assert(sizeof(SnxCtrFsUniforms) == 0x530, "FSUniformData is 0x530 bytes");
 
-static uint32_t bits(uint32_t v, unsigned at, unsigned count) { return (v >> at) & ((1u << count) - 1); }
 static int32_t sbits(uint32_t v, unsigned at, unsigned count) {
-    uint32_t u = bits(v, at, count), sign = 1u << (count - 1);
+    uint32_t u = snx_bits(v, at, count), sign = 1u << (count - 1);
     return (int32_t)(u ^ sign) - (int32_t)sign;
 }
 
@@ -86,21 +86,21 @@ void snx_ctr_fs_config(const SnxCtrPica* p, SnxCtrFsConfig* c) {
     const uint32_t* r = p->regs;
     memset(c, 0, sizeof(*c));
     /* FramebufferConfig */
-    c->scissor_mode = (uint8_t)bits(r[SCISSOR_MODE], 0, 2);
-    c->depthmap_enable = (uint8_t)bits(r[DEPTHMAP_ENABLE], 0, 1);
-    c->shadow_rendering = bits(r[OM_MODE], 0, 2) == 3;
-    c->alpha_test_func = bits(r[OM_ALPHA_TEST], 0, 1) ? (uint8_t)bits(r[OM_ALPHA_TEST], 4, 3) : 1;
+    c->scissor_mode = (uint8_t)snx_bits(r[SCISSOR_MODE], 0, 2);
+    c->depthmap_enable = (uint8_t)snx_bits(r[DEPTHMAP_ENABLE], 0, 1);
+    c->shadow_rendering = snx_bits(r[OM_MODE], 0, 2) == 3;
+    c->alpha_test_func = snx_bits(r[OM_ALPHA_TEST], 0, 1) ? (uint8_t)snx_bits(r[OM_ALPHA_TEST], 4, 3) : 1;
     /* TextureConfig */
-    c->texture0_type = (uint8_t)bits(r[tex_config[0] + 2], 28, 3);
-    c->texture2_use_coord1 = (uint8_t)bits(r[TEX_MAIN], 13, 1);
-    c->combiner_buffer_input = (uint8_t)bits(r[FOG_MODE], 8, 8);
-    c->fog_mode = (uint8_t)bits(r[FOG_MODE], 0, 3);
-    c->fog_flip = (uint8_t)bits(r[FOG_MODE], 16, 1);
-    c->shadow_texture_orthographic = (uint8_t)bits(r[TEX_SHADOW], 0, 1);
+    c->texture0_type = (uint8_t)snx_bits(r[tex_config[0] + 2], 28, 3);
+    c->texture2_use_coord1 = (uint8_t)snx_bits(r[TEX_MAIN], 13, 1);
+    c->combiner_buffer_input = (uint8_t)snx_bits(r[FOG_MODE], 8, 8);
+    c->fog_mode = (uint8_t)snx_bits(r[FOG_MODE], 0, 3);
+    c->fog_flip = (uint8_t)snx_bits(r[FOG_MODE], 16, 1);
+    c->shadow_texture_orthographic = (uint8_t)snx_bits(r[TEX_SHADOW], 0, 1);
     for (unsigned i = 0; i < 3; ++i) { /* ApplyProfile without custom border colours */
         uint32_t params = r[tex_config[i] + 2];
-        c->border_s[i] = bits(params, 12, 3) == 1;
-        c->border_t[i] = bits(params, 8, 3) == 1;
+        c->border_s[i] = snx_bits(params, 12, 3) == 1;
+        c->border_t[i] = snx_bits(params, 8, 3) == 1;
     }
     for (unsigned i = 0; i < 6; ++i) {
         const uint32_t* s = &r[tev_stage[i]];
@@ -108,73 +108,73 @@ void snx_ctr_fs_config(const SnxCtrPica* p, SnxCtrFsConfig* c) {
         c->tev_modifiers[i] = s[1];
         c->tev_ops[i] = s[2];
         c->tev_scales[i] = s[4];
-        if (bits(s[2], 0, 4) == 7) { /* Dot3_RGBA: the alpha part is the colour result */
+        if (snx_bits(s[2], 0, 4) == 7) { /* Dot3_RGBA: the alpha part is the colour result */
             c->tev_sources[i] &= 0xfff;
             c->tev_modifiers[i] &= 0xfff;
             c->tev_ops[i] &= 0xf;
         }
     }
     /* LightConfig */
-    if (!bits(r[LIGHTING_DISABLE], 0, 1)) {
+    if (!snx_bits(r[LIGHTING_DISABLE], 0, 1)) {
         uint32_t c0 = r[CONFIG0], c1 = r[CONFIG1];
-        unsigned max = bits(r[MAX_LIGHT], 0, 3);
+        unsigned max = snx_bits(r[MAX_LIGHT], 0, 3);
         c->lighting.enable = 1;
         c->lighting.src_num = (uint8_t)(max + 1);
-        c->lighting.config = (uint8_t)bits(c0, 4, 4);
-        c->lighting.enable_primary_alpha = (uint8_t)bits(c0, 2, 1);
-        c->lighting.enable_secondary_alpha = (uint8_t)bits(c0, 3, 1);
-        c->lighting.bump_mode = (uint8_t)bits(c0, 28, 2);
-        c->lighting.bump_selector = (uint8_t)bits(c0, 22, 2);
-        c->lighting.bump_renorm = !bits(c0, 30, 1);
-        c->lighting.clamp_highlights = (uint8_t)bits(c0, 27, 1);
-        c->lighting.enable_shadow = (uint8_t)bits(c0, 0, 1);
+        c->lighting.config = (uint8_t)snx_bits(c0, 4, 4);
+        c->lighting.enable_primary_alpha = (uint8_t)snx_bits(c0, 2, 1);
+        c->lighting.enable_secondary_alpha = (uint8_t)snx_bits(c0, 3, 1);
+        c->lighting.bump_mode = (uint8_t)snx_bits(c0, 28, 2);
+        c->lighting.bump_selector = (uint8_t)snx_bits(c0, 22, 2);
+        c->lighting.bump_renorm = !snx_bits(c0, 30, 1);
+        c->lighting.clamp_highlights = (uint8_t)snx_bits(c0, 27, 1);
+        c->lighting.enable_shadow = (uint8_t)snx_bits(c0, 0, 1);
         if (c->lighting.enable_shadow) {
-            c->lighting.shadow_primary = (uint8_t)bits(c0, 16, 1);
-            c->lighting.shadow_secondary = (uint8_t)bits(c0, 17, 1);
-            c->lighting.shadow_invert = (uint8_t)bits(c0, 18, 1);
-            c->lighting.shadow_alpha = (uint8_t)bits(c0, 19, 1);
-            c->lighting.shadow_selector = (uint8_t)bits(c0, 24, 2);
+            c->lighting.shadow_primary = (uint8_t)snx_bits(c0, 16, 1);
+            c->lighting.shadow_secondary = (uint8_t)snx_bits(c0, 17, 1);
+            c->lighting.shadow_invert = (uint8_t)snx_bits(c0, 18, 1);
+            c->lighting.shadow_alpha = (uint8_t)snx_bits(c0, 19, 1);
+            c->lighting.shadow_selector = (uint8_t)snx_bits(c0, 24, 2);
         }
         for (unsigned i = 0; i <= max; ++i) {
-            unsigned num = bits(r[LIGHT_ENABLE], i * 4, 3);
+            unsigned num = snx_bits(r[LIGHT_ENABLE], i * 4, 3);
             uint32_t config = r[LIGHT + num * 16 + 9];
             c->lighting.lights[i].num = (uint8_t)num;
-            c->lighting.lights[i].directional = (uint8_t)bits(config, 0, 1);
-            c->lighting.lights[i].two_sided_diffuse = (uint8_t)bits(config, 1, 1);
-            c->lighting.lights[i].geometric_factor_0 = (uint8_t)bits(config, 2, 1);
-            c->lighting.lights[i].geometric_factor_1 = (uint8_t)bits(config, 3, 1);
-            c->lighting.lights[i].dist_atten = !bits(c1, 24 + num, 1);
-            c->lighting.lights[i].spot_atten = !bits(c1, 8 + num, 1);
-            c->lighting.lights[i].shadow = !bits(c1, num, 1);
+            c->lighting.lights[i].directional = (uint8_t)snx_bits(config, 0, 1);
+            c->lighting.lights[i].two_sided_diffuse = (uint8_t)snx_bits(config, 1, 1);
+            c->lighting.lights[i].geometric_factor_0 = (uint8_t)snx_bits(config, 2, 1);
+            c->lighting.lights[i].geometric_factor_1 = (uint8_t)snx_bits(config, 3, 1);
+            c->lighting.lights[i].dist_atten = !snx_bits(c1, 24 + num, 1);
+            c->lighting.lights[i].spot_atten = !snx_bits(c1, 8 + num, 1);
+            c->lighting.lights[i].shadow = !snx_bits(c1, num, 1);
         }
         /* the disable bits in config1 per LUT; sp has none (Azahar's dummy enable) */
         static const int disable_bit[7] = {16, 17, -1, 19, 22, 21, 20};
         for (unsigned l = 0; l < 7; ++l) {
-            if (disable_bit[l] >= 0 && bits(c1, (unsigned)disable_bit[l], 1)) continue;
+            if (disable_bit[l] >= 0 && snx_bits(c1, (unsigned)disable_bit[l], 1)) continue;
             c->lighting.lut[l].enable = 1;
-            c->lighting.lut[l].abs_input = !bits(r[ABS_INPUT], 1 + l * 4, 1);
-            c->lighting.lut[l].type = (uint8_t)bits(r[LUT_INPUT], l * 4, 3);
-            c->lighting.lut[l].scale = (uint8_t)bits(r[LUT_SCALE], l * 4, 3);
+            c->lighting.lut[l].abs_input = !snx_bits(r[ABS_INPUT], 1 + l * 4, 1);
+            c->lighting.lut[l].type = (uint8_t)snx_bits(r[LUT_INPUT], l * 4, 3);
+            c->lighting.lut[l].scale = (uint8_t)snx_bits(r[LUT_SCALE], l * 4, 3);
         }
     }
     /* ProcTexConfig */
-    if (bits(r[TEX_MAIN], 10, 1)) {
+    if (snx_bits(r[TEX_MAIN], 10, 1)) {
         uint32_t pt = r[PROCTEX], lut = r[PROCTEX_LUT], offset = r[PROCTEX_LUT_OFFSET];
         c->proctex.enable = 1;
-        c->proctex.coord = (uint8_t)bits(r[TEX_MAIN], 8, 2);
-        c->proctex.u_clamp = (uint8_t)bits(pt, 0, 3);
-        c->proctex.v_clamp = (uint8_t)bits(pt, 3, 3);
-        c->proctex.color_combiner = (uint8_t)bits(pt, 6, 4);
-        c->proctex.alpha_combiner = (uint8_t)bits(pt, 10, 4);
-        c->proctex.separate_alpha = (uint8_t)bits(pt, 14, 1);
-        c->proctex.noise_enable = (uint8_t)bits(pt, 15, 1);
-        c->proctex.u_shift = (uint8_t)bits(pt, 16, 2);
-        c->proctex.v_shift = (uint8_t)bits(pt, 18, 2);
-        c->proctex.lut_filter = (uint8_t)bits(lut, 0, 3);
-        c->proctex.lod_min = (uint8_t)bits(lut, 3, 4);
-        c->proctex.lod_max = (uint8_t)bits(lut, 7, 4);
-        c->proctex.lut_width = (uint8_t)bits(lut, 11, 8);
-        for (unsigned i = 0; i < 4; ++i) c->proctex.lut_offset[i] = (uint8_t)bits(offset, i * 8, 8);
+        c->proctex.coord = (uint8_t)snx_bits(r[TEX_MAIN], 8, 2);
+        c->proctex.u_clamp = (uint8_t)snx_bits(pt, 0, 3);
+        c->proctex.v_clamp = (uint8_t)snx_bits(pt, 3, 3);
+        c->proctex.color_combiner = (uint8_t)snx_bits(pt, 6, 4);
+        c->proctex.alpha_combiner = (uint8_t)snx_bits(pt, 10, 4);
+        c->proctex.separate_alpha = (uint8_t)snx_bits(pt, 14, 1);
+        c->proctex.noise_enable = (uint8_t)snx_bits(pt, 15, 1);
+        c->proctex.u_shift = (uint8_t)snx_bits(pt, 16, 2);
+        c->proctex.v_shift = (uint8_t)snx_bits(pt, 18, 2);
+        c->proctex.lut_filter = (uint8_t)snx_bits(lut, 0, 3);
+        c->proctex.lod_min = (uint8_t)snx_bits(lut, 3, 4);
+        c->proctex.lod_max = (uint8_t)snx_bits(lut, 7, 4);
+        c->proctex.lut_width = (uint8_t)snx_bits(lut, 11, 8);
+        for (unsigned i = 0; i < 4; ++i) c->proctex.lut_offset[i] = (uint8_t)snx_bits(offset, i * 8, 8);
     }
 }
 
@@ -254,7 +254,7 @@ typedef struct {
     uint32_t combiner_buffer, next_combiner_buffer, combiner_output;
 } Gen;
 
-static unsigned tev_field(uint32_t raw, unsigned at, unsigned count) { return bits(raw, at, count); }
+static unsigned tev_field(uint32_t raw, unsigned at, unsigned count) { return snx_bits(raw, at, count); }
 static unsigned multiplier(unsigned scale) { return scale < 3 ? 1u << scale : 1u; }
 
 /* LightingRegs::LightingScale */
@@ -1353,9 +1353,8 @@ static void declare(Gen* g) {
 
 /* FragmentModule::Generate */
 void snx_ctr_fs_spirv(const SnxCtrFsConfig* c, bool preserve_infnan, uint32_t** words, size_t* count) {
-    Gen gen, *g = &gen;
+    Gen gen = {0}, *g = &gen;
     SpvEmitter* s = &g->s;
-    memset(g, 0, sizeof *g);
     g->c = c;
     spv_emit_init(s, 0);
     s->version = 0x00010300; /* SPIR-V 1.3 */
@@ -1412,13 +1411,13 @@ static float f16(uint32_t raw) { return pica_float(raw & 0xffff, 10, 5); }
 static float f20(uint32_t raw) { return pica_float(raw & 0xfffff, 12, 7); }
 
 static void rgba8(uint32_t c, float out[4]) {
-    for (unsigned i = 0; i < 4; ++i) out[i] = (float)bits(c, i * 8, 8) / 255.0f;
+    for (unsigned i = 0; i < 4; ++i) out[i] = (float)snx_bits(c, i * 8, 8) / 255.0f;
 }
 /* LightColor: 10-bit components, b g r from bit 0 */
 static void light_color(uint32_t c, float out[3]) {
-    out[0] = (float)bits(c, 20, 10) / 255.0f;
-    out[1] = (float)bits(c, 10, 10) / 255.0f;
-    out[2] = (float)bits(c, 0, 10) / 255.0f;
+    out[0] = (float)snx_bits(c, 20, 10) / 255.0f;
+    out[1] = (float)snx_bits(c, 10, 10) / 255.0f;
+    out[2] = (float)snx_bits(c, 0, 10) / 255.0f;
 }
 
 void snx_ctr_fs_uniforms(const SnxCtrPica* p, SnxCtrFsUniforms* u) {
@@ -1427,13 +1426,13 @@ void snx_ctr_fs_uniforms(const SnxCtrPica* p, SnxCtrFsUniforms* u) {
     u->framebuffer_scale = 1;
     u->depth_scale = snx_ctr_f24(r[DEPTH_RANGE] & 0xffffff);
     u->depth_offset = snx_ctr_f24(r[DEPTH_NEAR] & 0xffffff);
-    u->alphatest_ref = (int32_t)bits(r[OM_ALPHA_TEST], 8, 8);
+    u->alphatest_ref = (int32_t)snx_bits(r[OM_ALPHA_TEST], 8, 8);
     rgba8(r[OM_BLEND_CONST], u->blend_color);
     /* FramebufferHelper's scissor before the resolution scale, the target's offset and the flip */
-    u->scissor_x1 = (int32_t)bits(r[SCISSOR_1], 0, 10);
-    u->scissor_y1 = (int32_t)bits(r[SCISSOR_1], 16, 10);
-    u->scissor_x2 = (int32_t)bits(r[SCISSOR_2], 0, 10) + 1;
-    u->scissor_y2 = (int32_t)bits(r[SCISSOR_2], 16, 10) + 1;
+    u->scissor_x1 = (int32_t)snx_bits(r[SCISSOR_1], 0, 10);
+    u->scissor_y1 = (int32_t)snx_bits(r[SCISSOR_1], 16, 10);
+    u->scissor_x2 = (int32_t)snx_bits(r[SCISSOR_2], 0, 10) + 1;
+    u->scissor_y2 = (int32_t)snx_bits(r[SCISSOR_2], 16, 10) + 1;
     for (unsigned i = 0; i < 3; ++i) {
         u->tex_lod_bias[i] = (float)sbits(r[tex_config[i] + 3], 0, 13) / 256.0f;
         rgba8(r[tex_config[i]], u->tex_border_color[i]);
@@ -1457,17 +1456,17 @@ void snx_ctr_fs_uniforms(const SnxCtrPica* p, SnxCtrFsUniforms* u) {
         s->dist_atten_bias = f20(l[10]);
         s->dist_atten_scale = f20(l[11]);
     }
-    for (unsigned k = 0; k < 3; ++k) u->fog_color[k] = (float)bits(r[FOG_COLOR], k * 8, 8) / 255.0f;
+    for (unsigned k = 0; k < 3; ++k) u->fog_color[k] = (float)snx_bits(r[FOG_COLOR], k * 8, 8) / 255.0f;
     u->proctex_noise_f[0] = f16(r[PROCTEX_NOISE_FREQUENCY]);
     u->proctex_noise_f[1] = f16(r[PROCTEX_NOISE_FREQUENCY] >> 16);
     u->proctex_noise_a[0] = (float)sbits(r[PROCTEX_NOISE_U], 0, 16) / 4095.0f;
     u->proctex_noise_a[1] = (float)sbits(r[PROCTEX_NOISE_V], 0, 16) / 4095.0f;
     u->proctex_noise_p[0] = f16(r[PROCTEX_NOISE_U] >> 16);
     u->proctex_noise_p[1] = f16(r[PROCTEX_NOISE_V] >> 16);
-    u->proctex_bias = f16(bits(r[PROCTEX], 20, 8) | bits(r[PROCTEX_LUT], 19, 8) << 8);
+    u->proctex_bias = f16(snx_bits(r[PROCTEX], 20, 8) | snx_bits(r[PROCTEX_LUT], 19, 8) << 8);
     u->shadow_bias_constant = f16(r[FB_SHADOW]);
     u->shadow_bias_linear = f16(r[FB_SHADOW] >> 16);
-    u->shadow_texture_bias = (int32_t)(bits(r[TEX_SHADOW], 1, 23) << 1);
+    u->shadow_texture_bias = (int32_t)(snx_bits(r[TEX_SHADOW], 1, 23) << 1);
     /* where snx_ctr_fs_luts puts the tables */
     for (unsigned i = 0; i < 24; ++i) u->lighting_lut_offset[i / 4][i % 4] = (int32_t)(i * 256);
     u->fog_lut_offset = LF_FOG;
@@ -1485,14 +1484,14 @@ void snx_ctr_fs_luts(const SnxCtrPica* p, float (*lf)[2], float (*rg)[2], float 
     for (unsigned t = 0; t < 24; ++t)
         for (unsigned i = 0; i < 256; ++i) {
             uint32_t e = p->lighting_lut[t][i];
-            float diff = (float)bits(e, 12, 11) / 2047.0f;
-            lf[t * 256 + i][0] = (float)bits(e, 0, 12) / 4095.0f;
-            lf[t * 256 + i][1] = bits(e, 23, 1) ? -diff : diff;
+            float diff = (float)snx_bits(e, 12, 11) / 2047.0f;
+            lf[t * 256 + i][0] = (float)snx_bits(e, 0, 12) / 4095.0f;
+            lf[t * 256 + i][1] = snx_bits(e, 23, 1) ? -diff : diff;
         }
     /* fog: a 0.0.11 value at bit 13, a 1.1.11 difference below it */
     for (unsigned i = 0; i < 128; ++i) {
         uint32_t e = p->fog_lut[i];
-        lf[LF_FOG + i][0] = (float)bits(e, 13, 11) / 2047.0f;
+        lf[LF_FOG + i][0] = (float)snx_bits(e, 13, 11) / 2047.0f;
         lf[LF_FOG + i][1] = (float)sbits(e, 0, 13) / 2047.0f;
     }
     /* procedural value LUTs: a 0.0.12 value, a signed 0.0.12 difference */
@@ -1500,13 +1499,13 @@ void snx_ctr_fs_luts(const SnxCtrPica* p, float (*lf)[2], float (*rg)[2], float 
     for (unsigned t = 0; t < 3; ++t)
         for (unsigned i = 0; i < 128; ++i) {
             uint32_t e = values[t][i];
-            rg[t * 128 + i][0] = (float)bits(e, 0, 12) / 4095.0f;
+            rg[t * 128 + i][0] = (float)snx_bits(e, 0, 12) / 4095.0f;
             rg[t * 128 + i][1] = (float)sbits(e, 12, 12) / 4095.0f;
         }
     /* procedural colours, r g b a from bit 0, and their differences, halved signed bytes */
     for (unsigned i = 0; i < 256; ++i)
         for (unsigned k = 0; k < 4; ++k) {
-            rgba[RGBA_COLOR + i][k] = (float)bits(p->proctex_color[i], k * 8, 8) / 255.0f;
+            rgba[RGBA_COLOR + i][k] = (float)snx_bits(p->proctex_color[i], k * 8, 8) / 255.0f;
             rgba[RGBA_DIFF + i][k] = (float)(sbits(p->proctex_color_diff[i], k * 8, 8) * 2) / 255.0f;
         }
 }

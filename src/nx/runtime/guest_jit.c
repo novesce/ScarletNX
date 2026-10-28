@@ -206,8 +206,14 @@ void jit_init(void) {
         WARN("jit: the AOT module has no runtime code variants; the JIT handles the misses and writes a cache\n");
     }
     memset(&config, 0, sizeof(config));
+#if defined(__ANDROID__) || defined(SNX_IOS)
+    /* a phone compiles at O0: any other level breaks the JIT there, so settings.txt has no setting for it, and the ini
+       has no key */
+    opt = '0';
+#else
     opt = g_settings.jit_optimization[0];
     if (!opt || !strchr("0123sz", opt)) opt = '0'; /* an empty or hand-edited .ini */
+#endif
     config.opt = opt;
     config.images = g_jit_images;
     config.image_count = g_mod->nmods;

@@ -1,13 +1,14 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
    Copyright 2026 the ScarletNX contributors */
 #include "common/cpu/recompiler/llvm/link.h"
+#include "common/utilities/endian.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 int snx_link(const SnxLinkInput* inputs, size_t count, const char* const* exports, size_t export_count,
              const char* soname, SnxLinkOutput* output, char* error, size_t error_size) {
-    memset(output, 0, sizeof(*output));
+    *output = (SnxLinkOutput){0};
     if (!count) {
         snprintf(error, error_size, "nothing to link");
         return -1;
@@ -25,9 +26,8 @@ int snx_link(const SnxLinkInput* inputs, size_t count, const char* const* export
 void snx_link_reserve(SnxLinkBuffer* buffer, size_t size) {
     if (size > buffer->capacity) {
         size_t capacity = buffer->capacity ? buffer->capacity : 4096;
-        unsigned char* data;
         while (capacity < size) capacity *= 2;
-        data = (unsigned char*)realloc(buffer->data, capacity);
+        unsigned char* data = (unsigned char*)realloc(buffer->data, capacity);
         if (!data) {
             fputs("out of memory\n", stderr);
             abort();
@@ -57,9 +57,8 @@ static size_t name_hash(const char* key) {
 }
 
 int snx_link_find(const SnxLinkNames* names, const char* key, size_t* value) {
-    size_t i;
     if (!names->capacity) return 0;
-    for (i = name_hash(key) & (names->capacity - 1); names->keys[i]; i = (i + 1) & (names->capacity - 1))
+    for (size_t i = name_hash(key) & (names->capacity - 1); names->keys[i]; i = (i + 1) & (names->capacity - 1))
         if (!strcmp(names->keys[i], key)) {
             *value = names->values[i];
             return 1;
@@ -68,7 +67,6 @@ int snx_link_find(const SnxLinkNames* names, const char* key, size_t* value) {
 }
 
 void snx_link_insert(SnxLinkNames* names, const char* key, size_t value) {
-    size_t i;
     if ((names->count + 1) * 2 > names->capacity) {
         SnxLinkNames grown;
         grown.capacity = names->capacity ? names->capacity * 2 : 1024;
@@ -79,7 +77,7 @@ void snx_link_insert(SnxLinkNames* names, const char* key, size_t value) {
             abort();
         }
         grown.values = (size_t*)(grown.keys + grown.capacity);
-        for (i = 0; i < names->capacity; ++i)
+        for (size_t i = 0; i < names->capacity; ++i)
             if (names->keys[i]) {
                 size_t j = name_hash(names->keys[i]) & (grown.capacity - 1);
                 while (grown.keys[j]) j = (j + 1) & (grown.capacity - 1);
@@ -90,6 +88,7 @@ void snx_link_insert(SnxLinkNames* names, const char* key, size_t value) {
         free(names->keys);
         *names = grown;
     }
+    size_t i;
     for (i = name_hash(key) & (names->capacity - 1); names->keys[i]; i = (i + 1) & (names->capacity - 1))
         if (!strcmp(names->keys[i], key)) {
             names->values[i] = value;
@@ -103,28 +102,19 @@ void snx_link_insert(SnxLinkNames* names, const char* key, size_t value) {
 }
 
 void snx_link_names_free(SnxLinkNames* names) {
-    size_t i;
-    for (i = 0; i < names->capacity; ++i) free(names->keys[i]);
+    for (size_t i = 0; i < names->capacity; ++i) free(names->keys[i]);
     free(names->keys);
-    memset(names, 0, sizeof(*names));
+    *names = (SnxLinkNames){0};
 }
 
-void snx_link_put32(unsigned char* p, uint32_t value) {
-    p[0] = (unsigned char)value;
-    p[1] = (unsigned char)(value >> 8);
-    p[2] = (unsigned char)(value >> 16);
-    p[3] = (unsigned char)(value >> 24);
-}
+void snx_link_put32(unsigned char* p, uint32_t value) { snx_st_le32(p, value); }
 
-void snx_link_put64(unsigned char* p, uint64_t value) {
-    snx_link_put32(p, (uint32_t)value);
-    snx_link_put32(p + 4, (uint32_t)(value >> 32));
-}
+void snx_link_put64(unsigned char* p, uint64_t value) { snx_st_le64(p, value); }
 
 int snx_link_rel32(unsigned char* p, uint64_t target, uint64_t place) {
     /* in unsigned arithmetic, then read as signed: the difference wraps where a signed one would overflow */
     uint64_t difference = target - place;
     if (difference + 0x80000000u > 0xFFFFFFFFu) return SNX_LINK_RANGE;
-    snx_link_put32(p, (uint32_t)difference);
+    snx_st_le32(p, (uint32_t)difference);
     return 0;
 }

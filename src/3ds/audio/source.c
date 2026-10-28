@@ -7,8 +7,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-static int16_t clamp16(int64_t value) { return (int16_t)(value < -32768 ? -32768 : value > 32767 ? 32767 : value); }
-
 /* ---- Codec ---- */
 
 /* GC-ADPCM with a scale factor and variable coefficients: 8-byte frames of 14 four-bit samples. The result is
@@ -230,8 +228,8 @@ void dsp_source_reset(DspSource* source) {
 void dsp_source_free(DspSource* source) {
     state_free(&source->state);
     state_free(&source->backup);
-    memset(&source->state, 0, sizeof source->state);
-    memset(&source->backup, 0, sizeof source->backup);
+    source->state = (DspSourceState){0};
+    source->backup = (DspSourceState){0};
 }
 void dsp_source_sleep(DspSource* source) {
     state_free(&source->backup);

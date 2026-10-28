@@ -3,6 +3,7 @@
 #include "agb/cpu/recomp.h"
 #include "agb/board/board.h"
 #include "common/utilities/common.h"
+#include "common/utilities/bits.h"
 #include "common/cpu/arm/llvm.h"
 #include "common/cpu/arm/exec.h"
 #include "common/cpu/recompiler/llvm/ir.h"
@@ -26,7 +27,7 @@ static const SnxArmCodegenOptions agb_codegen = {SNX_ARM_CODEGEN_OPTIONS_ABI, SN
                                                  SNX_ARM_MEMORY_FLAT};
 
 void agb_recomp_init(AgbRecomp* recomp, const char* base) {
-    memset(recomp, 0, sizeof(*recomp));
+    *recomp = (AgbRecomp){0};
     recomp->base = (char*)malloc(strlen(base) + 1);
     if (recomp->base) strcpy(recomp->base, base);
 }
@@ -44,21 +45,15 @@ void agb_recomp_free(AgbRecomp* recomp) {
     if (recomp->handle) close_module(recomp->handle);
     free(recomp->blocks);
     free(recomp->base);
-    memset(recomp, 0, sizeof(*recomp));
+    *recomp = (AgbRecomp){0};
 }
 
 static char* block_name(size_t index) { return snx_format("snx_agb_%zu", index); }
 
-/* FNV-1a over size bytes, from hash on: what tells one ROM, or one block's code, from another */
-static uint64_t fnv(uint64_t hash, const void* bytes, size_t size) {
-    const uint8_t* p = (const uint8_t*)bytes;
-    for (size_t i = 0; i < size; ++i) hash = (hash ^ p[i]) * 0x100000001B3u;
-    return hash;
-}
-#define AGB_FNV_BASIS 0xCBF29CE484222325u
-
+/* FNV-1a (snx_fnv1a) tells one ROM, or one block's code, from another */
 static uint64_t rom_hash(const AgbBoard* board) {
-    return board->has_cartridge ? fnv(AGB_FNV_BASIS, board->cartridge.data, board->cartridge.size) : AGB_FNV_BASIS;
+    return board->has_cartridge ? snx_fnv1a(SNX_FNV_BASIS, board->cartridge.data, board->cartridge.size)
+                                : SNX_FNV_BASIS;
 }
 
 /* The BIOS and the cartridge windows hold the same code for the whole run; the game writes over the rest */
@@ -72,11 +67,11 @@ static uint64_t code_hash(AgbBoard* board, uint32_t pc, int thumb, size_t count)
     if (thumb) {
         uint16_t words[AGB_BLOCK_MAX];
         for (size_t j = 0; j < count; ++j) words[j] = agb_read16(board, pc + (uint32_t)j * 2);
-        return fnv(AGB_FNV_BASIS, words, count * sizeof(*words));
+        return snx_fnv1a(SNX_FNV_BASIS, words, count * sizeof(*words));
     } else {
         uint32_t words[AGB_BLOCK_MAX];
         for (size_t j = 0; j < count; ++j) words[j] = agb_read32(board, pc + (uint32_t)j * 4);
-        return fnv(AGB_FNV_BASIS, words, count * sizeof(*words));
+        return snx_fnv1a(SNX_FNV_BASIS, words, count * sizeof(*words));
     }
 }
 
@@ -119,11 +114,9 @@ static void index_build(AgbRecomp* recomp) {
 }
 
 static AgbBlock* find(AgbRecomp* recomp, uint32_t pc, int thumb) {
-    const uint32_t* slot;
-    size_t at;
     if (!recomp->capacity) return NULL;
-    slot = slots(recomp);
-    for (at = slot_of(recomp, pc, thumb); slot[at]; at = (at + 1) & (recomp->capacity * 2 - 1)) {
+    const uint32_t* slot = slots(recomp);
+    for (size_t at = slot_of(recomp, pc, thumb); slot[at]; at = (at + 1) & (recomp->capacity * 2 - 1)) {
         AgbBlock* block = &recomp->blocks[slot[at]];
         if (block->pc == pc && block->thumb == (uint8_t)thumb) return block;
     }
@@ -154,7 +147,7 @@ static AgbBlock* add(AgbRecomp* recomp, uint32_t pc, int thumb) {
         index_build(recomp);
     }
     block = &recomp->blocks[++recomp->count];
-    memset(block, 0, sizeof(*block));
+    *block = (AgbBlock){0};
     block->pc = pc;
     block->thumb = (uint8_t)thumb;
     recomp->dirty = 1;
@@ -264,12 +257,6 @@ static void discover(AgbRecomp* recomp, AgbBoard* board, uint32_t pc, int thumb)
 
 /* ---- linking ---- */
 
-static const char* leaf(const char* path) {
-    const char* last = path;
-    for (const char* p = path; *p; ++p)
-        if (*p == '/' || *p == '\\') last = p + 1;
-    return last;
-}
 
 /* Emits every block into <base>.so: compiled for this machine as the backend compiles the Switch's
    32-bit modules (module_arm.c), with the helpers they call (armlib.c), and linked by the backend's own linker, which
@@ -321,7 +308,8 @@ static int emit_module(AgbRecomp* recomp, AgbBoard* board, char* error, size_t e
         goto done;
     inputs[0].data = armlib, inputs[0].size = armlib_size, inputs[0].name = "armlib";
     inputs[1].data = object, inputs[1].size = object_size, inputs[1].name = "blocks";
-    if (snx_link(inputs, 2, (const char* const*)names, count, leaf(library), &linked, error, error_size)) goto done;
+    if (snx_link(inputs, 2, (const char* const*)names, count, snx_path_leaf(library), &linked, error, error_size))
+        goto done;
     tmp = snx_format("%s.tmp", library);
     if (!tmp || snx_write_file(tmp, linked.data, linked.size) || snx_replace(tmp, library)) {
         snprintf(error, error_size, "cannot write %s", library);
@@ -438,10 +426,9 @@ static int compile_block(AgbRecomp* recomp, AgbBoard* board, AgbBlock* block, ch
 static int write_cache(AgbRecomp* recomp, const AgbBoard* board) {
     size_t length = strlen(recomp->base);
     char* map_path = (char*)malloc(length + 8);
-    FILE* file;
     if (!map_path) return -1;
     sprintf(map_path, "%s.map", recomp->base);
-    file = fopen(map_path, "w");
+    FILE* file = fopen(map_path, "w");
     free(map_path);
     if (!file) return -1;
     fprintf(file, "snx-agb-code %d %u %016llX\n", AGB_RECOMP_ABI, SNX_ARM_ABI, (unsigned long long)rom_hash(board));
@@ -462,13 +449,12 @@ int agb_recomp_load_map(AgbRecomp* recomp, AgbBoard* board, char* error, size_t 
     size_t length = strlen(recomp->base);
     char* map_path = (char*)malloc(length + 8);
     char line[128];
-    FILE* file;
     int abi = 0;
     unsigned arm_abi = 0;
-    unsigned long long rom = 0, here;
+    unsigned long long rom = 0;
     if (!map_path) return -1;
     sprintf(map_path, "%s.map", recomp->base);
-    file = fopen(map_path, "r");
+    FILE* file = fopen(map_path, "r");
     if (!file) {
         free(map_path);
         return -1;
@@ -481,7 +467,7 @@ int agb_recomp_load_map(AgbRecomp* recomp, AgbBoard* board, char* error, size_t 
         fclose(file);
         return -1;
     }
-    here = (unsigned long long)rom_hash(board);
+    unsigned long long here = (unsigned long long)rom_hash(board);
     if (sscanf(line, "snx-agb-code %*d %*u %llX", &rom) != 1 || rom != here) {
         snprintf(error, error_size, "%s is another ROM's (%016llX, this one %016llX)", map_path, rom, here);
         free(map_path);
@@ -493,10 +479,10 @@ int agb_recomp_load_map(AgbRecomp* recomp, AgbBoard* board, char* error, size_t 
         unsigned pc, thumb, instructions, symbol = 0;
         unsigned long long code;
         char name[32];
-        AgbBlock* block;
         if (sscanf(line, "%X %u %u %llX %31s", &pc, &thumb, &instructions, &code, name) != 5 || !instructions) continue;
         if (strcmp(name, "-") && sscanf(name, "snx_agb_%u", &symbol) != 1) continue;
-        if (!(block = add(recomp, pc, (int)thumb))) {
+        AgbBlock* block = add(recomp, pc, (int)thumb);
+        if (!block) {
             fclose(file);
             snprintf(error, error_size, "out of memory");
             return -1;
@@ -533,13 +519,12 @@ int agb_recomp_build(AgbRecomp* recomp, AgbBoard* board, char* error, size_t err
 const AgbBlock* agb_recomp_lookup(AgbRecomp* recomp, AgbBoard* board, uint32_t pc, int thumb, char* error,
                                   size_t error_size) {
     AgbBlock* block = find(recomp, pc, thumb);
-    size_t first;
     if (block && block->instructions && !fixed(pc) && code_hash(board, pc, thumb, block->instructions) != block->code) {
         /* the game wrote over the code the block was built from, this run or the one that cached it */
         drop(recomp, block);
         block = NULL;
     }
-    first = recomp->count + 1;
+    size_t first = recomp->count + 1;
     if (block && block->fn && block->instructions) return block;
     if (!block) {
         /* a block the discovery step did not reach, a branch through a register or the instruction after one

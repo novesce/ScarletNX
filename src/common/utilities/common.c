@@ -12,8 +12,10 @@
 #define _DARWIN_C_SOURCE
 #endif
 #include "common/utilities/common.h"
+#include "common/utilities/ascii.h"
+#include "common/utilities/bits.h"
+#include "common/utilities/endian.h"
 #include "common/utilities/ini_lines.h"
-#include <ctype.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdarg.h>
@@ -30,6 +32,7 @@
 #include <psapi.h>
 #else
 #include <dirent.h>
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/file.h> /* flock */
@@ -80,13 +83,11 @@ char* snx_strdup(const char* s) {
 }
 char* snx_format(const char* fmt, ...) {
     va_list ap;
-    int n;
-    char* p;
     va_start(ap, fmt);
-    n = vsnprintf(NULL, 0, fmt, ap);
+    int n = vsnprintf(NULL, 0, fmt, ap);
     va_end(ap);
     if (n < 0) return snx_strdup("");
-    p = (char*)snx_alloc((size_t)n + 1);
+    char* p = (char*)snx_alloc((size_t)n + 1);
     va_start(ap, fmt);
     vsnprintf(p, (size_t)n + 1, fmt, ap);
     va_end(ap);
@@ -102,9 +103,8 @@ void snx_path_native(char* path) {
 }
 int snx_path_format(char* out, size_t size, const char* fmt, ...) {
     va_list ap;
-    int n;
     va_start(ap, fmt);
-    n = vsnprintf(out, size, fmt, ap);
+    int n = vsnprintf(out, size, fmt, ap);
     va_end(ap);
     if (n < 0 || (size_t)n >= size) {
         if (n < 0)
@@ -128,8 +128,7 @@ static struct {
     volatile int abort_requested; /* snx_abort_request's, from another thread than the one that asks */
 } g_common;
 void snx_option_renamed(const char* old, const char* now) {
-    size_t i;
-    for (i = 0; i < g_common.renamed_count; ++i)
+    for (size_t i = 0; i < g_common.renamed_count; ++i)
         if (!strcmp(g_common.renamed[i], old)) return;
     if (g_common.renamed_count < sizeof g_common.renamed / sizeof *g_common.renamed)
         g_common.renamed[g_common.renamed_count++] = old;
@@ -167,18 +166,11 @@ char* snx_os_error(char* out, size_t size) {
 #endif
     return out;
 }
-static int separator(char c) {
-#ifdef _WIN32
-    return c == '/' || c == '\\';
-#else
-    return c == '/';
-#endif
-}
 char* snx_path_join(const char* a, const char* b) {
     size_t n = strlen(a), m = strlen(b);
     char* p = (char*)snx_alloc(n + m + 2);
     memcpy(p, a, n);
-    if (n && !separator(a[n - 1])) p[n++] = '/';
+    if (n && !snx_is_separator(a[n - 1])) p[n++] = '/';
     memcpy(p + n, b, m + 1);
     snx_path_native(p);
     return p;
@@ -186,13 +178,13 @@ char* snx_path_join(const char* a, const char* b) {
 char* snx_dirname(const char* path) {
     char* p = snx_strdup(path);
     size_t n = strlen(p);
-    while (n > 1 && separator(p[n - 1])) p[--n] = 0;
-    while (n && !separator(p[n - 1])) --n;
+    while (n > 1 && snx_is_separator(p[n - 1])) p[--n] = 0;
+    while (n && !snx_is_separator(p[n - 1])) --n;
     if (!n) {
         free(p);
         return snx_strdup(".");
     }
-    while (n > 1 && separator(p[n - 1])) --n;
+    while (n > 1 && snx_is_separator(p[n - 1])) --n;
 #ifdef _WIN32
     if (n == 2 && p[1] == ':') ++n;
 #endif
@@ -210,9 +202,8 @@ static wchar_t* wide(const char* s) {
 }
 static char* utf8(const wchar_t* s) {
     int n = WideCharToMultiByte(CP_UTF8, 0, s, -1, NULL, 0, NULL, NULL);
-    char* p;
     if (!n) return NULL;
-    p = (char*)snx_alloc((size_t)n);
+    char* p = (char*)snx_alloc((size_t)n);
     WideCharToMultiByte(CP_UTF8, 0, s, -1, p, n, NULL, NULL);
     return p;
 }
@@ -326,16 +317,37 @@ void snx_unlock_file(intptr_t lock) {
 }
 int snx_path_is_full(const char* path) {
 #ifdef _WIN32
-    if (isalpha((unsigned char)path[0]) && path[1] == ':' && (path[2] == '\\' || path[2] == '/')) return 1;
+    if (snx_is_alpha(path[0]) && path[1] == ':' && (path[2] == '\\' || path[2] == '/')) return 1;
     return path[0] == '\\' && path[1] == '\\';
 #else
     return path[0] == '/';
 #endif
 }
+const char* snx_path_leaf(const char* path) {
+    const char* leaf = path;
+    for (const char* p = path; *p; ++p)
+        if (snx_is_any_separator(*p)) leaf = p + 1;
+    return leaf;
+}
+char* snx_game_folder(const char* repo, const char* outdir, const char* argv0, const char* title, int make) {
+    char *exe = repo || outdir ? NULL : snx_executable(argv0), *dir = exe ? snx_dirname(exe) : NULL;
+    char* data = outdir ? NULL : repo ? snx_strdup(repo) : snx_data_dir(dir);
+    char* folder = outdir ? snx_path_join(outdir, title) : data ? snx_recompiled_game(data, title) : NULL;
+    char* resolved = folder && !(make && snx_mkdirs(folder)) ? snx_absolute(folder) : NULL;
+    free(folder);
+    free(data);
+    free(dir);
+    free(exe);
+    return resolved;
+}
+int snx_parse_seconds(const char* text, double* seconds) {
+    char* end = NULL;
+    return text && (*seconds = strtod(text, &end)) > 0 && !*end && *seconds <= 1e9;
+}
 char* snx_absolute(const char* path) {
 #ifdef _WIN32
     wchar_t *p = wide(path), *result, *final_path;
-    char *out, *parent, *resolved, *leaf, *joined;
+    char *out, *joined;
     DWORD n, error;
     HANDLE handle;
     if (!p) return NULL;
@@ -384,29 +396,29 @@ char* snx_absolute(const char* path) {
     free(result);
     if (!out) return NULL;
     n = (DWORD)strlen(out);
-    while (n > 3 && separator(out[n - 1])) out[--n] = 0;
-    parent = snx_dirname(out);
+    while (n > 3 && snx_is_separator(out[n - 1])) out[--n] = 0;
+    char* parent = snx_dirname(out);
     if (!strcmp(parent, out)) {
         free(out);
         free(parent);
         return NULL;
     }
-    resolved = snx_absolute(parent);
+    char* resolved = snx_absolute(parent);
     free(parent);
     if (!resolved) {
         free(out);
         return NULL;
     }
-    leaf = out;
+    char* leaf = out;
     for (joined = out; *joined; ++joined)
-        if (separator(*joined)) leaf = joined + 1;
+        if (snx_is_separator(*joined)) leaf = joined + 1;
     joined = snx_path_join(resolved, leaf);
     free(resolved);
     free(out);
     return joined;
 #else
-    char *cwd, *out, *resolved, *parent, *base, *result;
-    size_t n = 256, len;
+    char *cwd, *out, *parent, *result;
+    size_t n = 256;
     if (path[0] == '/')
         out = snx_strdup(path);
     else {
@@ -420,9 +432,9 @@ char* snx_absolute(const char* path) {
         out = snx_path_join(cwd, path);
         free(cwd);
     }
-    len = strlen(out);
+    size_t len = strlen(out);
     while (len > 1 && out[len - 1] == '/') out[--len] = 0;
-    resolved = realpath(out, NULL);
+    char* resolved = realpath(out, NULL);
     if (resolved) {
         free(out);
         return resolved;
@@ -445,7 +457,7 @@ char* snx_absolute(const char* path) {
         free(out);
         return NULL;
     }
-    base = strrchr(out, '/');
+    char* base = strrchr(out, '/');
     base = base ? base + 1 : out;
     if (!strcmp(base, ".") || !*base)
         result = snx_strdup(resolved);
@@ -533,22 +545,18 @@ static int mkdir_one(const char* path) {
 #endif
 }
 int snx_mkdirs(const char* path) {
-    char* parent;
-    int result;
     if (snx_is_dir(path)) return 0;
-    parent = snx_dirname(path);
+    char* parent = snx_dirname(path);
     if (!strcmp(parent, path)) {
         free(parent);
         return 1;
     }
-    result = snx_mkdirs(parent);
+    int result = snx_mkdirs(parent);
     free(parent);
     return result || mkdir_one(path);
 }
-static int compare_names(const void* a, const void* b) { return strcmp(*(char* const*)a, *(char* const*)b); }
 void snx_free_strings(char** strings, size_t count) {
-    size_t i;
-    for (i = 0; i < count; ++i) free(strings[i]);
+    for (size_t i = 0; i < count; ++i) free(strings[i]);
     free(strings);
 }
 int snx_list_dir(const char* path, char*** names, size_t* count) {
@@ -564,9 +572,8 @@ int snx_list_dir(const char* path, char*** names, size_t* count) {
     free(wp);
     if (h == INVALID_HANDLE_VALUE) return 1;
     do {
-        char* name;
         if (!wcscmp(data.cFileName, L".") || !wcscmp(data.cFileName, L"..")) continue;
-        name = utf8(data.cFileName);
+        char* name = utf8(data.cFileName);
         if (!name) {
             error = 1;
             break;
@@ -603,7 +610,7 @@ int snx_list_dir(const char* path, char*** names, size_t* count) {
         snx_free_strings(list, n);
         return 1;
     }
-    if (n > 1) qsort(list, n, sizeof(*list), compare_names);
+    if (n > 1) qsort(list, n, sizeof(*list), snx_compare_strings);
     *names = list;
     *count = n;
     return 0;
@@ -621,12 +628,12 @@ static int remove_one(const char* path, int dir) {
 int snx_remove_empty_dir(const char* path) { return !snx_is_dir(path) || snx_is_link(path) || remove_one(path, 1); }
 int snx_remove_tree(const char* path) {
     char **names, *p;
-    size_t i, n;
+    size_t n;
     int rc = 0;
     int dir = snx_is_dir(path);
     if (dir && !snx_is_link(path)) {
         if (snx_list_dir(path, &names, &n)) return 1;
-        for (i = 0; i < n; ++i) {
+        for (size_t i = 0; i < n; ++i) {
             p = snx_path_join(path, names[i]);
             if (snx_remove_tree(p)) rc = 1;
             free(p);
@@ -640,10 +647,9 @@ int snx_remove_tree(const char* path) {
 }
 unsigned char* snx_read_file(const char* path, size_t* size) {
     FILE* f = snx_fopen(path, "rb");
-    unsigned char* p;
     size_t cap = 8192, n = 0, got;
     if (!f) return NULL;
-    p = (unsigned char*)snx_alloc(cap + 1);
+    unsigned char* p = (unsigned char*)snx_alloc(cap + 1);
     for (;;) {
         got = fread(p + n, 1, cap - n, f);
         n += got;
@@ -671,10 +677,9 @@ int snx_file_has_record(const char* path, const void* magic, size_t magic_size, 
     /* read a MiB at a time, the last size - 1 bytes kept for a record that runs into the next */
     size_t cap = ((size_t)1 << 20) + size, have = 0, got;
     FILE* f = magic_size && magic_size <= size ? snx_fopen(path, "rb") : NULL;
-    unsigned char* p;
     int found = 0;
     if (!f) return 0;
-    p = (unsigned char*)snx_alloc(cap);
+    unsigned char* p = (unsigned char*)snx_alloc(cap);
     do {
         got = fread(p + have, 1, cap - have, f);
         have += got;
@@ -694,9 +699,8 @@ int snx_file_has_record(const char* path, const void* magic, size_t magic_size, 
 }
 int snx_write_file(const char* path, const void* data, size_t size) {
     FILE* f = snx_fopen(path, "wb");
-    int result;
     if (!f) return 1;
-    result = fwrite(data, 1, size, f) != size;
+    int result = fwrite(data, 1, size, f) != size;
     return fclose(f) != 0 || result;
 }
 int snx_write_changed(const char* path, const void* data, size_t size) {
@@ -708,19 +712,18 @@ int snx_write_changed(const char* path, const void* data, size_t size) {
 }
 int snx_copy_file(const char* src, const char* dst) {
     unsigned char buf[65536];
-    FILE *in = snx_fopen(src, "rb"), *out;
+    FILE* in = snx_fopen(src, "rb");
     size_t n;
     int rc = 0;
     if (!in) return 1;
     /* Avoid truncating the input when recompiling an existing *_data directory. */
-    out = snx_fopen(dst, "rb");
+    FILE* out = snx_fopen(dst, "rb");
     if (out) {
         unsigned char other[65536];
         int same = 1;
         do {
-            size_t m;
             n = fread(buf, 1, sizeof(buf), in);
-            m = fread(other, 1, sizeof(other), out);
+            size_t m = fread(other, 1, sizeof(other), out);
             if (n != m || memcmp(buf, other, n)) {
                 same = 0;
                 break;
@@ -805,20 +808,64 @@ int snx_symlink(const char* target, const char* link) {
     return symlink(target, link) != 0;
 #endif
 }
+char* snx_vulkan_driver(const char* program) {
+#ifdef __APPLE__
+    /* beside the program: the copy a game's runtime is deployed with (snx_deploy_vulkan_driver), which is outside the
+       app that carries the library; then the app bundle's Frameworks, ../Frameworks from its Contents/MacOS; then the
+       framework an iOS app holds in the bundle itself */
+    static const char* const own[] = {"libMoltenVK.dylib", "../Frameworks/libMoltenVK.dylib",
+                                      "Frameworks/MoltenVK.framework/MoltenVK"};
+    char* dir = snx_dirname(program);
+    char* path = NULL;
+    for (size_t i = 0; !path && dir && i < sizeof own / sizeof* own; ++i) {
+        char* found = snx_path_join(dir, own[i]);
+        if (found && snx_is_file(found)) path = found;
+        else free(found);
+    }
+    free(dir);
+    return path;
+#else
+    (void)program;
+    return NULL;
+#endif
+}
+int snx_deploy_vulkan_driver(const char* program, const char* folder) {
+    char *from = snx_vulkan_driver(program), why[256];
+    int rc = 0;
+    /* the system's loader serves everywhere else, and a build that carries none (a checkout's) leaves the system's */
+    if (!from) return 0;
+    char* to = snx_path_join(folder, "libMoltenVK.dylib");
+    if (!to) {
+        snx_error("cannot name the Vulkan driver's place in %s", folder);
+        free(from);
+        return 1;
+    }
+    /* A second name where the disk allows one, so each game does not hold a copy, else a copy. A read-only app image,
+       and an app macOS translocated, take no second name of the library they carry, which is why the copy follows a
+       link that failed. A name of another app's library is broken rather than written through, which would change that
+       app's library and signature too */
+    if (snx_is_file(to) && snx_remove_tree(to))
+        rc = snx_error("cannot remove the Vulkan driver at %s: %s", to, snx_os_error(why, sizeof why));
+    else if (snx_link_file(from, to) && snx_copy_file(from, to))
+        rc = snx_error("cannot put the Vulkan driver %s in %s: %s", from, folder, snx_os_error(why, sizeof why));
+    free(to);
+    free(from);
+    return rc;
+}
 int snx_path_within(const char* path, const char* parent) {
     char *a = snx_absolute(path), *b = snx_absolute(parent);
-    size_t i = 0, n;
+    size_t i = 0;
     int same = 1;
     if (!a || !b) {
         free(a);
         free(b);
         return 1;
     }
-    n = strlen(b);
-    while (n > 1 && separator(b[n - 1])) --n;
+    size_t n = strlen(b);
+    while (n > 1 && snx_is_separator(b[n - 1])) --n;
     while (i < n) {
 #ifdef _WIN32
-        if (!(separator(a[i]) && separator(b[i])) && tolower((unsigned char)a[i]) != tolower((unsigned char)b[i]))
+        if (!(snx_is_separator(a[i]) && snx_is_separator(b[i])) && snx_to_lower(a[i]) != snx_to_lower(b[i]))
             same = 0;
 #else
         if (a[i] != b[i]) same = 0;
@@ -826,19 +873,19 @@ int snx_path_within(const char* path, const char* parent) {
         if (!same || !a[i]) break;
         ++i;
     }
-    same = same && i == n && (!a[i] || separator(a[i]) || (n == 1 && separator(b[0])));
+    same = same && i == n && (!a[i] || snx_is_separator(a[i]) || (n == 1 && snx_is_separator(b[0])));
     free(a);
     free(b);
     return same;
 }
 static int copy_tree(const char* src, const char* dst, unsigned depth) {
     char **names, *a, *b;
-    size_t i, n;
+    size_t n;
     int rc = 0;
     if (depth > 128 || snx_is_link(src) || snx_is_link(dst)) return snx_error("invalid copy tree: %s", src);
     if (!snx_is_dir(src)) return snx_copy_file(src, dst);
     if (snx_mkdirs(dst) || snx_list_dir(src, &names, &n)) return 1;
-    for (i = 0; i < n && !rc; ++i) {
+    for (size_t i = 0; i < n && !rc; ++i) {
         a = snx_path_join(src, names[i]);
         b = snx_path_join(dst, names[i]);
         rc = copy_tree(a, b, depth + 1);
@@ -908,10 +955,9 @@ int snx_set_file_time(const char* path, SnxU64 seconds) {
                     : INVALID_HANDLE_VALUE;
     SnxU64 t = seconds * 10000000ull + SNX_FILETIME_1970;
     FILETIME ft;
-    int ok;
     ft.dwLowDateTime = (DWORD)t;
     ft.dwHighDateTime = (DWORD)(t >> 32);
-    ok = file != INVALID_HANDLE_VALUE && SetFileTime(file, NULL, &ft, &ft);
+    int ok = file != INVALID_HANDLE_VALUE && SetFileTime(file, NULL, &ft, &ft);
     if (file != INVALID_HANDLE_VALUE) {
         DWORD error = GetLastError();
         CloseHandle(file);
@@ -1016,12 +1062,11 @@ int snx_same_file(const char* a, const char* b) {
 /* $var/scarletnx, else ~/fallback/scarletnx: the XDG spec ignores a relative path */
 static char* home_folder(const char* var, const char* fallback) {
     const char* base = var ? getenv(var) : NULL;
-    char *parent, *path;
     if (base && base[0] == '/') return snx_path_join(base, "scarletnx");
     base = getenv("HOME");
     if (!base || !base[0]) return NULL;
-    parent = snx_path_join(base, fallback);
-    path = snx_path_join(parent, "scarletnx");
+    char* parent = snx_path_join(base, fallback);
+    char* path = snx_path_join(parent, "scarletnx");
     free(parent);
     return path;
 }
@@ -1068,13 +1113,13 @@ char* snx_user_dir(int kind) {
 static int same_folder(const char* a, const char* b) { return snx_path_within(a, b) && snx_path_within(b, a); }
 int snx_app_dir(const char* folder) {
     char *user = snx_user_data_dir(), *full = snx_absolute(folder);
-    const char *base = full, *s;
+    const char* base = full;
     int app = full && user && same_folder(full, user);
-    for (s = full; s && *s; ++s)
-        if (separator(*s) && s[1]) base = s + 1;
+    for (const char* s = full; s && *s; ++s)
+        if (snx_is_separator(*s) && s[1]) base = s + 1;
     if (full && !app)
         app = !strncmp(base, SNX_PORTABLE_DIR, strlen(SNX_PORTABLE_DIR)) &&
-              (!base[strlen(SNX_PORTABLE_DIR)] || separator(base[strlen(SNX_PORTABLE_DIR)]));
+              (!base[strlen(SNX_PORTABLE_DIR)] || snx_is_separator(base[strlen(SNX_PORTABLE_DIR)]));
 #ifdef __ANDROID__
     if (full && !app) app = same_folder(full, SNX_ANDROID_DIR);
 #endif
@@ -1111,11 +1156,10 @@ static int picked_kind(const char* config, int kind, char** dir) {
     return found;
 }
 char* snx_app_kind_dir(const char* app, int kind) {
-    char *dir = snx_app_kind_default(app, kind), *config, *picked;
-    int found;
+    char *dir = snx_app_kind_default(app, kind), *picked;
     if (kind != SNX_USER_STATE && kind != SNX_USER_CACHE) return dir;
-    config = snx_app_kind_default(app, SNX_USER_CONFIG);
-    found = config ? picked_kind(config, kind, &picked) : 0;
+    char* config = snx_app_kind_default(app, SNX_USER_CONFIG);
+    int found = config ? picked_kind(config, kind, &picked) : 0;
     if (found > 0) {
         free(dir);
         dir = picked;
@@ -1152,7 +1196,7 @@ char* snx_user_path(const char* path, int kind) {
     /* a config folder that is the data folder divides nothing */
     if (root && !same_folder(root, app)) {
         rest = full + strlen(app);
-        while (separator(*rest)) ++rest;
+        while (snx_is_separator(*rest)) ++rest;
         moved = *rest ? snx_path_join(root, rest) : snx_strdup(root);
     }
     free(full);
@@ -1162,9 +1206,9 @@ char* snx_user_path(const char* path, int kind) {
 }
 /* snx_menu_dir, with the folder Folders picked (snx_app_kind_dir) or without it (snx_app_kind_default) */
 static char* menu_dir(const char* folder, int kind, char* (*of)(const char* app, int kind)) {
-    char *full = folder ? snx_absolute(folder) : NULL, *app = full ? app_of(full) : NULL, *dir;
+    char *full = folder ? snx_absolute(folder) : NULL, *app = full ? app_of(full) : NULL;
     if (!app) app = snx_user_data_dir(); /* any other folder's: the user's */
-    dir = app ? of(app, kind) : snx_user_dir(kind);
+    char* dir = app ? of(app, kind) : snx_user_dir(kind);
     free(app);
     free(full);
     return dir;
@@ -1176,7 +1220,7 @@ int snx_launcher_name(const char* name) {
     static const char own[] = "scarletnx";
     size_t i;
     for (i = 0; own[i]; ++i)
-        if (tolower((unsigned char)name[i]) != own[i]) return 0;
+        if (snx_to_lower(name[i]) != own[i]) return 0;
     return !name[i] || name[i] == '-' || name[i] == '.';
 }
 const SnxGameFile snx_game_files[SNX_GAME_FILES] = {{".log", SNX_USER_STATE},
@@ -1193,11 +1237,11 @@ char* snx_work_dir(const char* data_dir) {
 }
 char* snx_recompiled_dir(const char* data_dir) { return snx_path_join(data_dir, "recompiled"); }
 char* snx_recompiled_game(const char* data_dir, const char* name) {
-    char *dir = snx_recompiled_dir(data_dir), *now = dir ? snx_path_join(dir, name) : NULL, *old_dir, *old;
+    char *dir = snx_recompiled_dir(data_dir), *now = dir ? snx_path_join(dir, name) : NULL;
     free(dir);
     if (!now || snx_is_dir(now)) return now;
-    old_dir = snx_path_join(data_dir, "games");
-    old = old_dir ? snx_path_join(old_dir, name) : NULL;
+    char* old_dir = snx_path_join(data_dir, "games");
+    char* old = old_dir ? snx_path_join(old_dir, name) : NULL;
     free(old_dir);
     if (old && snx_is_dir(old)) {
         free(now);
@@ -1245,19 +1289,17 @@ char* snx_checkout(const char* checkout, const char* build, const char* program_
 }
 const char* const snx_checkout_files[SNX_CHECKOUT_FILES] = {"games", "work", "prod.keys", "title.keys", "linux"};
 char* snx_checkout_now(const char* data, int file) {
-    char *path, *now;
     if (!strcmp(snx_checkout_files[file], "games")) return snx_recompiled_dir(data);
-    path = snx_path_join(data, snx_checkout_files[file]);
+    char* path = snx_path_join(data, snx_checkout_files[file]);
     if (strcmp(snx_checkout_files[file], "work")) return path;
-    now = snx_user_path(path, SNX_USER_CACHE);
+    char* now = snx_user_path(path, SNX_USER_CACHE);
     free(path);
     return now;
 }
 void snx_checkout_left(const char* checkout, const char* data) {
     char *old, *now;
-    int i;
     if (same_folder(checkout, data)) return; /* the data folder's own older files: snx_recompiled_left, snx_work_dir */
-    for (i = 0; i < SNX_CHECKOUT_FILES; ++i) {
+    for (int i = 0; i < SNX_CHECKOUT_FILES; ++i) {
         old = snx_path_join(checkout, snx_checkout_files[i]);
         now = snx_checkout_now(data, i);
         if (old && now && snx_left_behind(old, now))
@@ -1269,16 +1311,15 @@ void snx_checkout_left(const char* checkout, const char* data) {
     }
 }
 char* snx_dump_name(const char* input) {
-    const char *base = input, *p, *end;
-    char* name;
+    const char *base = input, *p;
     size_t n = 0;
     for (p = input; *p; ++p)
         if (*p == '/' || *p == '\\') base = p + 1;
-    end = strrchr(base, '.');
+    const char* end = strrchr(base, '.');
     if (!end || end == base) end = base + strlen(base);
-    name = (char*)snx_alloc((size_t)(end - base) + 1);
+    char* name = (char*)snx_alloc((size_t)(end - base) + 1);
     for (p = base; p < end; ++p)
-        if ((unsigned char)*p >= 128 || isalnum((unsigned char)*p) || *p == '-' || *p == '_' || *p == ' ')
+        if ((unsigned char)*p >= 128 || snx_is_alnum(*p) || *p == '-' || *p == '_' || *p == ' ')
             name[n++] = *p;
     while (n && name[n - 1] == ' ') --n;
     name[n] = 0;
@@ -1317,10 +1358,10 @@ char* snx_temp_root(void) {
 #endif
 }
 char* snx_tmpfs_work(SnxU64 title) {
-    char text[17], *root, *work, *path;
+    char text[17], *root, *work;
     if (!snx_title_text(title, text) || !(root = snx_temp_root())) return NULL;
     work = snx_path_join(root, "scarletnx/work");
-    path = snx_path_join(work, text);
+    char* path = snx_path_join(work, text);
     free(work);
     free(root);
     return path;
@@ -1330,8 +1371,6 @@ char* snx_temp_dir(const char* parent) {
 #ifdef _WIN32
     wchar_t* wp;
     PSECURITY_DESCRIPTOR descriptor = NULL;
-    SECURITY_ATTRIBUTES security;
-    unsigned i;
     path = parent ? snx_strdup(parent) : snx_temp_root();
     if (!path) return NULL;
     /* Key material must remain private even when the selected temp parent is shared. */
@@ -1340,17 +1379,16 @@ char* snx_temp_dir(const char* parent) {
         free(path);
         return NULL;
     }
-    memset(&security, 0, sizeof(security));
+    SECURITY_ATTRIBUTES security = {0};
     security.nLength = sizeof(security);
     security.lpSecurityDescriptor = descriptor;
-    for (i = 0; i < 10000; ++i) {
+    for (unsigned i = 0; i < 10000; ++i) {
         char* name =
             snx_format(".snx-%lu-%lu-%u", (unsigned long)GetCurrentProcessId(), (unsigned long)GetTickCount(), i);
         char* candidate = snx_path_join(path, name);
-        int ok;
         free(name);
         wp = wide(candidate);
-        ok = wp && CreateDirectoryW(wp, &security);
+        int ok = wp && CreateDirectoryW(wp, &security);
         free(wp);
         if (ok) {
             LocalFree(descriptor);
@@ -1560,25 +1598,24 @@ void snx_tool_console(void) {
    which can say what it does (scarletnx-3ds, a link to scarletnx) */
 static char* tool_path(const char* file) {
     const char* name = file + strlen(file);
-    char *dir, *absolute, *path;
-    while (name > file && !separator(name[-1])) --name;
-    dir = snx_dirname(file);
-    absolute = snx_absolute(dir);
+    while (name > file && !snx_is_separator(name[-1])) --name;
+    char* dir = snx_dirname(file);
+    char* absolute = snx_absolute(dir);
     free(dir);
     if (!absolute) return NULL;
-    path = snx_path_join(absolute, name);
+    char* path = snx_path_join(absolute, name);
     free(absolute);
     return path;
 }
 char* snx_find_tool(const char* name) {
-    const char *env, *p, *end;
+    const char *p, *end;
     char *dir, *file, *absolute;
     size_t n;
     int has_sep = 0;
     for (p = name; *p; ++p)
-        if (separator(*p)) has_sep = 1;
+        if (snx_is_separator(*p)) has_sep = 1;
     if (has_sep) return snx_is_file(name) ? tool_path(name) : NULL;
-    env = getenv("PATH");
+    const char* env = getenv("PATH");
     if (!env) return NULL;
     p = env;
     do {
@@ -1636,46 +1673,44 @@ static void append_output(char** text, size_t* used, const char* buf, size_t n) 
 }
 #ifdef _WIN32
 static wchar_t* command_line(const char* const* argv) {
-    size_t cap = 1, i, n, k, slashes, used = 0;
-    char* out;
-    wchar_t* w;
-    for (i = 0; argv[i]; ++i) cap += 2 * strlen(argv[i]) + 4;
-    out = (char*)snx_alloc(cap);
-    for (i = 0; argv[i]; ++i) {
+    size_t cap = 1, slashes, used = 0;
+    for (size_t i = 0; argv[i]; ++i) cap += 2 * strlen(argv[i]) + 4;
+    char* out = (char*)snx_alloc(cap);
+    for (size_t i = 0; argv[i]; ++i) {
         if (i) out[used++] = ' ';
         out[used++] = '"';
         slashes = 0;
-        for (n = 0; argv[i][n]; ++n) {
+        for (size_t n = 0; argv[i][n]; ++n) {
             if (argv[i][n] == '\\') {
                 ++slashes;
                 continue;
             }
-            for (k = 0; k < slashes * (argv[i][n] == '"' ? 2 : 1); ++k) out[used++] = '\\';
+            for (size_t k = 0; k < slashes * (argv[i][n] == '"' ? 2 : 1); ++k) out[used++] = '\\';
             slashes = 0;
             if (argv[i][n] == '"') out[used++] = '\\';
             out[used++] = argv[i][n];
         }
-        for (k = 0; k < slashes * 2; ++k) out[used++] = '\\';
+        for (size_t k = 0; k < slashes * 2; ++k) out[used++] = '\\';
         out[used++] = '"';
     }
     out[used] = 0;
-    w = wide(out);
+    wchar_t* w = wide(out);
     free(out);
     return w;
 }
 static wchar_t* child_environment(const char* home) {
-    wchar_t *env = GetEnvironmentStringsW(), *p, *out, *wh;
+    wchar_t *env = GetEnvironmentStringsW(), *out;
     size_t cap = 1, used = 0, n;
     if (!env) return NULL;
-    wh = wide(home);
+    wchar_t* wh = wide(home);
     if (!wh) {
         FreeEnvironmentStringsW(env);
         return NULL;
     }
-    for (p = env; *p; p += wcslen(p) + 1) cap += wcslen(p) + 1;
+    for (wchar_t* p = env; *p; p += wcslen(p) + 1) cap += wcslen(p) + 1;
     cap += 2 * wcslen(wh) + 32;
     out = (wchar_t*)snx_alloc(cap * sizeof(*out));
-    for (p = env; *p; p += wcslen(p) + 1) {
+    for (wchar_t* p = env; *p; p += wcslen(p) + 1) {
         if (!_wcsnicmp(p, L"HOME=", 5) || !_wcsnicmp(p, L"USERPROFILE=", 12) || !_wcsnicmp(p, L"XDG_CONFIG_HOME=", 16))
             continue;
         n = wcslen(p) + 1;
@@ -1709,31 +1744,27 @@ int snx_run_ticking(const char* const* argv, const char* cwd, const char* home, 
     size_t used = 0;
     double ticked = snx_seconds();
 #ifdef _WIN32
-    STARTUPINFOEXW si;
     PROCESS_INFORMATION pi;
-    SECURITY_ATTRIBUTES sa;
     HANDLE rd = NULL, wr = NULL, input = INVALID_HANDLE_VALUE, handles[2];
     SIZE_T attr_size = 0;
     wchar_t *cmd = command_line(argv), *dir = cwd ? wide(cwd) : NULL;
     wchar_t* env = home ? child_environment(home) : NULL;
     DWORD got, code = 1;
-    int ok;
     if (!output) {
         char* captured = NULL;
-        int result;
         free(cmd);
         free(dir);
         free(env);
-        result = snx_run_ticking(argv, cwd, home, &captured, tick, data);
+        int result = snx_run_ticking(argv, cwd, home, &captured, tick, data);
         if (captured) {
             fputs(captured, stdout);
             free(captured);
         }
         return result;
     }
-    memset(&si, 0, sizeof(si));
+    STARTUPINFOEXW si = {0};
     si.StartupInfo.cb = sizeof(si);
-    memset(&sa, 0, sizeof(sa));
+    SECURITY_ATTRIBUTES sa = {0};
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = TRUE;
     if (output) {
@@ -1777,7 +1808,7 @@ int snx_run_ticking(const char* const* argv, const char* cwd, const char* home, 
         si.StartupInfo.hStdOutput = wr;
         si.StartupInfo.hStdError = wr;
     }
-    ok = cmd && (!cwd || dir) && (!home || env) &&
+    int ok = cmd && (!cwd || dir) && (!home || env) &&
          CreateProcessW(NULL, cmd, NULL, NULL, output != NULL,
                         CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT, env, dir,
                         &si.StartupInfo, &pi);
@@ -1815,7 +1846,7 @@ int snx_run_ticking(const char* const* argv, const char* cwd, const char* home, 
     return (int)code;
 #else
     int fds[2] = {-1, -1}, status;
-    pid_t pid, waited;
+    pid_t waited;
     ssize_t got;
     if (output) {
         *output = snx_strdup("");
@@ -1823,7 +1854,7 @@ int snx_run_ticking(const char* const* argv, const char* cwd, const char* home, 
         fcntl(fds[0], F_SETFD, FD_CLOEXEC);
         fcntl(fds[1], F_SETFD, FD_CLOEXEC);
     }
-    pid = fork();
+    pid_t pid = fork();
     if (!pid) {
         if (output) {
             close(fds[0]);
@@ -1846,11 +1877,11 @@ int snx_run_ticking(const char* const* argv, const char* cwd, const char* home, 
         for (;;) {
             if (tick) { /* a read waits only for what is there, so the tick keeps its second */
                 struct pollfd ready;
-                int ms = (int)((ticked + 1 - snx_seconds()) * 1000), any;
+                int ms = (int)((ticked + 1 - snx_seconds()) * 1000);
                 ready.fd = fds[0];
                 ready.events = POLLIN;
                 ready.revents = 0;
-                any = poll(&ready, 1, ms > 0 ? ms : 0);
+                int any = poll(&ready, 1, ms > 0 ? ms : 0);
                 tick_due(&ticked, tick, data);
                 if (!any || (any < 0 && errno == EINTR)) continue;
             }
@@ -1896,17 +1927,11 @@ int snx_nacp_name(const unsigned char* nacp, size_t size, char* name, size_t nam
     }
     return name_size && name[0];
 }
-static SnxU64 le_get(const unsigned char* p, unsigned n) {
-    SnxU64 value = 0;
-    while (n--) value = value << 8 | p[n];
-    return value;
-}
 SnxU64 snx_npdm_title(const unsigned char* npdm, size_t size) {
-    SnxU64 aci;
     if (!npdm || size < 0x80 || memcmp(npdm, "META", 4)) return SNX_NPDM_DEFAULT_TITLE;
-    aci = le_get(npdm + 0x70, 4);
+    SnxU64 aci = snx_ld_le32(npdm + 0x70);
     if (!aci || aci > size || size - aci < 0x18 || memcmp(npdm + aci, "ACI0", 4)) return SNX_NPDM_DEFAULT_TITLE;
-    return le_get(npdm + aci + 0x10, 8);
+    return snx_ld_le64(npdm + aci + 0x10);
 }
 int snx_title_text(SnxU64 id, char* out) {
     out[0] = 0;
@@ -1916,10 +1941,10 @@ int snx_title_text(SnxU64 id, char* out) {
 }
 int snx_title_parse(const char* text, SnxU64* id) {
     SnxU64 value = 0;
-    int i, c;
-    for (i = 0; i < 16; ++i) {
+    int c;
+    for (int i = 0; i < 16; ++i) {
         c = (unsigned char)text[i];
-        if (!isxdigit(c) || islower(c)) return 0; /* as snx_title_text writes it */
+        if (!snx_is_hex(c) || snx_is_lower(c)) return 0; /* as snx_title_text writes it */
         value = value << 4 | (SnxU64)(c <= '9' ? c - '0' : c - 'A' + 10);
     }
     if (text[16]) return 0;
@@ -1968,17 +1993,44 @@ SnxU64 snx_addon_guess(SnxU64 id) {
 }
 SnxU64 snx_nacp_aoc_base(const unsigned char* nacp, size_t size, SnxU64 application) {
     /* AddOnContentBaseId: a u64 at 0x3070; the SDK's default, the application's ID less its low bits plus 0x1000 */
-    SnxU64 base = 0;
-    int i;
-    for (i = 7; nacp && size >= 0x3078 && i >= 0; --i) base = base << 8 | nacp[0x3070 + i];
+    SnxU64 base = nacp && size >= 0x3078 ? snx_ld_le64(nacp + 0x3070) : 0;
     return base ? base : (application & ~(SnxU64)0x1FFF) + 0x1000;
 }
 int snx_nacp_version(const unsigned char* nacp, size_t size, char* version, size_t version_size) {
     /* DisplayVersion: 0x10 bytes at 0x3060 */
-    size_t i, n = 0;
+    size_t n = 0;
     if (version_size) version[0] = 0;
-    for (i = 0; nacp && 0x3070 <= size && i < 0x10 && nacp[0x3060 + i] && n + 1 < version_size; ++i)
+    for (size_t i = 0; nacp && 0x3070 <= size && i < 0x10 && nacp[0x3060 + i] && n + 1 < version_size; ++i)
         if (nacp[0x3060 + i] > 0x20 && nacp[0x3060 + i] < 0x7f) version[n++] = (char)nacp[0x3060 + i];
     if (version_size) version[n] = 0;
     return n != 0;
 }
+int snx_ends_with_nocase(const char* text, const char* ending) {
+    size_t n = strlen(text), e = strlen(ending);
+    if (n < e) return 0;
+    for (size_t i = 0; i < e; ++i)
+        if (snx_to_lower(text[n - e + i]) != snx_to_lower(ending[i])) return 0;
+    return 1;
+}
+#ifdef _WIN32
+void* snx_library_open(const char* path, char* error, size_t error_size) {
+    wchar_t* w = wide(path);
+    HMODULE library = w ? LoadLibraryW(w) : NULL;
+    if (!library && error_size)
+        snprintf(error, error_size, "cannot load %s: error %lu", path, (unsigned long)GetLastError());
+    free(w);
+    return (void*)library;
+}
+void* snx_library_symbol(void* library, const char* name) {
+    return (void*)(uintptr_t)GetProcAddress((HMODULE)library, name);
+}
+void snx_library_close(void* library) { FreeLibrary((HMODULE)library); }
+#else
+void* snx_library_open(const char* path, char* error, size_t error_size) {
+    void* library = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (!library && error_size) snprintf(error, error_size, "cannot load %s: %s", path, dlerror());
+    return library;
+}
+void* snx_library_symbol(void* library, const char* name) { return dlsym(library, name); }
+void snx_library_close(void* library) { dlclose(library); }
+#endif

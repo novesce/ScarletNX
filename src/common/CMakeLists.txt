@@ -78,3 +78,16 @@ if(TARGET snx_enet)
     target_compile_options(scarletnx-ldn PRIVATE -Wall -Wextra -Werror=missing-prototypes)
     target_link_libraries(scarletnx-ldn PUBLIC scarletnx-net PRIVATE snx_enet snx_zstd)
 endif()
+
+# What the Vulkan frontends (src/nx/gpu/vk, src/3ds/gpu/vk, src/vita/gpu) share of a device: the instance, queries,
+# the device's choice, the submission ring, the swapchain and the SDL window (gpu/vk/). Each frontend compiles volk.c,
+# whose functions these call
+if(TARGET Vulkan::Headers AND TARGET SDL3::SDL3)
+    add_library(snx_vk_common STATIC gpu/vk/vk_common.c gpu/vk/ring.c gpu/vk/swapchain.c gpu/vk/window.c)
+    set_target_properties(snx_vk_common PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+    target_compile_options(snx_vk_common PRIVATE -pedantic-errors -Wall -Wextra -Werror=missing-prototypes
+                                                 -Werror=missing-variable-declarations)
+    target_compile_definitions(snx_vk_common PRIVATE VK_NO_PROTOTYPES)
+    target_include_directories(snx_vk_common PUBLIC "${volk_SOURCE_DIR}")
+    target_link_libraries(snx_vk_common PUBLIC Vulkan::Headers SDL3::SDL3)
+endif()

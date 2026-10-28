@@ -102,6 +102,27 @@ static void ev_remove(u64 addr, u64 size) {
 #define ev_remove(addr, size) ((void)0)
 #endif
 
+/* The 36-bit layout of a 64-bit application built before 2.0, the NPDM's address space type 1 (Eden's
+   "AddressSpace64BitDeprecated", Ryujinx's of the same name, the bit_width 36 entries of their
+   k_address_space_info): the console's 64 GiB, the code region at a fixed 128 MiB (no ASLR moves it), the stack
+   region its bounds, a 6 GiB alias region and an 8 GiB heap region above it, and the kernel's pages in the last GiB.
+   What the layout has to guarantee is that every address the game holds fits in 36 bits: the SDK marshals an IPC
+   buffer descriptor's address into 4 bits above 32 and 22 above 36 and drops the rest, so an address of the 39-bit
+   layout comes back to the runtime as that address's low 36 bits, which nothing was ever mapped at. Zelda: Breath
+   of the Wild's main stack, at 78 GiB above, came back as 12 GiB and its first RomFS read wrote the header there */
+void mem_layout36(void) {
+    g_layout.base = 0x8000000ull;
+    g_layout.end = AS36;
+    g_layout.alias = 2 * GIB;
+    g_layout.alias_size = 6 * GIB;
+    g_layout.heap = 8 * GIB;
+    g_layout.heap_size = 8 * GIB;
+    g_layout.stack = 0x8000000ull; /* the console's stack region is the code region's for these */
+    g_layout.stack_size = 2 * GIB - 0x8000000ull;
+    g_layout.kern = AS36 - GIB;
+    g_layout.kern_end = AS36;
+}
+
 /* The 32-bit layouts (Eden's 32-bit entries in k_address_space_info.cpp): the code region from 2 MiB to 1 GiB, which
    is the stack region too, then from 1 GiB the 1 GiB alias region and the 1 GiB heap region, or a 2 GiB heap region
    without an alias region. The kernel's pages go in the last GiB, above both */

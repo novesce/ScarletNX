@@ -34,7 +34,7 @@ typedef struct {
     bool activated;
     GuiLoadView view;
     bool running, quit;
-    /* the font's scale, 1 to GUI_TEXT_MAX; 0 fits the screen (Auto); -1 to -3 that many quarters of Auto's */
+    /* the font's scale, 1 to GUI_TEXT_MAX; 0 fits the screen (Auto) */
     int text_size;
 } GuiMenu;
 /* what a key on the menu asks of the GUI: nothing more, the Settings or the logs shared */
@@ -49,7 +49,6 @@ typedef enum {
     GUI_ASK_DEEP,    /* a folder picked with folders in it: are their games listed too */
     GUI_ASK_OUTSIDE, /* a folder picked in Folders outside the app's own storage, which Android slows */
     GUI_ASK_ROOM,    /* a run whose extraction may not fit (gui_room) */
-    GUI_ASK_TEXT,    /* a UI scale just picked: kept, or the one before it back */
     /* a change to the player's settings or folders, what it changes in the question (main.c's ask_line) */
     GUI_ASK_CLEAN,  /* App's Clean Old Settings: the [Deprecated] sections and old keys taken out */
     GUI_ASK_RESET,  /* Settings' Reset to Defaults: the settings not at their default */
@@ -79,8 +78,8 @@ typedef enum { GUI_CHOICE_STAY, GUI_CHOICE_TAKE, GUI_CHOICE_BACK } GuiChoiceDo;
 GuiChoiceDo gui_choice_key(GuiChoice* choice, GuiKey key);
 /* The setup's first step, Appearance: Language, Theme and UI scale a row each, as Settings > App has them, the Side
    panel, and Games' View and Icon size as its View box has them, then Next under them. Up and Down move round them all;
-   Left and Right change a row's value a step either way, UI scale's slider too; Select steps a row's value on and
-   opens UI scale's box, as Settings > App's Enter does, and goes on from Next; Cancel goes back */
+   Left and Right change a row's value a step either way, UI scale's open its dialog; Select steps a row's value on and
+   opens UI scale's dialog, as Settings > App's Enter does, and goes on from Next; Cancel goes back */
 enum {
     GUI_APPEARANCE_LANGUAGE,
     GUI_APPEARANCE_THEME,
@@ -94,7 +93,7 @@ enum {
 typedef enum {
     GUI_APPEARANCE_STAY,
     GUI_APPEARANCE_CHANGE, /* the row's value, *step (-1 or 1) away */
-    GUI_APPEARANCE_SIZES,  /* UI scale's box opened */
+    GUI_APPEARANCE_SIZES,  /* UI scale's dialog opened */
     GUI_APPEARANCE_ON,     /* the next step */
     GUI_APPEARANCE_BACK
 } GuiAppearanceDo;

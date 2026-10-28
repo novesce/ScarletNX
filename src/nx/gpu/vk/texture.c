@@ -5,6 +5,7 @@
    is smaller). Others are loaded from guest memory, staged as they are and deswizzled and converted on the GPU
    (vk/blocklinear.c, vk/texconv.c, vk/astc.c), and checked for changes now and then: often at first, rarely once
    they have stayed the same. */
+#include "common/utilities/bits.h"
 #include "nx/gpu/texture/descriptor.h"
 #include <stdlib.h>
 #include <string.h>
@@ -436,7 +437,7 @@ static u64 mem_hash(u64 gva, u64 size) {
     for (u64 o = 0; o < size; o += MEM_HASH_PIECE) {
         u64 n = size - o < MEM_HASH_PIECE ? size - o : MEM_HASH_PIECE;
         if (!p) vk_guest_peek(gva + o, piece, n);
-        h = (h ^ vk_hash(p ? p + o : (const u8*)piece, n)) * 1099511628211ull;
+        h = snx_fnv_step(h, vk_hash(p ? p + o : (const u8*)piece, n));
     }
     return h;
 }

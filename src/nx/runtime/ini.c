@@ -232,9 +232,11 @@ size_t ini_list_text(const IniSection* sections, int count, char* out, size_t si
                     help = repeated_help(sections[s].table[t], o);
                 /* else none: the one before covers it */
                 if (o->flags & INI_IN_GAME) continue;
-                put(&l, "%s%s%s\t%s\t%s\t%s\t%g\t%g\t", sections[s].name, sections[s].page[t] ? "/" : "",
-                    sections[s].page[t] ? sections[s].page[t] : "", o->key, o->def ? o->def : "", types[o->type],
-                    o->lo, o->hi);
+                /* the range in its digits, which the launcher's Settings take and say as they read: %g's six cut
+                   1048576 to 1.04858e+06 */
+                put(&l, "%s%s%s\t%s\t%s\t%s\t%.15g\t%.15g\t", sections[s].name, sections[s].page[t] ? "/" : "",
+                    sections[s].page[t] ? sections[s].page[t] : "", o->key, o->def ? o->def : "", types[o->type], o->lo,
+                    o->hi);
                 list_help(&l, help);
                 put(&l, "\t%s\t", o->name ? o->name : "");
                 list_values(&l, o);

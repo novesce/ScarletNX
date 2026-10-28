@@ -3,6 +3,7 @@
    Serialized, bounded single-core thread contexts; no host threads or JIT.
    SVC register layout from Azahar kernel/svc_wrapper.h (revision in 3DS.md). */
 #include "3ds/runtime/internal.h"
+#include "common/utilities/endian.h"
 #include "3ds/services/gsp.h"
 #include "3ds/services/dsp.h"
 #include "3ds/services/y2r.h"
@@ -198,7 +199,7 @@ SnxCtrSvcResult snx_ctr_wait_many(SnxCtrProcess* p, uint32_t* r) {
     bool all = true;
     for (uint32_t i = 0; i < count; ++i) {
         unsigned char* b = bytes + i * 4;
-        uint32_t handle = (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24;
+        uint32_t handle = snx_ld_le32(b);
         ids[i] = snx_ctr_handle_object(p, handle);
         uint32_t type = ids[i] ? p->objects[ids[i]].type : CTR_OBJ_FREE;
         if (type == CTR_OBJ_PROCESS) return SNX_CTR_SVC_UNSUPPORTED;

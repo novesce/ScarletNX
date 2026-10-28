@@ -22,9 +22,8 @@ double round(double x) {
         double d;
         u64 u;
     } v;
-    int e;
     v.d = x;
-    e = (int)((v.u >> 52) & 0x7FF) - 1023;
+    int e = (int)((v.u >> 52) & 0x7FF) - 1023;
     if (e >= 52) return x; /* whole already, or infinite or NaN */
     if (e < 0) {           /* under 1: 0 below a half, else 1, with the sign */
         v.u = (v.u & ((u64)1 << 63)) | (e == -1 ? (u64)0x3FF << 52 : 0);
@@ -39,9 +38,8 @@ float roundf(float x) {
         float f;
         u32 u;
     } v;
-    int e;
     v.f = x;
-    e = (int)((v.u >> 23) & 0xFF) - 127;
+    int e = (int)((v.u >> 23) & 0xFF) - 127;
     if (e >= 23) return x;
     if (e < 0) {
         v.u = (v.u & ((u32)1 << 31)) | (e == -1 ? (u32)0x7F << 23 : 0);

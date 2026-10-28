@@ -117,6 +117,8 @@ const GuiThemeKey* gui_theme_key(const char* section, const char* key);
 /* value into the key's field of object, a theme or another object its offsets are in: nonzero when the GUI takes it (2
    a number it clamped to the key's range), 0 leaves the field as it was */
 int gui_theme_set(void* object, const GuiThemeKey* key, const char* value);
+/* what gui_theme_set would do with value, no field written: 0 it would not take it, 1 take it, 2 clamp it */
+int gui_theme_check(const GuiThemeKey* key, const char* value);
 /* the key's value as the file writes it */
 void gui_theme_get(const void* object, const GuiThemeKey* key, char* out, size_t size);
 

@@ -16,6 +16,7 @@
    lock wait for it (own_begin, every mapping change), so mem.c lands what it touches first (own_acquire). Nor may one
    holding the producer's lock, on an owned page (its landing needs the lock): own_fault ends the process with the
    address, as that is a bug in the runtime. Its fault on a page no entry is on any more goes on */
+#include "common/utilities/bits.h"
 #include <stdlib.h>
 #include <string.h>
 #include "nx/memory/own.h"
@@ -468,12 +469,11 @@ int own_hash(u64 addr, u64 size, u64* h) {
     for (i = first_after_nl(lo); i < g_nown && g_own[i].lo < hi; i++) {
         const Own* o = &g_own[i];
         u64 v[4];
-        u32 k;
         v[0] = o->lo;
         v[1] = o->hi;
         v[2] = (u64)(uintptr_t)o->res;
         v[3] = o->res_off;
-        for (k = 0; k < 4; k++) *h = (*h ^ v[k]) * 1099511628211ull;
+        for (u32 k = 0; k < 4; k++) *h = snx_fnv_step(*h, v[k]);
         any = 1;
     }
     pm_unlock(&g_own_lk);

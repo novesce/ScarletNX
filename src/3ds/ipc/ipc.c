@@ -4,6 +4,7 @@
    ipc.h and kernel/hle_ipc.cpp, GPL-2.0-or-later, revision in docs/3DS.md. */
 #include "3ds/ipc/ctr_ipc.h"
 #include "3ds/runtime/internal.h"
+#include "common/utilities/endian.h"
 #include "services/srv.swipc.h"
 #include "3ds/services/fs.h"
 #include "3ds/services/file.h"
@@ -20,12 +21,6 @@
 #include <stdio.h>
 #include <string.h>
 
-static uint32_t load32(const unsigned char* b) {
-    return (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24;
-}
-static void store32(unsigned char* b, uint32_t value) {
-    for (unsigned i = 0; i < 4; ++i) b[i] = (unsigned char)(value >> (i * 8));
-}
 void snx_ctr_ipc_bad(SnxCtrIpc* c) { c->transport_result = SNX_CTR_IPC_BAD_DESCRIPTOR; }
 int snx_ctr_ipc_expect(SnxCtrIpc* c, uint32_t normal, uint32_t translated) {
     if (((c->in[0] >> 6) & 63) != normal || (c->in[0] & 63) != translated) {
@@ -192,7 +187,7 @@ SnxCtrSvcResult snx_ctr_ipc_send(SnxCtrProcess* p, uint32_t handle, uint32_t* re
         return SNX_CTR_SVC_RETURN;
     }
     SnxCtrIpc c = {.process = p, .object = id, .caller_pid = CTR_PROCESS_ID};
-    for (unsigned i = 0; i < SNX_CTR_IPC_WORDS; ++i) c.in[i] = load32(bytes + i * 4);
+    for (unsigned i = 0; i < SNX_CTR_IPC_WORDS; ++i) c.in[i] = snx_ld_le32(bytes + i * 4);
     p->last_ipc_header = c.in[0];
     p->last_ipc_service =
         p->objects[id].type == CTR_OBJ_FILE ? SNX_CTR_SERVICE_FILE : p->objects[id].data.session.service;
@@ -281,7 +276,7 @@ SnxCtrSvcResult snx_ctr_ipc_send(SnxCtrProcess* p, uint32_t handle, uint32_t* re
                 c.in[0], *result ? 0 : c.out[0], *result ? "transport " : "", *result ? *result : c.out[1]);
     }
     if (*result) return SNX_CTR_SVC_RETURN;
-    for (unsigned i = 0; i < SNX_CTR_IPC_WORDS; ++i) store32(bytes + i * 4, c.out[i]);
+    for (unsigned i = 0; i < SNX_CTR_IPC_WORDS; ++i) snx_st_le32(bytes + i * 4, c.out[i]);
     if (snx_ctr_write_ram(p->space, address, bytes, sizeof bytes) != SNX_CTR_MEM_OK) return SNX_CTR_SVC_UNSUPPORTED;
     return SNX_CTR_SVC_RETURN;
 }

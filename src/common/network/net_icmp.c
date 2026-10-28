@@ -19,6 +19,7 @@
 
    Eden's RecvFrom read the entry after the one it erased, and its ping wrote to the runtime's stdout. */
 #include "common/network/net_internal.h"
+#include "common/utilities/endian.h"
 #include <stdlib.h>
 #include <string.h>
 #ifdef _WIN32
@@ -229,8 +230,7 @@ static void echo_worker(void* p) {
             memcpy(msg + 8, payload, n);
             if (!q->v6) { /* ICMPv6's checksum covers a pseudo-header the guest's kernel would check, not the guest */
                 uint16_t c = snx_net_checksum(msg, 8 + n, 0);
-                msg[2] = (uint8_t)(c >> 8);
-                msg[3] = (uint8_t)c;
+                snx_st_be16(msg + 2, c);
             }
             queue_reply(q->m, &q->to, msg, 8 + n);
             free(msg);
@@ -311,8 +311,8 @@ static int64_t icmp_send(SnxSocket* s, const void* data, size_t size, int flags,
     if (m->backend == BACKEND_PING_SOCKET) {
         snx_lock(&m->lock);
         unsigned i = m->ring_next++ % ID_RING;
-        m->seq_ring[i] = (uint16_t)(msg[6] << 8 | msg[7]);
-        m->id_ring[i] = (uint16_t)(msg[4] << 8 | msg[5]);
+        m->seq_ring[i] = snx_ld_be16(msg + 6);
+        m->id_ring[i] = snx_ld_be16(msg + 4);
         snx_unlock(&m->lock);
         struct sockaddr_storage ss;
         snx_socklen n;
@@ -395,15 +395,13 @@ static int64_t deliver(SnxSocket* s, const uint8_t* msg, size_t n, const SnxSock
         size_t total = 20 + n;
         memset(ip, 0, sizeof ip);
         ip[0] = 0x45;
-        ip[2] = (uint8_t)(total >> 8);
-        ip[3] = (uint8_t)total;
+        snx_st_be16(ip + 2, (uint16_t)total);
         ip[8] = 64; /* TTL */
         ip[9] = SNX_IPPROTO_ICMP;
         memcpy(ip + 12, src->addr, 4);
         local_address(m, src, ip + 16);
         uint16_t c = snx_net_checksum(ip, 20, 0);
-        ip[10] = (uint8_t)(c >> 8);
-        ip[11] = (uint8_t)c;
+        snx_st_be16(ip + 10, c);
         head = 20;
     }
     size_t want = head + n, done = 0;
@@ -444,14 +442,13 @@ static int64_t icmp_recv(SnxSocket* s, void* data, size_t size, int flags, SnxSo
                 src.port = 0;
                 if (s->type == SNX_SOCK_RAW && n >= 8 && msg[0] == echo_reply(s)) {
                     /* the kernel put the socket's identifier in the echo: the raw socket's guest wants its own */
-                    uint16_t seq = (uint16_t)(msg[6] << 8 | msg[7]);
+                    uint16_t seq = snx_ld_be16(msg + 6);
                     snx_lock(&m->lock);
                     unsigned count = m->ring_next < ID_RING ? m->ring_next : ID_RING;
                     for (unsigned k = 0; k < count; k++) {
                         unsigned i = (m->ring_next - 1 - k) % ID_RING;
                         if (m->seq_ring[i] == seq) {
-                            msg[4] = (uint8_t)(m->id_ring[i] >> 8);
-                            msg[5] = (uint8_t)m->id_ring[i];
+                            snx_st_be16(msg + 4, m->id_ring[i]);
                             break;
                         }
                     }
@@ -459,8 +456,7 @@ static int64_t icmp_recv(SnxSocket* s, void* data, size_t size, int flags, SnxSo
                     if (!is_v6(s)) {
                         msg[2] = msg[3] = 0;
                         uint16_t c = snx_net_checksum(msg, n, 0);
-                        msg[2] = (uint8_t)(c >> 8);
-                        msg[3] = (uint8_t)c;
+                        snx_st_be16(msg + 2, c);
                     }
                 }
                 if (from) *from = src;

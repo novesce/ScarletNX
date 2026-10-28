@@ -35,7 +35,6 @@ static int64_t dispatch(GnuProcess* p, uint64_t number, const uint64_t a[6]);
 /* SNX_GNU_STRACE=1: every syscall on stderr, with its arguments and result, a line each */
 int64_t gnu_syscall(GnuProcess* p, uint64_t number, const uint64_t a[6]) {
     static int trace = -1;
-    int64_t result;
     if (trace < 0) trace = getenv("SNX_GNU_STRACE") && getenv("SNX_GNU_STRACE")[0] == '1';
     /* arm64 el0_svc_common takes an int syscall number from x8. */
     number = (uint32_t)number;
@@ -43,7 +42,7 @@ int64_t gnu_syscall(GnuProcess* p, uint64_t number, const uint64_t a[6]) {
         fprintf(stderr, "[%u] %llu(0x%llx, 0x%llx, 0x%llx, 0x%llx) ...\n", p->pid, (unsigned long long)number,
                 (unsigned long long)a[0], (unsigned long long)a[1], (unsigned long long)a[2],
                 (unsigned long long)a[3]);
-    result = dispatch(p, number, a);
+    int64_t result = dispatch(p, number, a);
     if (trace) fprintf(stderr, "[%u] %llu = %lld\n", p->pid, (unsigned long long)number, (long long)result);
     return result;
 }
@@ -142,8 +141,7 @@ static int64_t dispatch(GnuProcess* p, uint64_t number, const uint64_t a[6]) {
             if (a[5] & 4095) return -GNU_EINVAL;
             return gnu_memory_mmap(&p->memory, a[0], a[1], (unsigned)a[2], a[3]);
         case GNU_NR_uname: {
-            char uts[6][65];
-            memset(uts, 0, sizeof uts);
+            char uts[6][65] = {0};
             strcpy(uts[0], "Linux");
             strcpy(uts[1], "scarletnx");
             strcpy(uts[2], "6.6.0");

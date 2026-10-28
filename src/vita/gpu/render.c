@@ -17,6 +17,7 @@
 #include "vita/gpu/swizzle_spv.h"
 #include "vita/gpu/yuv_spv.h"
 #include "common/utilities/endian.h"
+#include "common/utilities/bits.h"
 #include "snx_settings.h"
 #include <inttypes.h>
 #include <stdarg.h>
@@ -131,7 +132,7 @@ static void once(struct VitaRender* r, unsigned bit, const char* format, ...) {
     putchar('\n');
     va_end(list);
 }
-static void retire(unsigned slot);
+static void retire(unsigned slot, uint64_t serial);
 static void rendering_pause(VkCommandBuffer cb);
 static void rendering_resume(struct VitaRender* r, VkCommandBuffer cb);
 static bool color_copy(struct VitaRender* r, VkCommandBuffer cb, const Surface* s, const Import* m, VkDeviceSize at,
@@ -465,7 +466,8 @@ bool vita_render_init(VitaProcess* p) {
     }
     return true;
 }
-static void retire(unsigned slot) {
+static void retire(unsigned slot, uint64_t serial) {
+    (void)serial;
     if (g_retiring) g_retiring->staging[slot].used = 0, g_retiring->linear[slot].used = 0;
 }
 void vita_render_shader_free(VitaProcess* p, void* shader) {
@@ -580,7 +582,7 @@ void vita_render_begin_scene(VitaProcess* p, GxmContext* c) {
     struct VitaRender* r = render_of(p);
     if (!r) return;
     /* the scene before drawn first: the game's next writes are its own (the description above says why) */
-    vita_vk_wait(r->vk->submitted);
+    vita_vk_wait(r->vk->ring.submitted);
     ++r->scene;
     r->rendering = false;
     r->color = r->depth = NULL;
@@ -710,8 +712,8 @@ bool vita_render_done(VitaProcess* p, uint64_t serial) {
 bool vita_render_idle(VitaProcess* p, bool wait) {
     struct VitaRender* r = render_of(p);
     if (!r) return true;
-    if (wait) return vita_vk_wait(r->vk->submitted);
-    return vita_vk_poll() >= r->vk->submitted;
+    if (wait) return vita_vk_wait(r->vk->ring.submitted);
+    return vita_vk_poll() >= r->vk->ring.submitted;
 }
 bool vita_render_show(VitaProcess* p, uint32_t address, uint32_t pitch, uint32_t width, uint32_t height) {
     struct VitaRender* r = render_of(p);
@@ -724,7 +726,7 @@ bool vita_render_show(VitaProcess* p, uint32_t address, uint32_t pitch, uint32_t
 }
 uint64_t vita_render_submitted(VitaProcess* p) {
     struct VitaRender* r = render_of(p);
-    return r ? r->vk->submitted : 0;
+    return r ? r->vk->ring.submitted : 0;
 }
 
 /* ---- draws ---- */
@@ -790,18 +792,17 @@ static VkBlendOp blend_op(unsigned f) {
                                     VK_BLEND_OP_MIN, VK_BLEND_OP_MAX};
     return f < sizeof ops / sizeof *ops ? ops[f] : VK_BLEND_OP_ADD;
 }
-static uint64_t hash(uint64_t h, uint64_t v) { return (h ^ v) * 0x100000001b3ull; }
 static VkPipeline pipeline_for(struct VitaRender* r, GxmContext* c, const GxmVertexProgram* vp, Shader* vs,
                                const GxmFragmentProgram* fp, Shader* fs, VkPrimitiveTopology topology) {
-    uint64_t key = 0xcbf29ce484222325ull;
-    key = hash(key, (uintptr_t)vs), key = hash(key, (uintptr_t)fs), key = hash(key, fp->blend_info | (uint64_t)fp->blend << 32);
-    key = hash(key, topology), key = hash(key, c->cull_mode), key = hash(key, r->depth != NULL);
-    key = hash(key, r->color->vk_format), key = hash(key, r->depth ? r->depth->vk_format : 0);
-    key = hash(key, c->depth_func), key = hash(key, c->depth_write);
-    for (unsigned i = 0; i < vp->stream_count; ++i) key = hash(key, vp->streams[i].stride | (uint64_t)vp->streams[i].index_source << 16);
+    uint64_t key = SNX_FNV_BASIS;
+    key = snx_fnv_step(key, (uintptr_t)vs), key = snx_fnv_step(key, (uintptr_t)fs), key = snx_fnv_step(key, fp->blend_info | (uint64_t)fp->blend << 32);
+    key = snx_fnv_step(key, topology), key = snx_fnv_step(key, c->cull_mode), key = snx_fnv_step(key, r->depth != NULL);
+    key = snx_fnv_step(key, r->color->vk_format), key = snx_fnv_step(key, r->depth ? r->depth->vk_format : 0);
+    key = snx_fnv_step(key, c->depth_func), key = snx_fnv_step(key, c->depth_write);
+    for (unsigned i = 0; i < vp->stream_count; ++i) key = snx_fnv_step(key, vp->streams[i].stride | (uint64_t)vp->streams[i].index_source << 16);
     for (unsigned i = 0; i < vp->attribute_count; ++i) {
         const GxmAttribute* a = &vp->attributes[i];
-        key = hash(key, a->stream | (uint64_t)a->offset << 8 | (uint64_t)a->format << 24 | (uint64_t)a->components << 32 |
+        key = snx_fnv_step(key, a->stream | (uint64_t)a->offset << 8 | (uint64_t)a->format << 24 | (uint64_t)a->components << 32 |
                             (uint64_t)a->reg << 40);
     }
     unsigned slot = (unsigned)(key % PIPELINES);
@@ -1206,7 +1207,7 @@ static Texture* texture_for(struct VitaRender* r, VitaProcess* p, VkCommandBuffe
             free_slot = &r->textures[0];
             for (unsigned i = 1; i < TEXTURES; ++i)
                 if (r->textures[i].scene < free_slot->scene) free_slot = &r->textures[i];
-            vita_vk_wait(r->vk->submitted);
+            vita_vk_wait(r->vk->ring.submitted);
             vkDestroyImageView(r->vk->device, free_slot->view, NULL);
             vkDestroyImage(r->vk->device, free_slot->image, NULL);
             vkFreeMemory(r->vk->device, free_slot->memory, NULL);

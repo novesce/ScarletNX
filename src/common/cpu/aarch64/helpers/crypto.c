@@ -67,9 +67,8 @@ void v_aes(V128* d, const V128* k, int dec) {
     static const u8 shift[16] = {0, 5, 10, 15, 4, 9, 14, 3, 8, 13, 2, 7, 12, 1, 6, 11},
                     inv_shift[16] = {0, 13, 10, 7, 4, 1, 14, 11, 8, 5, 2, 15, 12, 9, 6, 3};
     V128 t;
-    int i;
-    for (i = 0; i < 16; ++i) t.b[i] = d->b[i] ^ k->b[i];
-    for (i = 0; i < 16; ++i) d->b[i] = dec ? aes_inv_sbox[t.b[inv_shift[i]]] : aes_sbox[t.b[shift[i]]];
+    for (int i = 0; i < 16; ++i) t.b[i] = d->b[i] ^ k->b[i];
+    for (int i = 0; i < 16; ++i) d->b[i] = dec ? aes_inv_sbox[t.b[inv_shift[i]]] : aes_sbox[t.b[shift[i]]];
 }
 
 /* MixColumns (circulant 2 3 1 1) or InvMixColumns (14 11 13 9) of each column */
@@ -77,11 +76,10 @@ void v_aesmc(V128* d, const V128* s, int inv) {
     static const u8 forward[4] = {2, 3, 1, 1}, inverse[4] = {14, 11, 13, 9};
     const u8* m = inv ? inverse : forward;
     V128 t = *s;
-    int col, row, k;
-    for (col = 0; col < 4; ++col)
-        for (row = 0; row < 4; ++row) {
+    for (int col = 0; col < 4; ++col)
+        for (int row = 0; row < 4; ++row) {
             u8 r = 0;
-            for (k = 0; k < 4; ++k) r ^= aes_mul(t.b[col * 4 + k], m[(k - row + 4) & 3]);
+            for (int k = 0; k < 4; ++k) r ^= aes_mul(t.b[col * 4 + k], m[(k - row + 4) & 3]);
             d->b[col * 4 + row] = r;
         }
 }
@@ -95,8 +93,7 @@ static u32 sha_majority(u32 x, u32 y, u32 z) { return (x & y) | ((x | y) & z); }
 /* the register's 32-bit words as numbers in place (SHA works on them): a swap of each on a big-endian host, where
    V128 holds the guest's bytes, and nothing on a little-endian one. Its own inverse */
 static V128 sha_words(V128 v) {
-    u32 i;
-    for (i = 0; i < 4; ++i) v.s[i] = SNX_VS(v, i);
+    for (u32 i = 0; i < 4; ++i) v.s[i] = SNX_VS(v, i);
     return v;
 }
 
@@ -104,14 +101,14 @@ static V128 sha_words(V128 v) {
    SHA1SU0, SHA1H, SHA1SU1: the schedule updates. Operands are read before Vd is written (they may alias). */
 void v_sha1(CPU* c, u32 op, u32 d, u32 n, u32 m) {
     V128 x = sha_words(c->v[d]), y = sha_words(c->v[n]), z = sha_words(c->v[m]);
-    u32 i, t, e;
+    u32 e;
     switch (op) {
         case 0:
         case 1:
         case 2:
             e = y.s[0];
-            for (i = 0; i < 4; ++i) {
-                t = op == 0   ? sha_choose(x.s[1], x.s[2], x.s[3])
+            for (u32 i = 0; i < 4; ++i) {
+                u32 t = op == 0   ? sha_choose(x.s[1], x.s[2], x.s[3])
                     : op == 1 ? sha_parity(x.s[1], x.s[2], x.s[3])
                               : sha_majority(x.s[1], x.s[2], x.s[3]);
                 t += sha_rol(x.s[0], 5) + e + z.s[i];
@@ -150,11 +147,10 @@ static u32 sha_small1(u32 x) { return sha_ror(x, 17) ^ sha_ror(x, 19) ^ (x >> 10
    SHA256SU1: the schedule updates */
 void v_sha256(CPU* c, u32 op, u32 d, u32 n, u32 m) {
     V128 x = sha_words(c->v[d]), y = sha_words(c->v[n]), z = sha_words(c->v[m]);
-    u32 i, t;
     switch (op) {
         case 4: /* SHA256H: Vd gets the new a..d */
-            for (i = 0; i < 4; ++i) {
-                t = sha_choose(y.s[0], y.s[1], y.s[2]) + y.s[3] + sha_sigma1(y.s[0]) + z.s[i];
+            for (u32 i = 0; i < 4; ++i) {
+                u32 t = sha_choose(y.s[0], y.s[1], y.s[2]) + y.s[3] + sha_sigma1(y.s[0]) + z.s[i];
                 y.s[3] = y.s[2];
                 y.s[2] = y.s[1];
                 y.s[1] = y.s[0];
@@ -167,8 +163,8 @@ void v_sha256(CPU* c, u32 op, u32 d, u32 n, u32 m) {
             }
             break;
         case 5: /* SHA256H2: Vd gets the new e..h */
-            for (i = 0; i < 4; ++i) {
-                t = sha_choose(x.s[0], x.s[1], x.s[2]) + x.s[3] + sha_sigma1(x.s[0]) + z.s[i];
+            for (u32 i = 0; i < 4; ++i) {
+                u32 t = sha_choose(x.s[0], x.s[1], x.s[2]) + x.s[3] + sha_sigma1(x.s[0]) + z.s[i];
                 x.s[3] = x.s[2];
                 x.s[2] = x.s[1];
                 x.s[1] = x.s[0];
@@ -201,13 +197,12 @@ void v_pmull(V128* d, const V128* a, const V128* b, int hi) {
     static const u64 m = 0x1111111111111111ULL;
     u64 x = SNX_VD(*a, hi ? 1 : 0), y = SNX_VD(*b, hi ? 1 : 0);
     u128 r = 0;
-    int h, c, i;
-    for (h = 0; h < 2; ++h) {
+    for (int h = 0; h < 2; ++h) {
         u64 half = h ? x >> 32 : x & 0xFFFFFFFFULL;
         u128 part = 0;
-        for (c = 0; c < 4; ++c) {
+        for (int c = 0; c < 4; ++c) {
             u128 z = 0;
-            for (i = 0; i < 4; ++i) z ^= (u128)(half & (m << i)) * (y & (m << ((c - i) & 3)));
+            for (int i = 0; i < 4; ++i) z ^= (u128)(half & (m << i)) * (y & (m << ((c - i) & 3)));
             z &= (u128)(m << c) | ((u128)(m << c) << 64);
             part |= z;
         }

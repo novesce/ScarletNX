@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
    Copyright 2026 the ScarletNX contributors */
 #include "3ds/audio/output.h"
+#include "common/utilities/endian.h"
 #include <SDL3/SDL.h>
 #include <stdio.h>
 #include <string.h>
@@ -17,9 +18,6 @@ static struct {
     uint32_t wav_bytes;
 } o;
 
-static void put32(unsigned char* b, uint32_t v) {
-    for (unsigned i = 0; i < 4; ++i) b[i] = (unsigned char)(v >> (i * 8));
-}
 static void wav_header(uint32_t data_bytes) {
     /* RIFF, a 16-byte fmt chunk (PCM, 2 channels, 16 bits, 4-byte frames), then the data */
     unsigned char h[44] = {'R', 'I', 'F', 'F', 0,  0, 0, 0, 'W', 'A', 'V', 'E',
@@ -27,10 +25,10 @@ static void wav_header(uint32_t data_bytes) {
     h[32] = 4;
     h[34] = 16;
     memcpy(h + 36, "data", 4);
-    put32(h + 4, 36 + data_bytes);
-    put32(h + 24, SNX_CTR_DSP_RATE);
-    put32(h + 28, SNX_CTR_DSP_RATE * 4);
-    put32(h + 40, data_bytes);
+    snx_st_le32(h + 4, 36 + data_bytes);
+    snx_st_le32(h + 24, SNX_CTR_DSP_RATE);
+    snx_st_le32(h + 28, SNX_CTR_DSP_RATE * 4);
+    snx_st_le32(h + 40, data_bytes);
     if (fseek(o.wav, 0, SEEK_SET) || fwrite(h, sizeof h, 1, o.wav) != 1 || fseek(o.wav, 0, SEEK_END)) {
         fclose(o.wav);
         o.wav = NULL;

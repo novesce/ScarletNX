@@ -12,6 +12,7 @@
 #include "nx/runtime/main.h"
 #include "nx/runtime/options.h"
 #include "nx/runtime/platform/log.h"
+#include "nx/runtime/platform/overlay.h" /* the keyboard's box's line, which am's answer holds */
 #include "nx/runtime/platform/plat.h"
 #include <stdlib.h>
 #include <string.h>
@@ -230,9 +231,19 @@ typedef struct {
     LibApplet applets[AM_APPLETS];
     u32 storage_next, accessor_next, volume_next, lock_obj_next, applet_next;
 } HleAm;
-/* am's host side: locks and condition variables, which a save state never holds (hle.h's g_host) */
+/* am's host side: locks and condition variables, which a save state never holds (hle.h's g_host). And under lock, the
+   software keyboard's box over the game (am.c), the host's too: the ticket of the box shown last (0 none), whether it
+   waits for its answer and who for, the inline keyboard of an applet (its slot + 1 and object) or, kb_inline 0, the
+   thread of a whole applet, waiting on kb_cv; and that thread's answer, the ticket answered with its text or a cancel */
 typedef struct {
     PMutex lock;
+    PCond kb_cv;
+    u32 kb_ticket;
+    int kb_open;
+    u32 kb_inline, kb_obj;
+    u32 kb_answered;
+    int kb_cancelled;
+    char kb_text[OVERLAY_KB_TEXT];
 } HostAm;
 
 /* ---- audio.c */

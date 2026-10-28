@@ -8,6 +8,7 @@
 #define SNX_CTR_DSP_INTERNAL_H
 #include "3ds/audio/dsp.h"
 #include <stddef.h>
+#include <stdint.h>
 
 #define DSP_SOURCES         24u
 #define DSP_REGION0         0x50000u /* the two SharedMemory regions, offsets into DSP RAM */
@@ -30,6 +31,10 @@
 #define DSP_FRAME_COUNTER   0x7ffeu
 
 static inline uint32_t dsp32(uint32_t value) { return value << 16 | value >> 16; }
+/* a sample saturated to s16 */
+static inline int16_t clamp16(int64_t value) {
+    return (int16_t)(value < -32768 ? -32768 : value > 32767 ? 32767 : value);
+}
 
 /* SourceConfiguration::Configuration */
 typedef struct {

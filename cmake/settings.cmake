@@ -56,6 +56,17 @@ if(NOT SNX_TRACY)
     set(snx_settings_spec "${snx_settings_out}/settings.txt")
     file(WRITE "${snx_settings_spec}" "${snx_settings_text}")
 endif()
+# A phone's JIT compiles at O0 (guest_jit.c): any other level breaks it there, so its level is no setting of a phone's
+# and the spec has no row or key for it
+if(ANDROID OR IOS)
+    file(READ "${snx_settings_spec}" snx_settings_text)
+    string(REGEX REPLACE "# SNX_PHONE_BEGIN[^#]*# SNX_PHONE_END\r?\n" "" snx_settings_text "${snx_settings_text}")
+    if(snx_settings_text MATCHES "SNX_PHONE_BEGIN")
+        message(FATAL_ERROR "settings.txt: a phone block has no end marker")
+    endif()
+    set(snx_settings_spec "${snx_settings_out}/settings.txt")
+    file(WRITE "${snx_settings_spec}" "${snx_settings_text}")
+endif()
 set(snx_settings_args "")
 
 # LLVM's: the headers of the LLVM the backend links, and the pipelines its opt prints (llvm_opt.cmake). An opt of
