@@ -100,7 +100,8 @@ typedef struct {
     int has_border_color; /* VK_EXT_custom_border_color */
     u32 border_color_max; /* maxCustomBorderColorSamplers: past it, samplers take the nearest built-in color */
     int has_mirror_clamp; /* samplerMirrorClampToEdge: VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE */
-    int has_shader_draw_parameters;
+    int has_shader_draw_parameters; /* shaders take an instance's ID from BaseInstance (spirv_translate.c) */
+    int has_draw_indirect_count;    /* drawIndirectCount: an indirect draw's count from the GPU's memory */
     u64 alloc_cap; /* the most one device memory allocation may be (memory.c) */
     int sparse;    /* sparseBinding on the graphics queue: images bigger than alloc_cap are bound in pieces */
     /* VK_EXT_attachment_feedback_loop_layout: a draw samples a color target it renders to in place (gpu/vk/render.c),
@@ -307,7 +308,12 @@ void rec_CmdBindIndexBuffer(VkCommandBuffer cb, VkBuffer buf, VkDeviceSize off, 
 void rec_CmdDraw(VkCommandBuffer cb, u32 count, u32 instances, u32 first, u32 first_instance);
 void rec_CmdDrawIndexed(VkCommandBuffer cb, u32 count, u32 instances, u32 first, i32 vertex_offset,
                         u32 first_instance);
+/* max draws of the arguments at buf + off, stride bytes apart (vkCmdDraw[Indexed]Indirect), or with count_buf, as
+   many as the 32-bit count at count_buf + count_off says (their Count forms) */
+void rec_CmdDrawIndirect(VkCommandBuffer cb, int indexed, VkBuffer buf, VkDeviceSize off, VkBuffer count_buf,
+                         VkDeviceSize count_off, u32 max, u32 stride);
 void rec_CmdDispatch(VkCommandBuffer cb, u32 x, u32 y, u32 z);
+void rec_CmdDispatchIndirect(VkCommandBuffer cb, VkBuffer buf, VkDeviceSize off);
 void rec_CmdEndRendering(VkCommandBuffer cb);
 void rec_CmdSetCullMode(VkCommandBuffer cb, VkCullModeFlags mode);
 void rec_CmdSetFrontFace(VkCommandBuffer cb, VkFrontFace face);
@@ -788,6 +794,7 @@ int vk_buf_get_input(u64 gva, u64 len, u64 align, VkBuffer* buf, u64* off);
 /* the same inside a window shared with the ranges it overlaps (a storage buffer with no size of its own): *off is the
    range's offset in it, a multiple of minStorageBufferOffsetAlignment */
 int vk_buf_get_window(u64 gva, u64 len, VkBuffer* buf, u64* off);
+int vk_buf_get_window_input(u64 gva, u64 len, u64 align, VkBuffer* buf, u64* off);
 /* the cache lines vk_buf_get(gva, len) will read, fetched ahead: step 0 its index slot, step 1 (after step 0 for every
    range) its entry. For a caller with several ranges to look up, so their misses overlap */
 void vk_buf_prefetch(u64 gva, u64 len, int step);
@@ -875,6 +882,9 @@ int vk_query_pred_flush(void); /* records the batch's shader; 0 without memory, 
 void vk_query_pred_hold(u32 slot);
 void vk_query_pred_drop(u32 slot);
 VkBuffer vk_query_pred_buffer(void); /* a predicate's word is at slot * 4 */
+/* a predicate slot, held once, that the GPU writes now with whether the 64-bit values at a and a + 16 differ: 1, or 0
+   when it can't be made */
+int vk_query_pred_compare(u64 a, u32* slot);
 void vk_buf_mem_need_map(u64 gva, u64 len);
 void vk_buf_before_write(u64 gva, u64 len);
 void vk_buf_land(void);

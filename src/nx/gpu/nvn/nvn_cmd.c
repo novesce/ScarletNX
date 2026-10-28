@@ -15,6 +15,8 @@
 #include "nx/gpu/nvn/nvn_object.h"
 #include "gpu/nvn/nvn.hook.h"
 #include "nx/runtime/platform/log.h"
+#include "nx/runtime/platform/plat.h"
+#include <stdlib.h>
 #include <string.h>
 
 #define CB(a) NVN_OBJ(NvnCmdBuf, a)
@@ -52,10 +54,76 @@ static void new_segment(NvnCmdBuf* o, u64 memory, u64 size) {
     if (o->recording == 1 && o->cur) {
         put_hdr(o->cur, OP_JUMP, 16);
         memcpy(GP(o->cur + 8), &start, 8);
-        o->used += 16;
+        if (!o->lent) o->used += 16;
     }
     o->cur = start;
     o->end = memory + size;
+    o->lent = 0;
+}
+
+/* Records take more room than the driver's methods for the same commands (a draw's 32 bytes against its 16, render
+   targets' texture snapshots), and a game sizes its command memory by the driver's. One game's display lists have a
+   memory callback that adds nothing (a bare ret): when the game's memory runs out and its callback adds none, the
+   recording goes on in guest memory of the runtime's own, from the kernel region the game never maps, as nxnative
+   lent memory of its own. Its bytes aren't the game's, so they count nothing of GetCommandMemoryUsed.
+   A lent segment belongs to the game's memory it continues (its origin): when the game adds that memory again, it is
+   done with what it recorded there, as on the console, and so with what the runtime lent after it, which goes back
+   for the next lend. That game re-records its display lists into the same buffers every frame */
+#define LEND_SEGMENT (64u << 10)
+typedef struct {
+    u64 at, size, origin;
+    u32 taken, pad;
+} Lent;
+static struct {
+    PMutex lock; /* the game's threads record into several command buffers at once */
+    Lent* l;
+    u32 n, cap;
+    u64 total; /* bytes of the kernel region lent */
+} g_lend = {PMUTEX_INIT, NULL, 0, 0, 0};
+static void lend(u64 cb, u32 need) {
+    NvnCmdBuf* o = CB(cb);
+    u64 size = need > LEND_SEGMENT / 2 ? ((u64)need * 2 + 0xffff) & ~0xffffull : LEND_SEGMENT, at = 0;
+    u32 i;
+    pm_lock(&g_lend.lock);
+    for (i = 0; i < g_lend.n && !at; i++)
+        if (!g_lend.l[i].taken && g_lend.l[i].size >= size) at = g_lend.l[i].at;
+    if (at)
+        i--;
+    else {
+        u64 was = g_lend.total;
+        if (g_lend.n == g_lend.cap) {
+            u32 cap = g_lend.cap ? g_lend.cap * 2 : 64;
+            Lent* l = (Lent*)realloc(g_lend.l, cap * sizeof *l);
+            if (!l) fatal("nvn: out of memory for the command memory lent");
+            g_lend.l = l;
+            g_lend.cap = cap;
+        }
+        at = kmem_alloc(size, MS_KERNEL, PERM_RW);
+        i = g_lend.n++;
+        g_lend.l[i].at = at;
+        g_lend.l[i].size = size;
+        g_lend.total += size;
+        LOG_LIMIT(4, "nvn: command buffer %llx is out of the game's command memory, which its callback doesn't add to: "
+                     "%llu KiB of the runtime's lent\n",
+                  (unsigned long long)cb, (unsigned long long)(size >> 10));
+        if ((g_lend.total ^ was) > was) /* a new power of two of the total */
+            LOG("nvn: %llu KiB of the runtime's memory lent to command buffers in all\n",
+                (unsigned long long)(g_lend.total >> 10));
+    }
+    g_lend.l[i].taken = 1;
+    g_lend.l[i].origin = o->origin;
+    size = g_lend.l[i].size;
+    pm_unlock(&g_lend.lock);
+    new_segment(o, at, size);
+    o->lent = 1;
+}
+/* the game adds [memory, memory + size) again: what was lent after it comes back */
+static void lend_return(u64 memory, u64 size) {
+    u32 i;
+    pm_lock(&g_lend.lock);
+    for (i = 0; i < g_lend.n; i++)
+        if (g_lend.l[i].taken && g_lend.l[i].origin - memory < size) g_lend.l[i].taken = 0;
+    pm_unlock(&g_lend.lock);
 }
 
 /* room for one record of size bytes with keep bytes after it (OP_RESERVE, 0 for the END), asking the game's memory
@@ -66,12 +134,11 @@ static u64 alloc_keep(CPU* c, u64 cb, u32 size, u32 keep) {
     int tries;
     size = (size + 7) & ~7u;
     for (tries = 0; !o->cur || o->cur + size + keep > o->end; tries++) {
-        /* nxnative lends a segment of host memory here (the game's callback didn't add enough): the records must be in
-           guest memory for the queue and the replay, and no game has needed it yet */
-        if (!o->callback || tries == 2)
-            fatal("nvn: command buffer %llx needs %u bytes of command memory, and the game's memory callback (%llx) "
-                  "didn't add them",
-                  (unsigned long long)cb, size + keep, (unsigned long long)o->callback);
+        /* the game's callback once, then memory of the runtime's own (lend) */
+        if (!o->callback || tries == 1) {
+            lend(cb, size + keep);
+            continue;
+        }
         LOG_LIMIT(4, "nvn: command buffer %llx is out of command memory: the game's callback %llx adds more\n",
                   (unsigned long long)cb, (unsigned long long)o->callback);
         guest_call(c, o->callback, cb, NVN_COMMAND_BUFFER_MEMORY_EVENT_OUT_OF_COMMAND_MEMORY, size + keep,
@@ -79,7 +146,7 @@ static u64 alloc_keep(CPU* c, u64 cb, u32 size, u32 keep) {
     }
     at = o->cur;
     o->cur += size;
-    o->used += size;
+    if (!o->lent) o->used += size;
     put_hdr(at, 0, size);
     if (o->recording == 2) { /* the recording's first record is its handle */
         o->begin = at;
@@ -139,7 +206,9 @@ void nvn_CommandBufferAddCommandMemory(CPU* c, u64 cb, u64 pool, i64 offset, u64
         fatal("nvn: command buffer %llx was given %llx bytes of command memory from pool %llx (memory %llx), which "
               "nvn_direct doesn't lend memory for",
               (unsigned long long)cb, (unsigned long long)size, (unsigned long long)pool, (unsigned long long)memory);
+    if (g_lend.n) lend_return(memory + (u64)offset, size);
     new_segment(CB(cb), memory + (u64)offset, size);
+    CB(cb)->origin = memory + (u64)offset;
     CB(cb)->used = 0; /* GetCommandMemoryUsed counts from the memory the game last added, across recordings */
 }
 /* the control memory is the driver's own bookkeeping: the records need none */
@@ -172,11 +241,50 @@ u64 nvn_CommandBufferGetControlMemoryUsed(CPU* c, u64 cb) {
     (void)cb;
     return 0;
 }
-/* Copying recordings is calling them here: the records stay where they are. NVN copies the commands, so a game may
-   take the source's memory back at once, which the replay would then read: neither game run so far copies any */
+/* A record's snapshot pointers (a texture object copied into the record, tex_snap) that point into the record at src,
+   moved to its copy at dst */
+static void relocate(u64 dst, u64 src, u32 op, u32 size) {
+    static const struct {
+        u32 op, off, n;
+    } snaps[] = {
+        {OP_SET_RT, offsetof(NvnPSetRT, color), 8},     {OP_SET_RT, offsetof(NvnPSetRT, depth), 1},
+        {OP_COPY_B2T, offsetof(NvnPCopyB2T, texture), 1}, {OP_COPY_T2B, offsetof(NvnPCopyB2T, texture), 1},
+        {OP_COPY_T2T, offsetof(NvnPCopyT2T, src), 1},   {OP_COPY_T2T, offsetof(NvnPCopyT2T, dst), 1},
+        {OP_CLEAR_TEX, offsetof(NvnPClearTex, texture), 1},
+    };
+    size_t i;
+    u32 k;
+    for (i = 0; i < sizeof snaps / sizeof *snaps; i++)
+        for (k = 0; snaps[i].op == op && k < snaps[i].n; k++) {
+            u64 at = dst + 8 + snaps[i].off + 8 * (u64)k, v = gr64(at);
+            if (v >= src && v < src + size) gw64(at, v - src + dst);
+        }
+}
+/* NVN copies the commands of recordings into the command buffer, and the game may take the source's memory back at
+   once: each record is copied (a recording it calls is still called where it is), across the source's segments */
 void nvn_CommandBufferCopyCommands(CPU* c, u64 cb, i32 n, u64 handles) {
-    LOG_LIMIT(1, "nvn: a game copies recordings (nvnCommandBufferCopyCommands): they are called where they are\n");
-    nvn_CommandBufferCallCommands(c, cb, n, handles);
+    i32 i;
+    for (i = 0; i < n; i++) {
+        u64 p = gr64(handles + 8 * (u64)i);
+        for (;;) {
+            NvnRecHdr h;
+            u64 at;
+            memcpy(&h, GP(p), sizeof h);
+            if (h.op >= OP_COUNT_ || h.size < 8 || (h.size & 7))
+                fatal("nvn: nvnCommandBufferCopyCommands of a record at %llx with op %u and size %u, which nvn_direct "
+                      "never writes",
+                      (unsigned long long)p, h.op, h.size);
+            if (h.op == OP_END) break;
+            if (h.op == OP_JUMP) {
+                p = gr64(p + 8);
+                continue;
+            }
+            at = alloc_keep(c, cb, h.size, OP_RESERVE); /* may run the game's memory callback */
+            memcpy(GP(at), GP(p), h.size);
+            relocate(at, p, h.op, h.size);
+            p += h.size;
+        }
+    }
 }
 void nvn_CommandBufferCallCommands(CPU* c, u64 cb, i32 n, u64 handles) {
     i32 i;
@@ -245,14 +353,14 @@ void nvn_CommandBufferUpdateUniformBuffer(CPU* c, u64 cb, u64 buffer, u64 buffer
    texture as recorded keeps its address, read at submit */
 #define SNAP_OFF(T) ((sizeof(T) + 7) & ~(size_t)7)
 static u64 tex_snap(u64 payload, size_t off, int k, u64 t) {
-    u64 s = payload + off + (u64)k * sizeof(NvnTexture);
+    u64 s = payload + off + (u64)k * NVN_TEX_SNAP;
     if (!t) return 0;
     if (NVN_OBJ(NvnTexture, t)->magic != NVN_MAGIC('T', 'E', 'X', 0)) {
         LOG_LIMIT(4, "nvn: texture %llx isn't a live texture as a command is recorded: read at submit\n",
                   (unsigned long long)t);
         return t;
     }
-    memcpy(GP(s), GP(t), sizeof(NvnTexture));
+    memcpy(GP(s), GP(t), NVN_TEX_SNAP);
     return s;
 }
 static void copy_view(NvnView* dst, u8* has, u64 v) {
@@ -267,7 +375,7 @@ void nvn_CommandBufferSetRenderTargets(CPU* c, u64 cb, i32 n, u64 colors, u64 vi
         LOG_LIMIT(4, "nvn: nvnCommandBufferSetRenderTargets with %d targets\n", n);
         n = n < 0 ? 0 : 8;
     }
-    payload = rec(c, cb, OP_SET_RT, SNAP_OFF(NvnPSetRT) + (size_t)(n + 1) * sizeof(NvnTexture));
+    payload = rec(c, cb, OP_SET_RT, SNAP_OFF(NvnPSetRT) + (size_t)(n + 1) * NVN_TEX_SNAP);
     r = (NvnPSetRT*)(void*)GP(payload);
     r->count = n;
     for (i = 0; i < n; i++) {
@@ -278,7 +386,7 @@ void nvn_CommandBufferSetRenderTargets(CPU* c, u64 cb, i32 n, u64 colors, u64 vi
     copy_view(&r->dview, &r->has_dview, depth_view);
 }
 void nvn_CommandBufferCopyBufferToTexture(CPU* c, u64 cb, u64 src, u64 t, u64 v, u64 region, i32 flags) {
-    u64 payload = rec(c, cb, OP_COPY_B2T, SNAP_OFF(NvnPCopyB2T) + sizeof(NvnTexture));
+    u64 payload = rec(c, cb, OP_COPY_B2T, SNAP_OFF(NvnPCopyB2T) + NVN_TEX_SNAP);
     NvnPCopyB2T* r = (NvnPCopyB2T*)(void*)GP(payload);
     r->buffer = src;
     r->texture = tex_snap(payload, SNAP_OFF(NvnPCopyB2T), 0, t);
@@ -287,7 +395,7 @@ void nvn_CommandBufferCopyBufferToTexture(CPU* c, u64 cb, u64 src, u64 t, u64 v,
     r->flags = flags;
 }
 void nvn_CommandBufferCopyTextureToBuffer(CPU* c, u64 cb, u64 t, u64 v, u64 region, u64 dst, i32 flags) {
-    u64 payload = rec(c, cb, OP_COPY_T2B, SNAP_OFF(NvnPCopyB2T) + sizeof(NvnTexture));
+    u64 payload = rec(c, cb, OP_COPY_T2B, SNAP_OFF(NvnPCopyB2T) + NVN_TEX_SNAP);
     NvnPCopyB2T* r = (NvnPCopyB2T*)(void*)GP(payload);
     r->buffer = dst;
     r->texture = tex_snap(payload, SNAP_OFF(NvnPCopyB2T), 0, t);
@@ -296,7 +404,7 @@ void nvn_CommandBufferCopyTextureToBuffer(CPU* c, u64 cb, u64 t, u64 v, u64 regi
     r->flags = flags;
 }
 static NvnPCopyT2T* copy_t2t(CPU* c, u64 cb, u64 s, u64 sv, u64 d, u64 dv) {
-    u64 payload = rec(c, cb, OP_COPY_T2T, SNAP_OFF(NvnPCopyT2T) + 2 * sizeof(NvnTexture));
+    u64 payload = rec(c, cb, OP_COPY_T2T, SNAP_OFF(NvnPCopyT2T) + 2 * NVN_TEX_SNAP);
     NvnPCopyT2T* r = (NvnPCopyT2T*)(void*)GP(payload);
     r->src = tex_snap(payload, SNAP_OFF(NvnPCopyT2T), 0, s);
     r->dst = tex_snap(payload, SNAP_OFF(NvnPCopyT2T), 1, d);
@@ -332,7 +440,7 @@ void nvn_CommandBufferDownsampleTextureView(CPU* c, u64 cb, u64 s, u64 sv, u64 d
     downsample(c, cb, s, sv, d, dv);
 }
 static void clear_tex(CPU* c, u64 cb, u64 t, u64 v, u64 region, u64 value, i32 mask, u8 is_uint) {
-    u64 payload = rec(c, cb, OP_CLEAR_TEX, SNAP_OFF(NvnPClearTex) + sizeof(NvnTexture));
+    u64 payload = rec(c, cb, OP_CLEAR_TEX, SNAP_OFF(NvnPClearTex) + NVN_TEX_SNAP);
     NvnPClearTex* r = (NvnPClearTex*)(void*)GP(payload);
     r->texture = tex_snap(payload, SNAP_OFF(NvnPClearTex), 0, t);
     copy_view(&r->view, &r->has_view, v);
@@ -571,6 +679,15 @@ void nvn_CommandBufferDiscardColor(CPU* c, u64 cb, i32 index) {
 void nvn_CommandBufferDiscardDepthStencil(CPU* c, u64 cb) {
     (void)c;
     (void)cb;
+}
+/* ZCull's stencil criteria: what the hardware's coarse culling may assume of the stencil test, which only speeds it
+   up. The renderer has no ZCull, so the draws' tests give the same pixels without it */
+void nvn_CommandBufferSetStencilCullCriteria(CPU* c, u64 cb, i32 func, i32 ref, i32 mask) {
+    (void)c;
+    (void)cb;
+    (void)func;
+    (void)ref;
+    (void)mask;
 }
 void nvn_CommandBufferSaveZCullData(CPU* c, u64 cb, u64 address, u64 size) {
     (void)c;
@@ -851,6 +968,7 @@ static void draw_idx(CPU* c, u64 cb, i32 prim, i32 type, i32 count, u64 ib, i32 
 /* the arguments at ind are read by the GPU when it draws */
 void nvn_CommandBufferDrawArraysIndirect(CPU* c, u64 cb, i32 prim, u64 ind) {
     NvnPDraw d = {0};
+    LOG_LIMIT(1, "nvn: the game records indirect draws (DrawArraysIndirect)\n");
     d.prim = prim;
     d.instances = 1;
     d.ind = ind;
@@ -858,6 +976,7 @@ void nvn_CommandBufferDrawArraysIndirect(CPU* c, u64 cb, i32 prim, u64 ind) {
 }
 void nvn_CommandBufferDrawElementsIndirect(CPU* c, u64 cb, i32 prim, i32 type, u64 ib, u64 ind) {
     NvnPDrawIdx d = {0};
+    LOG_LIMIT(1, "nvn: the game records indirect draws (DrawElementsIndirect)\n");
     d.prim = prim;
     d.index_type = type;
     d.instances = 1;
@@ -865,44 +984,35 @@ void nvn_CommandBufferDrawElementsIndirect(CPU* c, u64 cb, i32 prim, i32 type, u
     d.ind = ind;
     memcpy(GP(rec(c, cb, OP_DRAW_IDX, sizeof d)), &d, sizeof d);
 }
-/* an indirect-count multi-draw: max indirect draws carrying the count's address and their index, as nxnative records
-   them; the replay draws those below the count the GPU wrote */
-#define MDI_MAX 1024
+/* an indirect-count multi-draw: up to max indirect draws, stride bytes apart, as many as the count the GPU reads at
+   count says. One record: the replay hands the whole of it to the GPU */
 void nvn_CommandBufferMultiDrawElementsIndirectCount(CPU* c, u64 cb, i32 prim, i32 type, u64 ib, u64 ind, u64 count,
                                                      i32 max, i64 stride) {
-    i32 i;
-    if (max > MDI_MAX) {
-        LOG_LIMIT(1, "nvn: an indirect-count multi-draw of up to %d draws: the first %d are recorded\n", max, MDI_MAX);
-        max = MDI_MAX;
-    }
-    for (i = 0; i < max; i++) {
-        NvnPDrawIdx d = {0};
-        d.prim = prim;
-        d.index_type = type;
-        d.instances = 1;
-        d.index_buffer = ib;
-        d.ind = ind + (u64)i * (u64)stride;
-        d.mdi_count = count;
-        d.mdi_index = i;
-        memcpy(GP(rec(c, cb, OP_DRAW_IDX, sizeof d)), &d, sizeof d);
-    }
+    NvnPDrawIdx d = {0};
+    LOG_LIMIT(1, "nvn: the game records indirect multi-draws (MultiDrawElementsIndirectCount)\n");
+    if (max <= 0) return;
+    d.prim = prim;
+    d.index_type = type;
+    d.instances = 1;
+    d.index_buffer = ib;
+    d.ind = ind;
+    d.mdi_count = count;
+    d.mdi_max = max;
+    d.mdi_stride = (i32)stride;
+    memcpy(GP(rec(c, cb, OP_DRAW_IDX, sizeof d)), &d, sizeof d);
 }
 void nvn_CommandBufferMultiDrawArraysIndirectCount(CPU* c, u64 cb, i32 prim, u64 ind, u64 count, i32 max,
                                                    i64 stride) {
-    i32 i;
-    if (max > MDI_MAX) {
-        LOG_LIMIT(1, "nvn: an indirect-count multi-draw of up to %d draws: the first %d are recorded\n", max, MDI_MAX);
-        max = MDI_MAX;
-    }
-    for (i = 0; i < max; i++) {
-        NvnPDraw d = {0};
-        d.prim = prim;
-        d.instances = 1;
-        d.ind = ind + (u64)i * (u64)stride;
-        d.mdi_count = count;
-        d.mdi_index = i;
-        memcpy(GP(rec(c, cb, OP_DRAW, sizeof d)), &d, sizeof d);
-    }
+    NvnPDraw d = {0};
+    LOG_LIMIT(1, "nvn: the game records indirect multi-draws (MultiDrawArraysIndirectCount)\n");
+    if (max <= 0) return;
+    d.prim = prim;
+    d.instances = 1;
+    d.ind = ind;
+    d.mdi_count = count;
+    d.mdi_max = max;
+    d.mdi_stride = (i32)stride;
+    memcpy(GP(rec(c, cb, OP_DRAW, sizeof d)), &d, sizeof d);
 }
 void nvn_CommandBufferDrawArrays(CPU* c, u64 cb, i32 prim, i32 first, i32 count) {
     draw(c, cb, prim, first, count, 1, 0);
@@ -934,6 +1044,7 @@ void nvn_CommandBufferDispatchCompute(CPU* c, u64 cb, i32 x, i32 y, i32 z) {
 void nvn_CommandBufferDispatchComputeIndirect(CPU* c, u64 cb, u64 ind) {
     u64 caller = c->x[30];
     NvnPDispatch* r = REC(c, cb, OP_DISPATCH, NvnPDispatch);
+    LOG_LIMIT(1, "nvn: the game records indirect dispatches (DispatchComputeIndirect)\n");
     r->caller = caller;
     r->ind = ind;
 }
@@ -944,4 +1055,12 @@ void nvn_CommandBufferDrawTransformFeedback(CPU* c, u64 cb, i32 prim, u64 contro
     (void)prim;
     (void)control;
     LOG_LIMIT(1, "nvn: nvnCommandBufferDrawTransformFeedback isn't recorded\n");
+}
+u64 nvn_CommandBufferGetMemoryCallback(CPU* c, u64 cb) {
+    (void)c;
+    return CB(cb)->callback;
+}
+u64 nvn_CommandBufferGetMemoryCallbackData(CPU* c, u64 cb) {
+    (void)c;
+    return CB(cb)->callback_data;
 }

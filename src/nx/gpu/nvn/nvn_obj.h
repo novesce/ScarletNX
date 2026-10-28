@@ -45,7 +45,7 @@ NVN_FITS(NvnDevice, 0x18);
 
 /* ---- queue ---- */
 typedef struct {
-    u32 flags, pad;
+    u32 flags, priority;
     u64 cmd_size, compute_size, control_size, flush_threshold, memory, memory_size;
 } NvnQueueBuilder; /* nxnative's device field doesn't fit an SDK 5 builder's 0x38: the runtime has one device */
 NVN_FITS(NvnQueueBuilder, 0x38);
@@ -128,13 +128,19 @@ NVN_FITS(NvnTexBuilder, 0x68);
 typedef struct {
     u32 magic;
     NvnTexDesc d;
+    u64 gpu;
     u64 pool;
     i64 offset;
     u64 memory, size;
     u8 layout[8];
-    u64 serial, gpu;
+    u64 serial;
 } NvnTexture;
 NVN_FITS(NvnTexture, 0x70); /* one game's SDK (NVN 55.8) allocates NVNtexture as 0x70 bytes */
+/* A command's snapshot of a texture (gpu/nvn/nvn_cmd.c tex_snap): the texture's first bytes, all its replay reads
+   (magic, description, GPU address). Records stay small: games size the command memory they add by what NVN's own
+   commands take, and one game adds less than 1056 bytes at a time, where eight render targets' whole objects took more */
+#define NVN_TEX_SNAP offsetof(NvnTexture, pool)
+typedef char nvn_check_tex_snap[NVN_TEX_SNAP == 40 ? 1 : -1];
 /* NVNtextureView: 16 bytes in newer SDKs (a game keeps one in a 16-byte stack slot). set: which parts were set */
 typedef struct {
     u8 set, target, base_level, levels;
@@ -154,10 +160,10 @@ NVN_FITS(NvnView, 0x10);
 /* ---- samplers ---- */
 typedef struct {
     u8 min_filter, mag_filter, wrap_s, wrap_t, wrap_r, compare_mode, compare_func, reduction;
-    f32 lod_min, lod_max, lod_bias, anisotropy, border[4];
+    f32 lod_min, lod_max, lod_bias, anisotropy, lod_snap, border[4];
 } NvnSamplerPar;
+/* no device: SDK 5.4's builder has room for one, the newer ones' 0x30 bytes only for the state */
 typedef struct {
-    u64 device;
     NvnSamplerPar p;
 } NvnSamplerBuilder;
 NVN_FITS(NvnSamplerBuilder, 0x30);
@@ -235,8 +241,10 @@ NVN_FITS(NvnWindow, 0x148);
 /* ---- command buffers ---- */
 /* cur, end: the current command memory segment (guest addresses). begin: the recording's first record, its handle.
    recording: 0 no, 1 yes, 2 yes with no record yet. used: bytes written since the game last added command memory, the
-   segments' JUMPs included (GetCommandMemoryUsed). +0x10 is the game's: its inlined NVN code writes the byte 1 there
-   after AddCommandMemory (an internal flag of the driver's) */
+   segments' JUMPs included (GetCommandMemoryUsed). lent: the current segment is the runtime's (nvn_cmd.c's lend), not
+   the game's, and takes nothing of used; origin: where the memory the game last added starts, which the segments lent
+   after it go back with. +0x10 is the game's: its inlined NVN code writes the byte 1 there after AddCommandMemory (an
+   internal flag of the driver's) */
 typedef struct {
     u32 magic, recording;
     u64 cur;
@@ -244,6 +252,8 @@ typedef struct {
     u64 end, begin;
     u64 callback, callback_data;
     u64 device, used;
+    u32 lent, pad;
+    u64 origin;
 } NvnCmdBuf;
 NVN_FITS(NvnCmdBuf, 0x90);
 typedef char nvn_check_cmd_flag[offsetof(NvnCmdBuf, game_flag10) == 0x10 ? 1 : -1];
@@ -406,16 +416,17 @@ typedef struct {
     i32 face, value_mask, mask, ref, which;
 } NvnPStencil;
 /* a draw stops before ind unless it is indirect or a multi-draw: games size command memory by what
-   GetCommandMemoryUsed reports. instances 0 counts as 1 */
+   GetCommandMemoryUsed reports. instances 0 counts as 1. ind: an indirect draw's arguments, which the GPU reads; a
+   multi-draw's mdi_max records mdi_stride bytes apart from there, as many as the 32-bit count at mdi_count says */
 typedef struct {
     i32 prim, first, count, instances, base_instance, pad;
     u64 ind, mdi_count;
-    i32 mdi_index, pad2;
+    i32 mdi_max, mdi_stride;
 } NvnPDraw;
 typedef struct {
     i32 prim, index_type, count, base_vertex, base_instance, instances;
     u64 index_buffer, ind, mdi_count;
-    i32 mdi_index, pad;
+    i32 mdi_max, mdi_stride;
 } NvnPDrawIdx;
 /* OP_SET_TEX_POOL, OP_SET_SAMP_POOL: the pool's descriptors (their GPU address) and its count */
 typedef struct {

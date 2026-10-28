@@ -57,6 +57,16 @@ void nvn_QueueBuilderSetDefaults(CPU* c, u64 b) {
     o->compute_size = 262144;
     o->control_size = 16384;
     o->flush_threshold = 4096;
+    o->priority = 100; /* the driver's default (NORMAL) */
+}
+/* kept for its getter: the replay runs every queue's submissions in order on one GPU thread, as they come */
+void nvn_QueueBuilderSetQueuePriority(CPU* c, u64 b, i32 priority) {
+    (void)c;
+    QB(b)->priority = (u32)priority;
+}
+i32 nvn_QueueBuilderGetQueuePriority(CPU* c, u64 b) {
+    (void)c;
+    return (i32)QB(b)->priority;
 }
 /* the runtime has one device, which the builder doesn't keep (it wouldn't fit SDK 5's builder) */
 void nvn_QueueBuilderSetDevice(CPU* c, u64 b, u64 d) {
@@ -112,7 +122,9 @@ int nvn_QueueInitialize(CPU* c, u64 q, u64 b) {
 void nvn_QueueFinalize(CPU* c, u64 q) {
     NvnQueue* o = NVN_OBJ(NvnQueue, q);
     (void)c;
+    nvn_wait_begin();
     nvn_replay_finish(o->replay);
+    nvn_wait_end();
     o->magic = 0;
 }
 /* submissions go to the GPU thread as they are made: nothing to flush */
@@ -123,16 +135,19 @@ void nvn_QueueFlush(CPU* c, u64 q) {
 /* the game may reuse every recording's memory after it */
 void nvn_QueueFinish(CPU* c, u64 q) {
     (void)c;
+    nvn_wait_begin();
     nvn_replay_finish(NVN_OBJ(NvnQueue, q)->replay);
+    nvn_wait_end();
 }
 /* the queue's later work waits on the GPU for the sync, so it is done no earlier than the sync signals */
-int nvn_QueueWaitSync(CPU* c, u64 q, u64 sync) {
-    NvnQueue* o = NVN_OBJ(NvnQueue, q);
-    const NvnSync* s = NVN_OBJ(const NvnSync, sync);
-    (void)c;
-    if (!s->fenced) return 1;
+static void wait_sync(NvnQueue* o, const NvnSync* s) {
+    if (!s->fenced) return;
     if (s->ready > o->ready) o->ready = s->ready;
     o->shown = later_shown(o->shown, s->shown);
+}
+int nvn_QueueWaitSync(CPU* c, u64 q, u64 sync) {
+    (void)c;
+    wait_sync(NVN_OBJ(NvnQueue, q), NVN_OBJ(const NvnSync, sync));
     return 1;
 }
 
@@ -181,7 +196,7 @@ static int shown_wait(const NvnSync* s, u64 start, i64 left, int* waited) {
 /* A fenced sync signals once its syncpoint reaches its value (the replay reached it), the present it waits for is on
    the display (shown_wait) and the pacer's clock reaches its ready time: the wait blocks until all three, or for the
    timeout (nanoseconds, ~0 for good). One never fenced waits out its timeout, as on the console */
-i32 nvn_SyncWait(CPU* c, u64 sync, u64 timeout) {
+static i32 sync_wait(CPU* c, u64 sync, u64 timeout) {
     const NvnSync* s = NVN_OBJ(const NvnSync, sync);
     u64 start = plat_ns(), now, ready;
     i64 left = timeout > (u64)INT64_MAX ? -1 : (i64)timeout;
@@ -214,6 +229,15 @@ i32 nvn_SyncWait(CPU* c, u64 sync, u64 timeout) {
         waited = 1;
     }
     return waited ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
+}
+/* off the guest core while it waits (nvn_wait_begin); a poll (timeout 0) never waits */
+i32 nvn_SyncWait(CPU* c, u64 sync, u64 timeout) {
+    i32 r;
+    if (!timeout) return sync_wait(c, sync, timeout);
+    nvn_wait_begin();
+    r = sync_wait(c, sync, timeout);
+    nvn_wait_end();
+    return r;
 }
 
 /* ============================================================ window */
@@ -321,21 +345,31 @@ static u64 present_period(const NvnWindow* o, int* paced) {
    waits for the last too, but a game whose frame takes it longer than a period from its release to its present (one
    that waits for its earlier frames' fences within the frame) then lost a refresh most frames: with the last frame
    left out, a frame has two periods to get to its refresh, and is held there */
-i32 nvn_WindowAcquireTexture(CPU* c, u64 w, u64 sync, u64 index) {
-    NvnWindow* o = NVN_OBJ(NvnWindow, w);
+static void acquire(NvnWindow* o, NvnSync* s, u64 index) {
     i32 i = o->count ? o->next % o->count : 0;
-    (void)c;
     o->next = o->count ? (i + 1) % o->count : 0;
     gw32(index, (u32)i);
     if (i < 4) {
         u64 now = plat_ns();
         o->released[i] = o->available[i] > now ? o->available[i] : now;
-    }
-    if (sync && i < 4)
-        fence_at(NVN_OBJ(NvnSync, sync), o->syncpt[i], o->value[i], o->on_display[1], o->available[i]);
-    else if (sync)
-        fence_at(NVN_OBJ(NvnSync, sync), 0, 0, 0, 0);
+        fence_at(s, o->syncpt[i], o->value[i], o->on_display[1], o->available[i]);
+    } else
+        fence_at(s, 0, 0, 0, 0);
+}
+i32 nvn_WindowAcquireTexture(CPU* c, u64 w, u64 sync, u64 index) {
+    NvnSync none = {0};
+    (void)c;
+    acquire(NVN_OBJ(NvnWindow, w), sync ? NVN_OBJ(NvnSync, sync) : &none, index);
     return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS;
+}
+/* as the game's driver does it: the window's acquire fences a sync of the driver's own, which the queue then waits for
+   (QueueWaitSync), its later work held back until the texture comes free */
+i32 nvn_QueueAcquireTexture(CPU* c, u64 q, u64 w, u64 index) {
+    NvnSync s = {0};
+    (void)c;
+    acquire(NVN_OBJ(NvnWindow, w), &s, index);
+    wait_sync(NVN_OBJ(NvnQueue, q), &s);
+    return NVN_QUEUE_ACQUIRE_TEXTURE_RESULT_SUCCESS;
 }
 /* nxnative's pacer, as vsync: a present is shown one period after the one before. Early, it waits for its slot; late
    by less than a period, it is shown at once and keeps the cadence; later than that, the cadence starts again from
@@ -422,4 +456,36 @@ void nvn_QueuePresentTexture(CPU* c, u64 q, u64 w, i32 index) {
     slot = pace(o, queue_ready(queue), period);
     if (index >= 0 && index < 4) o->available[index] = period ? slot + period : 0;
     __atomic_add_fetch(&g_frames, 1, __ATOMIC_RELAXED);
+}
+
+/* ============================================================ window getters: what was set */
+u64 nvn_WindowBuilderGetTexture(CPU* c, u64 b, i32 i) {
+    (void)c;
+    return i >= 0 && i < WB(b)->count && i < 4 ? WB(b)->texture[i] : 0;
+}
+i32 nvn_WindowBuilderGetNumTextures(CPU* c, u64 b) {
+    (void)c;
+    return WB(b)->count;
+}
+i32 nvn_WindowBuilderGetPresentInterval(CPU* c, u64 b) {
+    (void)c;
+    return WB(b)->interval;
+}
+i32 nvn_WindowGetPresentInterval(CPU* c, u64 w) {
+    (void)c;
+    return NVN_OBJ(const NvnWindow, w)->interval;
+}
+/* into an NVNrectangle: x, y, width, height */
+void nvn_WindowGetCrop(CPU* c, u64 w, u64 rect) {
+    const NvnWindow* o = NVN_OBJ(const NvnWindow, w);
+    int i;
+    (void)c;
+    for (i = 0; i < 4; i++) gw32(rect + 4 * (u64)i, (u32)o->crop[i]);
+}
+/* no error: the replay's work has no channel of the GPU's that could fault (NVNqueueErrorInfo is only for errors) */
+i32 nvn_QueueGetError(CPU* c, u64 q, u64 info) {
+    (void)c;
+    (void)q;
+    (void)info;
+    return NVN_QUEUE_GET_ERROR_RESULT_GPU_NO_ERROR;
 }
