@@ -549,6 +549,12 @@ snx_test_target(snx-test-hook-versions 99)
 target_include_directories(snx-test-hook-versions PRIVATE "${PROJECT_SOURCE_DIR}/src")
 snx_hookgen(snx-test-hook-versions SPEC "${CMAKE_CURRENT_SOURCE_DIR}/hook/versions.hook")
 add_test(NAME hook_versions COMMAND snx-test-hook-versions)
+# nvn_direct's command buffers: recordings across segments, and CopyCommands' copies of them
+add_executable(snx-test-nvn-commands nvn_commands.c "${PROJECT_SOURCE_DIR}/src/nx/gpu/nvn/nvn_cmd.c")
+snx_test_target(snx-test-nvn-commands 11)
+target_include_directories(snx-test-nvn-commands PRIVATE "${PROJECT_SOURCE_DIR}/src")
+snx_hookgen(snx-test-nvn-commands SPEC "${PROJECT_SOURCE_DIR}/src/nx/gpu/nvn/nvn.hook" PREFIX nvn NAME gpu/nvn/nvn.hook)
+add_test(NAME nvn_commands COMMAND snx-test-nvn-commands)
 foreach(bad IN ITEMS
         unknown_type 2 "unknown type 'u128'"
         stack_argument 2 "would be on the stack"
