@@ -110,6 +110,7 @@ static void take(u64 addr, const char* name) {
         u32 j = missing_hash(addr);
         while (g_nvn_direct.missing[j].addr) j = (j + 1) & (MISSING_SLOTS - 1);
         memcpy(g_nvn_direct.missing[j].name, name, strlen(name) + 1);
+        LOG("nvn: the game resolved %s, which nvn_direct doesn't implement: it stops if it calls it\n", name);
         __atomic_store_n(&g_nvn_direct.missing[j].addr, addr, __ATOMIC_RELEASE);
     }
     __atomic_store_n(slot, fn, __ATOMIC_RELEASE);
