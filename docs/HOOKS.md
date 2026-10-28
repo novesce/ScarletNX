@@ -115,9 +115,74 @@ struct nn::os::MutexType @version(>= 9.0.0) { u8 state @0x0; u32 owner @0x8 } si
 layout picked for a module's version (none, below and between ranges, the bounds of each comparison), and the
 accessors.
 
+## Verify mode
+
+A handler has to do what its function does, and verify mode checks that it does, call by call, against the
+function's own recompiled code. The two can't both run on the game's live memory, since a side effect would happen
+twice, so a hook says what its function touches:
+
+```
+hook memcpy(addr dst out[size], addr src in[size], u64 size) -> addr = hook_memmove pure
+```
+
+- `pure` (after the handler and its `uses`) says the function depends on nothing but its arguments, the memory they
+  point to and constant data, and changes nothing but its result and the memory its buffers name.
+- A buffer is an `addr` argument followed by its use, `in[...]` (read), `out[...]` (written) or `inout[...]`, and its
+  length in bytes: a number, or an integer argument's name times an optional number, plus an optional number
+  (`in[count * 4 + 8]`). A hook has at most four, and only a pure hook has any.
+
+The `hooks_verify` setting (`[Debug]`) names the families whose pure hooks are checked. Their slots then hold
+verify mode's check (`verify_fn` in `hook.c`) in place of the adapter. For each call, `hook_verify_call`
+(`src/nx/hle/hook/verify.c`) copies the buffers into scratch memory in the kernel region (buffers that overlap or
+touch share one copy, so a memmove's overlap stays one, and each copy keeps its buffer's address modulo 64, so the
+function takes the path it takes for that alignment), runs the function's own code with the buffer arguments pointing
+at the copies (and through the dispatch loop when the code leaves the function early), puts the registers back, runs
+the handler on the live memory and compares:
+
+- the result: as many bits of x0 as its type has (a narrow result's upper bits are no caller's), whether a bool is 0,
+  lane 0 of v0 for a float, and an address with a pointer into a copy taken as the same pointer into the live buffer;
+- the callee-saved registers, x19 to x29, sp, and the low halves of v8 to v15;
+- every byte of every buffer.
+
+The log names each call that differs (the first 16 of each function), with its caller and arguments, and counts the
+calls that agree (the first, then at 1024 and each power of 4 after it). A call whose buffers don't fit in its scratch
+slot (4 MiB, 16 slots taken without waiting, since a guest thread can lose its core inside the function's code) runs
+the handler alone and is counted as skipped. The cumulative FP exception flags (FPSR) aren't compared: no handler
+sets them. Verify mode is slow (each call runs twice and copies its buffers), for checking a hook, never for playing.
+
+A function with other side effects (it waits, takes a lock, does I/O or reads the clock) can't run twice, so its hook
+isn't `pure` and verify mode skips it: such a hook is verified in tests, on inputs recorded from the game.
+`tests/hook_verify.c` checks verify mode itself with stand-ins for the function's own code.
+
 ## Checking a hook
 
 The `hooks` setting (`[Debug]`, on by default) turns every hook off, to tell whether a problem comes from one, and
 `hooks_off` turns off the families it names (`hooks.hook`'s `family` lines, such as `libc`), to tell which. The
 log names each module's SDK version and each hooked function at startup (`hook: memcpy at ... runs hook_memmove`). A handler that wants to hand a
-case back to the function's own code calls `hook_original(addr)` with the CPU as the call left it.
+case back to the function's own code calls `hook_original(addr)` with the CPU as the call left it. A hook is on by
+default only once it passes verify mode (or, for one that isn't pure, its recorded-input test).
+
+## What the guest profile showed
+
+An accelerator is added only when its function shows up in a guest profile of CPU time by SDK function. The first
+profile (perf `cycles:u` on two games built with SDK 12.3.9 and 20.5.22, during loading, a title screen and
+gameplay, each recompiled function's samples named by the game's symbols) gave these shares of the time spent in
+guest code:
+
+| Family | Share of guest time |
+| --- | --- |
+| nn::os | 3.8% to 6.3% in gameplay, 4.9% loading, 15.6% on one game's title screen |
+| math (`sinf`, `cosf`, `powf` and their kernels) | 0.5% to 1.1% |
+| the C library's string functions left unhooked (`strcmp`, `strlen`, `memcmp`) | 0.3% to 0.8% |
+| allocators (`nn::mem`, `nn::lmem`, the SDK's heap) | 0.02% to 0.6% |
+| compression and hashing (zlib, LZ4, zstd, CRC) | under 0.01% |
+
+Most of nn::os's share is the internal critical section under every mutex (`Enter`, `Leave`,
+`IsLockedByCurrentThread`) and, on the title screen, a loop polling `GetSystemTick` and `ConvertToTimeSpan`. Neither
+is guest code a handler can make cheaper. Half of `Enter`'s and `Leave`'s samples land on the compare-and-swap that
+the recompiler makes of their exclusive store, and a native handler, which has to make the same compare-and-swap on
+the same word to keep the lock's protocol, spent 78% of its own time there: in gameplay the hooked pair cost the same
+per lock taken as the recompiled code, within the runs' noise. A tick-polling loop waits for time to pass, however
+fast it polls. The math functions differ between the two SDKs (one has FreeBSD's `__sindf` kernels, the other its
+own `sinf`), so each needs a bit-exact port per version for a gain under 0.2% of all CPU time, and the string
+functions are word-at-a-time loops the recompiled code already runs well. None of these got a hook.
