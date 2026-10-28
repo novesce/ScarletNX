@@ -2028,7 +2028,7 @@ typedef struct {
    key[b] & 31 from its base offset key[b] >> 5 on, with pad bytes past its last stride when still inside the stream's
    limit, or the constants of the attributes without data when key[b] is ~0u. When the guest's stride isn't a multiple
    of its attributes' components (guest_stride[b], else 0), the binding reads a copy with the vertices stride[b] apart,
-   rounded up to one (copy_restrided) */
+   rounded up to a multiple of 4 (restride) */
 typedef struct {
     u32 key[33], pad[33], guest_stride[33];
     VkDeviceSize stride[33];
@@ -2351,7 +2351,7 @@ static int draw_key(const DsState* ds, const DrawShaders* sh, const VkSh* fs, Su
         u32 st = (u32)pl->stride[b], a = align[b];
         if (!st || a < 2 || !(st % a)) continue;
         pl->guest_stride[b] = st;
-        pl->stride[b] = (st + a - 1) / a * a;
+        pl->stride[b] = (st + 3) & ~3u; /* a multiple of 2 or 4, and of the words restride writes */
         if (!g_vk.has_dynamic_stride) k->bind[b].stride = (u32)pl->stride[b];
     }
 
@@ -2381,12 +2381,17 @@ static int draw_key(const DsState* ds, const DrawShaders* sh, const VkSh* fs, Su
 /* A range's highest index is kept until its memory is written (by the GPU or, through the write tracking, the CPU):
    scanning the indices of every draw was a tenth of one game's GPU thread, most of them meshes' that never change.
    The baselines are taken before the bytes are read, as buf_get takes them. One game reads about 1,900 index ranges a
-   frame: 256 entries answered 55% of them, and scanning the rest again was a twentieth of a draw's setup */
-static struct {
-    u64 a, n, gw;
-    u32 ws, isz, ri, skip, top;
-} g_top_memo[4096];
-static u32 top_memo_slot(u64 a) { return (u32)((a * 0x9E3779B97F4A7C15ull) >> 52); }
+   frame: 256 entries answered 55% of them, and scanning the rest again was a twentieth of a draw's setup. A range
+   goes in a set of four by its address, the latest used first: with an entry for each address, two ranges of one
+   slot put each other out, and a town scene of another game with 1,500 ranges a frame scanned 133,000 indices a
+   frame for the fifth it missed. Four ways missed 3.5% and scanned 16,500. An entry's key is the range's address
+   with its index size in the top byte (GPU addresses have 40 bits), its length and its restart index */
+typedef struct {
+    u64 key, gw;
+    u32 n, ws, ri, top;
+} TopMemo;
+static TopMemo g_top_memo[1024][4];
+static u32 top_memo_set(u64 a) { return (u32)((a * 0x9E3779B97F4A7C15ull) >> 54); }
 /* A draw's entry above and its indices' range in the buffer cache, fetched when the draw starts: each was a cache miss
    in the middle of its setup, the entry above the most frequent last-level miss in vk_render_draw's own code in one
    game */
@@ -2394,30 +2399,11 @@ static void draw_indices_prefetch(const DsIndex* ix, int indexed, u32 first, u32
     u32 ifmt = ix->format, isz = ifmt == 0 ? 1 : ifmt == 1 ? 2 : 4;
     u64 a = ix->addr + (u64)first * isz;
     if (indexed != 1 && indexed != 2) return;
-    if (!step) __builtin_prefetch(&g_top_memo[top_memo_slot(a)]);
+    if (!step) {
+        __builtin_prefetch(&g_top_memo[top_memo_set(a)][0]);
+        __builtin_prefetch(&g_top_memo[top_memo_set(a)][3]);
+    }
     vk_buf_prefetch(a, (u64)count * isz, step);
-}
-/* the len bytes of a vertex stream at gva, its vertices gstride apart, copied to staging with them stride apart
-   instead: each vertex's stride bytes, so an attribute reaching past the guest's stride still reads the next vertex's
-   first bytes. The stream lands first if the GPU wrote it */
-static int copy_restrided(u64 gva, u64 len, u32 gstride, u32 stride, VkBuffer* buf, VkDeviceSize* off,
-                          VkDeviceSize* size) {
-    u64 nv = (len + gstride - 1) / gstride;
-    u8* src = malloc((size_t)len);
-    u8* dst = src ? vk_stage_upload(nv * stride, vk_stage_align(), buf, off) : NULL;
-    if (!dst) {
-        free(src);
-        return 0;
-    }
-    gmem_read(gva, src, len);
-    for (u64 i = 0; i < nv; i++) {
-        u64 at = i * gstride, n = len - at < stride ? len - at : stride;
-        memcpy(dst + i * stride, src + at, (size_t)n);
-        if (n < stride) memset(dst + i * stride + n, 0, (size_t)(stride - n));
-    }
-    free(src);
-    *size = nv * stride;
-    return 1;
 }
 /* The last vertex a draw reads, for its streams' ranges, or ~0 when that isn't known: indices outside contiguous guest
    memory, or under results the GPU hasn't landed. A stream's limit is often the end of a ring the game streams
@@ -2440,21 +2426,24 @@ static u64 draw_last_vertex(const u32* inline_indices, const DsIndex* ix, int in
         if (n > count) n = count;
         if (vk_buf_pending(a, n * isz) || vk_compute_gpu_src(a, n * isz, &tb, &to)) return ~0ull;
         vk_compute_mem_need(a, n * isz);
-        /* the restart index, and all ones where Vulkan restarts instead, mark no vertex */
+        /* the restart index, and all ones where Vulkan restarts instead, mark no vertex: with the restart off its
+           index is all ones too */
         u32 ones = isz == 1   ? 0xFFu
                    : isz == 2 ? 0xFFFFu
                               : 0xFFFFFFFFu,
-            ri = ix->restart ? ix->restart_index & ones : ones;
-        u32 skip = ix->restart ? ones : 0;
-        typeof(g_top_memo[0])* memo = g_top_memo;
-        u32 slot = top_memo_slot(a), ws = vk_ww_now();
-        u64 gw = gpu_mem_generation();
+            ri = ix->restart ? ix->restart_index & ones : ones, skip = ones;
+        TopMemo* set = g_top_memo[top_memo_set(a)];
+        u64 key = a | (u64)isz << 56, gw = gpu_mem_generation();
+        u32 way = 0, ws = vk_ww_now();
         const u8* p = gmem_ptr(a, n * isz);
         if (!p) return ~0ull;
-        if (memo[slot].a == a && memo[slot].n == n && memo[slot].isz == isz && memo[slot].ri == ri &&
-            memo[slot].skip == skip && !gpu_mem_dirty_since(memo[slot].gw, a, n * isz) &&
-            vk_written_since(p, n * isz, memo[slot].ws) == 0)
-            top = memo[slot].top;
+        while (way < 3 && !(set[way].key == key && set[way].n == n && set[way].ri == ri)) way++;
+        int hit = set[way].key == key && set[way].n == n && set[way].ri == ri &&
+                  !gpu_mem_dirty_since(set[way].gw, a, n * isz) && vk_written_since(p, n * isz, set[way].ws) == 0;
+        TopMemo e = set[way];
+        for (; way > 0; way--) set[way] = set[way - 1]; /* the latest used first, the last way or the stale one out */
+        if (hit)
+            set[0] = e;
         else {
             /* a loop for each size, in signed arithmetic where the indices fit it, which SSE2 makes vector maxima of */
             if (isz == 4) {
@@ -2481,15 +2470,9 @@ static u64 draw_last_vertex(const u32* inline_indices, const DsIndex* ix, int in
                     }
                 top = (u32)m;
             }
-            memo[slot].a = a;
-            memo[slot].n = n;
-            memo[slot].gw = gw;
-            memo[slot].ws = ws;
-            memo[slot].isz = isz;
-            memo[slot].ri = ri;
-            memo[slot].skip = skip;
-            memo[slot].top = (u32)top;
+            set[0] = (TopMemo){.key = key, .gw = gw, .n = (u32)n, .ws = ws, .ri = ri, .top = (u32)top};
         }
+        top = set[0].top;
     }
     i64 last = (i64)top + (i32)base_vertex;
     return last < 0 ? 0 : (u64)last;
@@ -2515,6 +2498,26 @@ static void index_barrier(VkCommandBuffer cb, VkPipelineStageFlags2 src_stage, V
                           .dstAccessMask = dst_access};
     VkDependencyInfo d = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &b};
     rec_CmdPipelineBarrier2(cb, &d);
+}
+/* the len bytes of a vertex stream at gva, its vertices gstride apart, made on the GPU into this frame's output ring
+   with them stride apart (a multiple of 4) instead: each vertex's stride bytes, so an attribute reaching past the
+   guest's stride still reads the next vertex's first bytes, and 0 past the stream. The stream comes as the guest
+   range's buffer (vk_buf_get), a GPU result that hasn't landed read where it is. Its words are bound whole: the range
+   asked for starts and ends on them, which never takes in another page. The CPU made the copy before, a vertex at a
+   time from a whole read of the stream, each draw */
+static int restride(u64 gva, u64 len, u32 gstride, u32 stride, VkBuffer* buf, VkDeviceSize* off, VkDeviceSize* size) {
+    u64 nv = (len + gstride - 1) / gstride, lo = gva & ~3ull, hi = (gva + len + 3) & ~3ull;
+    VkBuffer src;
+    u64 at;
+    if (nv > 0xFFFFFFFFu || !vk_buf_get_input(lo, hi - lo, 4, &src, &at)) return 0;
+    if (!vk_stage_output(nv * stride, vk_stage_align(), buf, off, NULL)) return 0;
+    vk_render_end(); /* dispatches happen outside rendering passes */
+    VkCommandBuffer cb = vk_cmd();
+    if (!vk_tc_restride(cb, gstride, stride, (u32)nv, src, at + (gva - lo), len, *buf, *off)) return 0;
+    index_barrier(cb, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                  VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT, VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT);
+    *size = nv * stride;
+    return 1;
 }
 static int quad_indices(u32 nq, VkBuffer* buf, u64* off) {
     if (nq > g_quads.quads) {
@@ -2856,8 +2859,8 @@ retry:
     for (u32 q = 0; q < nvq; q++) {
         u32 b = vq[q].b;
         if (pl->guest_stride[b]) {
-            if (!copy_restrided(vq[q].gva + vq[q].base, vq[q].len - vq[q].base, pl->guest_stride[b], (u32)pl->stride[b],
-                                &vbuf[b], &voff[b], &vsize[b])) {
+            if (!restride(vq[q].gva + vq[q].base, vq[q].len - vq[q].base, pl->guest_stride[b], (u32)pl->stride[b],
+                          &vbuf[b], &voff[b], &vsize[b])) {
                 g_vk_skipped++;
                 return;
             }
