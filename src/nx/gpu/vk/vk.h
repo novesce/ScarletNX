@@ -203,6 +203,11 @@ u8* vk_stage_upload(u64 size, u64 align, VkBuffer* buf, u64* off);
 u8* vk_stage_output(u64 size, u64 align, VkBuffer* buf, u64* off, VmaAllocation* mem);
 /* Host-cached memory for the current frame's GPU -> host copies, read after its fence once invalidated. */
 u8* vk_stage_back(u64 size, VkBuffer* buf, u64* off, VmaAllocation* mem);
+/* Device memory for the current frame's data that the GPU writes and reads itself, with the same lifetime as vk_stage:
+   0 when none could be made */
+int vk_stage_device(u64 size, u64 align, VkBuffer* buf, u64* off);
+/* logs what each ring handed out since the last report, by where its memory is (vk_buffer_stats) */
+void vk_stage_report(void);
 /* ends and submits the commands recorded since the last submit, waiting for wait (at wait_stage) and signaling signal.
    The frame goes on: its staging, pools and deferred resources live until vk_frame_next and its slot's next use.
    Either semaphore may be VK_NULL_HANDLE */
@@ -593,6 +598,8 @@ u32 vk_surf_gen(void);       /* a write generation no image has held yet */
    memory instead (g_vk_rt_readbacks counts those). How many were recorded: the caller orders their writes (a barrier)
    before what reads buf */
 int vk_rt_overlay(u64 gva, u64 size, VkBuffer buf, u64 at);
+/* whether vk_rt_overlay has a render target to record over [gva, gva + size) */
+int vk_rt_over(u64 gva, u64 size);
 extern u64 g_vk_rt_readbacks;
 u64 vk_surf_flush_size(const Surf* s);
 void vk_surf_flush_record(Surf* s, VkBuffer buf, u64 at);
@@ -689,6 +696,11 @@ void vk_own_publish(u64 cpu, u64 size, VkOwnRes* r, u64 off);
    vk_lock */
 void vk_guest_read(u64 gva, u64 size, u8* host, VkBuffer buf, u64 at);
 void vk_cpu_read(u64 cpu, u64 size, u8* host, VkBuffer buf, u64 at);
+/* the same into device memory (buf, which the CPU doesn't map): 0 when staging has no room */
+int vk_guest_read_device(u64 gva, u64 size, VkBuffer buf, u64 at);
+/* guest bytes [gva, gva + size) into device memory as the GPU sees them: vk_guest_read_device, with the render targets
+   drawn over them (vk_rt_overlay). 0 when there is no room */
+int vk_guest_read_seen(u64 gva, u64 size, VkBuffer buf, u64 at);
 /* guest bytes [gva, gva + size) into dst for change detection, as gmem_read reads them, except that bytes the GPU
    holds come back as a pattern of their owner (which a new owner changes, and the CPU's own bytes replace once it
    touches them): nothing lands */
