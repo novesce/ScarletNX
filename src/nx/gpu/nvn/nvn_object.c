@@ -9,6 +9,7 @@
    Where nxnative and the game's own driver disagree, the driver wins: nvnDeviceGetInteger answers from the driver's
    table (its API version is the SDK's, 55.8 in one game) rather than nxnative's 55.15 */
 #include "nx/gpu/nvn/nvn_object.h"
+#include "nx/gpu/nvn/nvn_state.h"
 #include "nx/gpu/nvn/nvn_copy.h"
 #include "nx/gpu/nvn/nvn_draw.h"
 #include "gpu/nvn/nvn.hook.h"
@@ -21,29 +22,14 @@
 #include "nx/runtime/loader.h"
 #include "nx/runtime/platform/log.h"
 #include "nx/runtime/platform/plat.h"
-#include <stdlib.h>
 #include <string.h>
 
-#define DEVICE_INFO_ITEMS 0x69
-/* the file's state: the serials handed out, and nvnDeviceGetInteger's answers once read from the game's driver
-   (driver: 1; read_api: its API version among them) */
-typedef struct {
-    u64 serial;
-    i32 info[DEVICE_INFO_ITEMS];
-    int driver, read_api;
-    u32 formats[8]; /* bit f: a texture of NVN format f was initialized (logged once) */
-    u64 device;     /* the device the game made last (atomic): the runtime has one */
-    u32 debug_domain; /* the debug domains generated (atomic) */
-} NvnObjectState;
-static NvnObjectState g_nvn_object;
-
-u64 nvn_serial(void) { return __atomic_add_fetch(&g_nvn_object.serial, 1, __ATOMIC_RELAXED); }
+u64 nvn_serial(void) { return __atomic_add_fetch(&g_nvn.object.serial, 1, __ATOMIC_RELAXED); }
 
 u64 nvn_pool_memory(u64 pool) { return pool ? NVN_OBJ(NvnPool, pool)->memory : 0; }
 u64 nvn_pool_gpu(u64 pool) { return pool ? NVN_OBJ(NvnPool, pool)->gpu : 0; }
-static u32 g_device_flags;
-u32 nvn_device_flags(void) { return __atomic_load_n(&g_device_flags, __ATOMIC_RELAXED); }
-u64 nvn_device(void) { return __atomic_load_n(&g_nvn_object.device, __ATOMIC_RELAXED); }
+u32 nvn_device_flags(void) { return __atomic_load_n(&g_nvn.object.device_flags, __ATOMIC_RELAXED); }
+u64 nvn_device(void) { return __atomic_load_n(&g_nvn.object.device, __ATOMIC_RELAXED); }
 
 /* the small state objects are copied by value and may sit anywhere in the game's structures: read and written whole */
 static u32 ld32(u64 a) {
@@ -68,7 +54,7 @@ static void st64(u64 a, u64 v) { memcpy(GP(a), &v, sizeof v); }
    its device state: what SDK 12.3.9's driver (NVN 55.8) answers, with nxnative's console measurements for its
    device's fields (0x17, 0x18, 0x2b, 0x2d, 0x37, 0x38, 0x3a, 0x3b, 0x3d-0x41). 0x62 reads device state nobody
    measured: 0, logged */
-static const i32 device_info[DEVICE_INFO_ITEMS] = {
+static const i32 device_info[NVN_DEVICE_INFO_ITEMS] = {
     [0x00] = 55,      [0x01] = 15,      [0x02] = 14,      [0x03] = 65536,   [0x04] = 256,     [0x05] = 8,
     [0x06] = 16,      [0x07] = 4,       [0x08] = 16,      [0x09] = 32,      [0x0a] = 16,      [0x0b] = 4,
     [0x0c] = 4,       [0x0d] = 4,       [0x0e] = 16,      [0x0f] = 32,      [0x10] = 32,      [0x11] = 256,
@@ -91,7 +77,7 @@ static const i32 device_info[DEVICE_INFO_ITEMS] = {
 
 void nvn_DeviceBuilderSetDefaults(CPU* c, u64 b) {
     (void)c;
-    memset(GP(b), 0, sizeof(NvnDeviceBuilder));
+    memset(GP(b), 0, sizeof(NvnDeviceBuilder)); /* guest memory: every byte the game sees */
 }
 void nvn_DeviceBuilderSetFlags(CPU* c, u64 b, i32 flags) {
     (void)c;
@@ -104,8 +90,8 @@ int nvn_DeviceInitialize(CPU* c, u64 d, u64 b) {
     o.flags = NVN_OBJ(NvnDeviceBuilder, b)->flags;
     o.origin = NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT; /* NVN's defaults: lower-left origin, near = -w */
     memcpy(GP(d), &o, sizeof o);
-    __atomic_store_n(&g_device_flags, o.flags, __ATOMIC_RELAXED);
-    __atomic_store_n(&g_nvn_object.device, d, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_nvn.object.device_flags, o.flags, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_nvn.object.device, d, __ATOMIC_RELAXED);
     nvn_draw_device(o.origin, o.depth_mode);
     LOG("nvn: device %llx initialized, flags %#x\n", (unsigned long long)d, o.flags);
     return 1;
@@ -114,7 +100,7 @@ void nvn_DeviceFinalize(CPU* c, u64 d) {
     u64 was = d;
     (void)c;
     NVN_OBJ(NvnDevice, d)->magic = 0;
-    __atomic_compare_exchange_n(&g_nvn_object.device, &was, 0, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+    __atomic_compare_exchange_n(&g_nvn.object.device, &was, 0, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED);
 }
 i32 nvn_DeviceBuilderGetFlags(CPU* c, u64 b) {
     (void)c;
@@ -148,7 +134,7 @@ i32 nvn_DeviceGenerateDebugDomainId(CPU* c, u64 d, u64 name) {
     (void)c;
     (void)d;
     (void)name;
-    return (i32)__atomic_fetch_add(&g_nvn_object.debug_domain, 1, __ATOMIC_RELAXED);
+    return (i32)__atomic_fetch_add(&g_nvn.object.debug_domain, 1, __ATOMIC_RELAXED);
 }
 int nvn_DeviceIsExternalDebuggerAttached(CPU* c, u64 d) {
     (void)c;
@@ -202,11 +188,10 @@ void nvn_DeviceSetIntermediateShaderCache(CPU* c, u64 d, i32 on) {
 typedef struct {
     u64 func, start, end;
 } RoAfter;
-static int ro_after(void* ctx, const char* name, const u8* bytes, u64 gva, u64 size, int writable) {
+static int ro_after(void* ctx, const char* name, size_t n, const u8* bytes, u64 gva, u64 size, int writable) {
     RoAfter* r = (RoAfter*)ctx;
-    size_t n = strlen(name);
     (void)bytes;
-    if (!writable && n > 3 && !strcmp(name + n - 3, ".ro") && gva > r->func && (!r->start || gva < r->start)) {
+    if (!writable && n > 3 && !memcmp(name + n - 3, ".ro", 3) && gva > r->func && (!r->start || gva < r->start)) {
         r->start = gva;
         r->end = gva + size;
     }
@@ -215,35 +200,36 @@ static int ro_after(void* ctx, const char* name, const u8* bytes, u64 gva, u64 s
 void nvn_device_driver(u64 func) {
     RoAfter r = {0};
     u64 hi;
-    if (__atomic_load_n(&g_nvn_object.driver, __ATOMIC_ACQUIRE)) return; /* resolved again: read once */
+    if (__atomic_load_n(&g_nvn.object.driver, __ATOMIC_ACQUIRE)) return; /* resolved again: read once */
     r.func = func;
     loader_segments(ro_after, &r);
     hi = r.end ? r.end : g_code_hi;
     u32 i, n = 0;
-    memcpy(g_nvn_object.info, device_info, sizeof device_info);
-    for (i = 0; i < DEVICE_INFO_ITEMS; i++) n += (u32)nvn_driver_info(g_mem, g_code_lo, hi, func, i, &g_nvn_object.info[i]);
-    g_nvn_object.read_api = nvn_driver_info(g_mem, g_code_lo, hi, func, 0, &g_nvn_object.info[0]) &&
-                            nvn_driver_info(g_mem, g_code_lo, hi, func, 1, &g_nvn_object.info[1]);
-    if (!g_nvn_object.read_api)
+    memcpy(g_nvn.object.info, device_info, sizeof device_info);
+    for (i = 0; i < NVN_DEVICE_INFO_ITEMS; i++)
+        n += (u32)nvn_driver_info(g_mem, g_code_lo, hi, func, i, &g_nvn.object.info[i]);
+    g_nvn.object.read_api = nvn_driver_info(g_mem, g_code_lo, hi, func, 0, &g_nvn.object.info[0]) &&
+                            nvn_driver_info(g_mem, g_code_lo, hi, func, 1, &g_nvn.object.info[1]);
+    if (!g_nvn.object.read_api)
         WARN("nvn: the game's nvnDeviceGetInteger at %llx doesn't read as a known switch: the device answers API "
              "%d.%d from its own table, which the game may refuse\n",
-             (unsigned long long)func, g_nvn_object.info[0], g_nvn_object.info[1]);
-    __atomic_store_n(&g_nvn_object.driver, 1, __ATOMIC_RELEASE);
+             (unsigned long long)func, g_nvn.object.info[0], g_nvn.object.info[1]);
+    __atomic_store_n(&g_nvn.object.driver, 1, __ATOMIC_RELEASE);
     LOG("nvn: the game's driver answers API %d.%d and GPU code %d.%d to %d.%d, %u items in all from its code\n",
-        g_nvn_object.info[0], g_nvn_object.info[1], g_nvn_object.info[0x2f], g_nvn_object.info[0x31],
-        g_nvn_object.info[0x2e], g_nvn_object.info[0x30], n);
+        g_nvn.object.info[0], g_nvn.object.info[1], g_nvn.object.info[0x2f], g_nvn.object.info[0x31],
+        g_nvn.object.info[0x2e], g_nvn.object.info[0x30], n);
 }
 u32 nvn_device_api(void) {
-    if (!__atomic_load_n(&g_nvn_object.driver, __ATOMIC_ACQUIRE) || !g_nvn_object.read_api) return 0;
-    return nvn_api_pack(g_nvn_object.info[0], g_nvn_object.info[1]);
+    if (!__atomic_load_n(&g_nvn.object.driver, __ATOMIC_ACQUIRE) || !g_nvn.object.read_api) return 0;
+    return nvn_api_pack(g_nvn.object.info[0], g_nvn.object.info[1]);
 }
 void nvn_DeviceGetInteger(CPU* c, u64 d, i32 what, u64 out) {
     u32 w = (u32)what;
-    const i32* info = __atomic_load_n(&g_nvn_object.driver, __ATOMIC_ACQUIRE) ? g_nvn_object.info : device_info;
-    i32 v = w < DEVICE_INFO_ITEMS ? info[w] : 0;
+    const i32* info = __atomic_load_n(&g_nvn.object.driver, __ATOMIC_ACQUIRE) ? g_nvn.object.info : device_info;
+    i32 v = w < NVN_DEVICE_INFO_ITEMS ? info[w] : 0;
     (void)c;
     (void)d;
-    if (w >= DEVICE_INFO_ITEMS || w == 0x62)
+    if (w >= NVN_DEVICE_INFO_ITEMS || w == 0x62)
         LOG_LIMIT(16, "nvn: nvnDeviceGetInteger of item %#x, which the driver reads from state nobody measured: 0\n", w);
     gw32(out, (u32)v);
 }
@@ -317,7 +303,7 @@ int nvn_DeviceRegisterFastClearDepth(CPU* c, u64 d, f32 depth) {
 /* ============================================================ memory pools */
 void nvn_MemoryPoolBuilderSetDefaults(CPU* c, u64 b) {
     (void)c;
-    memset(GP(b), 0, sizeof(NvnPoolBuilder));
+    memset(GP(b), 0, sizeof(NvnPoolBuilder)); /* guest memory: every byte the game sees */
 }
 void nvn_MemoryPoolBuilderSetDevice(CPU* c, u64 b, u64 d) {
     (void)c;
@@ -457,7 +443,7 @@ u64 nvn_MemoryPoolGetSize(CPU* c, u64 p) {
 void nvn_BufferBuilderSetDefaults(CPU* c, u64 b) {
     u64 device = NVN_OBJ(NvnBufferBuilder, b)->device;
     (void)c;
-    memset(GP(b), 0, sizeof(NvnBufferBuilder));
+    memset(GP(b), 0, sizeof(NvnBufferBuilder)); /* guest memory: every byte the game sees */
     NVN_OBJ(NvnBufferBuilder, b)->device = device;
 }
 void nvn_BufferBuilderSetDevice(CPU* c, u64 b, u64 d) {
@@ -624,7 +610,7 @@ static void register_texture(u64 tp, i32 id, u64 t, u64 v, int image) {
     u32 tic[8];
     if (!slot) return;
     if (!t) { /* no texture: an empty descriptor */
-        memset(GP(slot), 0, sizeof tic);
+        memset(GP(slot), 0, sizeof tic); /* guest memory: every byte the game sees */
         return;
     }
     memcpy(&tex, GP(t), sizeof tex);
@@ -666,7 +652,7 @@ void nvn_TextureBuilderSetDefaults(CPU* c, u64 b) {
     u64 device = TB(b)->device;
     NvnTexBuilder* o = TB(b);
     (void)c;
-    memset(o, 0, sizeof *o);
+    memset(o, 0, sizeof *o); /* guest memory: every byte the game sees */
     o->device = device;
     o->d.target = NVN_TEXTURE_TARGET_2D;
     o->d.width = o->d.height = o->d.depth = o->d.levels = 1;
@@ -712,7 +698,7 @@ void nvn_TextureBuilderSetPackagedTextureLayout(CPU* c, u64 b, u64 layout) {
     NvnTexBuilder* o = TB(b);
     (void)c;
     o->d.bits &= (u8)~(NVN_TEX_HAS_LAYOUT | NVN_TEX_BLOCK_H);
-    memset(o->layout, 0, sizeof o->layout);
+    memset(o->layout, 0, sizeof o->layout); /* guest memory: every byte the game sees */
     if (!layout) return;
     memcpy(o->layout, GP(layout), sizeof o->layout);
     o->d.bits |= (u8)(NVN_TEX_HAS_LAYOUT | ((o->layout[0] + 1u) & NVN_TEX_BLOCK_H));
@@ -849,7 +835,7 @@ int nvn_TextureInitialize(CPU* c, u64 t, u64 b) {
     memcpy(o.layout, s->layout, sizeof o.layout);
     o.serial = nvn_serial();
     if (o.d.format < 256 &&
-        !(__atomic_fetch_or(&g_nvn_object.formats[o.d.format >> 5], 1u << (o.d.format & 31), __ATOMIC_RELAXED) &
+        !(__atomic_fetch_or(&g_nvn.object.formats[o.d.format >> 5], 1u << (o.d.format & 31), __ATOMIC_RELAXED) &
           1u << (o.d.format & 31)))
         LOG("nvn: the first texture of format %#x (target %u, %ux%u)\n", o.d.format, o.d.target, o.d.width,
             o.d.height);
@@ -1102,15 +1088,13 @@ void nvn_TextureGetNvRmSurfaceNVX(CPU* c, u64 t, u64 unused, u64 surface) {
         {NVN_FORMAT_BGRA8_SRGB, 0x200d12120ull},
     };
     const NvnTexture* o = CT(t);
-    u8 s[0x58];
     u64 color = 0, size = 0, flags = 0;
-    u32 width = o->d.width, height = o->d.height, layout, pitch, kind, block_h = 0, bits;
-    size_t i;
+    u32 width = o->d.width, height = o->d.height, layout, pitch, kind, block_h = 0;
     (void)c;
     (void)unused;
-    for (i = 0; i < sizeof colors / sizeof *colors; i++)
+    for (size_t i = 0; i < sizeof colors / sizeof *colors; i++)
         if (colors[i].format == o->d.format) color = colors[i].color;
-    bits = (u32)(color & 0xff); /* the format's bits per pixel */
+    u32 bits = (u32)(color & 0xff); /* the format's bits per pixel */
     if (o->d.flags & NVN_TEX_LINEAR) {
         layout = 1;
         pitch = o->d.stride;
@@ -1126,7 +1110,7 @@ void nvn_TextureGetNvRmSurfaceNVX(CPU* c, u64 t, u64 unused, u64 surface) {
         size = (u64)pitch * (((u64)height + (8u << th) - 1) & ~((u64)(8u << th) - 1));
     }
     if (size) flags = 1ull << 63;
-    memset(s, 0, sizeof s);
+    u8 s[0x58] = {0};
     snx_st_le32(s, width);
     snx_st_le32(s + 0x04, height);
     snx_st_le64(s + 0x08, color);
@@ -1157,7 +1141,7 @@ int nvn_TextureViewCompare(CPU* c, u64 a, u64 b) {
 }
 void nvn_TextureViewSetDefaults(CPU* c, u64 v) {
     (void)c;
-    memset(GP(v), 0, sizeof(NvnView));
+    memset(GP(v), 0, sizeof(NvnView)); /* guest memory: every byte the game sees */
 }
 void nvn_TextureViewSetLevels(CPU* c, u64 v, i32 base, i32 n) {
     NvnView* o = VW(v);
@@ -1246,7 +1230,7 @@ void nvn_TextureViewSetSwizzle(CPU* c, u64 v, i32 r, i32 g, i32 b, i32 a) {
 void nvn_SamplerBuilderSetDefaults(CPU* c, u64 b) {
     NvnSamplerPar* o = SB(b);
     (void)c;
-    memset(GP(b), 0, sizeof(NvnSamplerBuilder));
+    memset(GP(b), 0, sizeof(NvnSamplerBuilder));          /* guest memory: every byte the game sees */
     o->min_filter = NVN_MIN_FILTER_NEAREST_MIPMAP_LINEAR; /* GL's defaults */
     o->mag_filter = NVN_MAG_FILTER_LINEAR;
     o->wrap_s = o->wrap_t = o->wrap_r = NVN_WRAP_MODE_REPEAT;
@@ -1437,7 +1421,7 @@ void nvn_SamplerFinalize(CPU* c, u64 s) {
 int nvn_ProgramInitialize(CPU* c, u64 p, u64 d) {
     (void)c;
     (void)d;
-    memset(GP(p), 0, sizeof(NvnProgram));
+    memset(GP(p), 0, sizeof(NvnProgram)); /* guest memory: every byte the game sees */
     NVN_OBJ(NvnProgram, p)->magic = NVN_MAGIC('P', 'R', 'O', 'G');
     return 1;
 }
@@ -1488,25 +1472,16 @@ static int stage_of(NvnProgram* o, u64 data, u64 control) {
 }
 /* ---- transform feedback layouts: the programs whose last stage before rasterization captures, by serial (their
    128-byte layouts don't fit the program object). Programs that capture are few, and their entries stay */
-typedef struct {
-    u64 serial;
-    ShXfb x;
-} XfbEntry;
-static struct {
-    PMutex lock;
-    XfbEntry* e;
-    u32 n, cap;
-} g_nvn_xfb = {PMUTEX_INIT, NULL, 0, 0};
 int nvn_program_xfb(u64 serial, ShXfb* x) {
     u32 i;
     int found = 0;
-    pm_lock(&g_nvn_xfb.lock);
-    for (i = g_nvn_xfb.n; i-- > 0 && !found;)
-        if (g_nvn_xfb.e[i].serial == serial) {
-            *x = g_nvn_xfb.e[i].x;
+    pm_lock(&g_nvn.object.xfb_lock);
+    for (i = g_nvn.object.nxfb; i-- > 0 && !found;)
+        if (g_nvn.object.xfb[i].serial == serial) {
+            *x = g_nvn.object.xfb[i].x;
             found = 1;
         }
-    pm_unlock(&g_nvn_xfb.lock);
+    pm_unlock(&g_nvn.object.xfb_lock);
     return found;
 }
 /* The capture layout a stage's control section gives, as the game's driver reads it into the 3D engine's
@@ -1520,34 +1495,28 @@ static void xfb_of(u64 control, u64 serial) {
                                    0xd0, 0xd4, 0xd8, 0xdc, 0xe0, 0xe4, 0xb0, 0xb1, 0xb2, 0xb3, 0xb4,
                                    0xb5, 0xb6, 0xb7, 0xbf, 0x1a, 0x19, 0xe8, 0xff, 0x18, 0xff};
     const u8* c = GP(control);
-    XfbEntry e;
-    u32 i, j, k;
     if (!c[0x6ec]) return;
-    memset(&e, 0, sizeof e);
+    NvnXfbEntry e = {0};
     e.serial = serial;
-    for (i = 0; i < 4; i++) {
+    for (u32 i = 0; i < 4; i++) {
         u32 stride = gr16(control + 0x6dc + 2 * (u64)i), groups = c[0x6e8 + i], n = 0;
         if (c[0x6e4 + i])
             LOG_LIMIT(1, "nvn: transform feedback into stream %u is captured as stream 0\n", c[0x6e4 + i]);
         e.x.stride[i] = (u16)stride;
         e.x.count[i] = (u8)(stride / 4 > 128 ? 128 : stride / 4);
-        for (j = 0; j < groups && j < 0x80; j++) {
+        for (u32 j = 0; j < groups && j < 0x80; j++) {
             i32 loc = (i8)c[0xdc + 0x80 * i + j];
             u32 start = c[0x2dc + 0x80 * i + j], count = c[0x4dc + 0x80 * i + j];
             u32 word = loc < 0 ? 0xff : loc < 32 ? word_of[loc] : 0x20 + 4 * (u32)(loc - 0x20);
-            for (k = 0; k < count && n < 128; k++) e.x.layout[i][n++] = (u8)(word == 0xff ? 0xff : word + start + k);
+            for (u32 k = 0; k < count && n < 128; k++)
+                e.x.layout[i][n++] = (u8)(word == 0xff ? 0xff : word + start + k);
         }
     }
-    pm_lock(&g_nvn_xfb.lock);
-    if (g_nvn_xfb.n == g_nvn_xfb.cap) {
-        u32 cap = g_nvn_xfb.cap ? 2 * g_nvn_xfb.cap : 16;
-        XfbEntry* m = (XfbEntry*)realloc(g_nvn_xfb.e, cap * sizeof *m);
-        if (!m) fatal("nvn: out of memory for transform feedback layouts");
-        g_nvn_xfb.e = m;
-        g_nvn_xfb.cap = cap;
-    }
-    g_nvn_xfb.e[g_nvn_xfb.n++] = e;
-    pm_unlock(&g_nvn_xfb.lock);
+    pm_lock(&g_nvn.object.xfb_lock);
+    if (g_nvn.object.nxfb == NVN_XFB_MAX)
+        fatal("nvn: more than %u programs that capture transform feedback, the layouts nvn_direct holds", NVN_XFB_MAX);
+    g_nvn.object.xfb[g_nvn.object.nxfb++] = e;
+    pm_unlock(&g_nvn.object.xfb_lock);
 }
 
 /* the stages' {code, control} pairs, read from the control sections while they are the caller's */
@@ -1559,6 +1528,7 @@ static int set_shaders(u64 p, i32 n, u64 sd, u64 stride) {
         LOG_LIMIT(8, "nvn: nvnProgramSetShaders with %d stages\n", n);
         return 0;
     }
+    /* guest memory: every byte the game sees */
     memset(o->st, 0, sizeof o->st);
     memset(o->block, 0, sizeof o->block);
     o->off_a = 0;
@@ -1628,7 +1598,7 @@ int nvn_SyncInitializeFromFencedGLSync(CPU* c, u64 s, u64 d, u32 gl_sync, u64 st
     (void)c;
     (void)d;
     (void)gl_sync;
-    memset(GP(s), 0, sizeof(NvnSync));
+    memset(GP(s), 0, sizeof(NvnSync)); /* guest memory: every byte the game sees */
     if (status) gw32(status, 1);
     LOG_LIMIT(1, "nvn: the game asked for an OpenGL sync, which the runtime has no OpenGL for\n");
     return 0;
@@ -1657,7 +1627,7 @@ void nvn_SyncFinalize(CPU* c, u64 s) {
 /* ============================================================ events */
 void nvn_EventBuilderSetDefaults(CPU* c, u64 b) {
     (void)c;
-    memset(GP(b), 0, sizeof(NvnEventBuilder));
+    memset(GP(b), 0, sizeof(NvnEventBuilder)); /* guest memory: every byte the game sees */
 }
 void nvn_EventBuilderSetStorage(CPU* c, u64 b, u64 pool, i64 offset) {
     NvnEventBuilder* o = NVN_OBJ(NvnEventBuilder, b);
