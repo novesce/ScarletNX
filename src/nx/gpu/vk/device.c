@@ -237,6 +237,7 @@ static int create_device(void) {
     WANT(samplerAnisotropy);
     WANT(occlusionQueryPrecise); /* samples-passed counts (query.c) are exact */
     WANT(sampleRateShading);
+    WANT(alphaToOne); /* multisampled draws asking for it (pipeline.c) */
     /* BCn, ASTC and ETC2 sampled as they are (format.c) where the settings ask for it and the device has them, else
        decoded on the GPU as they are uploaded */
     if (g_settings.native_bc) WANT(textureCompressionBC);
