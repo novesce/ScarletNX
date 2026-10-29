@@ -1892,7 +1892,7 @@ if(WIN32 AND TARGET SDL3::SDL3)
     add_executable(snx-test-platform-win32 platform_win32.c "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/plat_sdl.c"
         "${PROJECT_SOURCE_DIR}/src/common/filesystem/host.c")
     snx_test_target(snx-test-platform-win32 11)
-    target_link_libraries(snx-test-platform-win32 PRIVATE SDL3::SDL3)
+    target_link_libraries(snx-test-platform-win32 PRIVATE SDL3::SDL3 synchronization)
     add_test(NAME platform_win32 COMMAND snx-test-platform-win32 "${CMAKE_CURRENT_BINARY_DIR}")
 endif()
 if(SNX_BUILD_NX AND NOT SNX_TOOLS_ONLY)
