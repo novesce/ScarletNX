@@ -255,6 +255,7 @@ typedef struct {
     u64 device, used;
     u32 lent, pad;
     u64 origin;
+    u64 command_size, control_size; /* the game's ranges, independent of any segment the runtime lends */
 } NvnCmdBuf;
 NVN_FITS(NvnCmdBuf, 0x90);
 typedef char nvn_check_cmd_flag[offsetof(NvnCmdBuf, game_flag10) == 0x10 ? 1 : -1];

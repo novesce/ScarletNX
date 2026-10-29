@@ -39,6 +39,9 @@ MEMORY = {('nvnMemoryPoolBuilderSetStorage', 1), ('nvnQueueBuilderSetQueueMemory
           ('nvnCommandBufferAddControlMemory', 1)}
 # a state object pointer after a count is an array of them
 STATE_ARRAYS = {'nvnCommandBufferBindVertexAttribState', 'nvnCommandBufferBindVertexStreamState'}
+# Older drivers write a larger sampler than the public header reserves. This changes only the shadow object's
+# allocation, never bytes read from the live object (kind o is a pointer translated through the object map).
+SHADOW_MIN = {'NVNsampler': 0x60}
 
 
 def is_state(base):
@@ -94,7 +97,13 @@ def generate():
             continue
         kinds = ''.join(kind(n, i, a, args) for i, a in enumerate(args))
         types = [re.sub(r'\bconst\b|\*', '', a).split()[0] if '*' in a and 'PFNNVN' not in a else '' for a in args]
-        sizes = ', '.join(f'sizeof({t})' if k in 'osSTr' else '0' for k, t in zip(kinds, types)) or '0'
+        sizes = []
+        for k, t in zip(kinds, types):
+            size = f'sizeof({t})' if k in 'osSTr' else '0'
+            if k == 'o' and t in SHADOW_MIN:
+                size = f'(sizeof({t}) < {SHADOW_MIN[t]:#x} ? {SHADOW_MIN[t]:#x} : sizeof({t}))'
+            sizes.append(size)
+        sizes = ', '.join(sizes) or '0'
         ret = {'void': 0, 'addr': 'NVK_RET_ADDR', 'f32': 'NVK_RET_F32', 'f64': 'NVK_RET_F32', 'bool': 'NVK_RET_BOOL',
                'u64': 'NVK_RET_X64', 'i64': 'NVK_RET_X64'}.get(rets[n], 'NVK_RET_X32')
         rows.append(f'    {{"{n}", "{kinds}", {ret}, {{{sizes}}}}},')

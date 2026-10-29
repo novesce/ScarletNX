@@ -935,6 +935,7 @@ add_test(NAME result_macros COMMAND snx-test-result-macros)
 
 # generated and checked in (the controls' atlas, their shaders): their sources must still make them
 if(Python3_Interpreter_FOUND)
+    add_test(NAME nvn_coverage COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/nvn_coverage.py")
     add_test(NAME controls_atlas_current
         COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/build-controls.py" --check)
     add_test(NAME ui_shaders_current

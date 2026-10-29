@@ -214,13 +214,13 @@ void nvn_CommandBufferAddCommandMemory(CPU* c, u64 cb, u64 pool, i64 offset, u64
     new_segment(CB(cb), memory + (u64)offset, size);
     CB(cb)->origin = memory + (u64)offset;
     CB(cb)->used = 0; /* GetCommandMemoryUsed counts from the memory the game last added, across recordings */
+    CB(cb)->command_size = size;
 }
 /* the control memory is the driver's own bookkeeping: the records need none */
 void nvn_CommandBufferAddControlMemory(CPU* c, u64 cb, u64 memory, u64 size) {
     (void)c;
-    (void)cb;
     (void)memory;
-    (void)size;
+    CB(cb)->control_size = size;
 }
 /* a recording starts with its first command, as in NVN: an empty one takes only its END */
 void nvn_CommandBufferBeginRecording(CPU* c, u64 cb) {
@@ -239,6 +239,23 @@ u64 nvn_CommandBufferGetCommandMemoryUsed(CPU* c, u64 cb) {
     const NvnCmdBuf* o = CB(cb);
     (void)c;
     return o->begin ? o->used : 0;
+}
+u64 nvn_CommandBufferGetCommandMemorySize(CPU* c, u64 cb) {
+    (void)c;
+    return CB(cb)->command_size;
+}
+u64 nvn_CommandBufferGetCommandMemoryFree(CPU* c, u64 cb) {
+    const NvnCmdBuf* o = CB(cb);
+    u64 used = nvn_CommandBufferGetCommandMemoryUsed(c, cb);
+    return used < o->command_size ? o->command_size - used : 0;
+}
+u64 nvn_CommandBufferGetControlMemorySize(CPU* c, u64 cb) {
+    (void)c;
+    return CB(cb)->control_size;
+}
+u64 nvn_CommandBufferGetControlMemoryFree(CPU* c, u64 cb) {
+    (void)c;
+    return CB(cb)->control_size; /* recording uses no control bytes */
 }
 u64 nvn_CommandBufferGetControlMemoryUsed(CPU* c, u64 cb) {
     (void)c;

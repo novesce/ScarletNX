@@ -14,6 +14,8 @@ route nvnBootstrapLoader
 route nvnDeviceGetProcAddress
 
 family device
+hook nvnSetExternalDebuggerEnabledNVX(bool enabled) = nvn_SetExternalDebuggerEnabledNVX
+hook nvnDeviceIsExternalDebuggerAttached(addr d) -> bool = nvn_DeviceIsExternalDebuggerAttached
 hook nvnDeviceBuilderSetDefaults(addr b) = nvn_DeviceBuilderSetDefaults
 hook nvnDeviceBuilderSetFlags(addr b, i32 flags) = nvn_DeviceBuilderSetFlags
 hook nvnDeviceGetImageHandle(addr d, i32 id) -> u64 = nvn_DeviceGetImageHandle
@@ -313,7 +315,11 @@ hook nvnCommandBufferEndTransformFeedback(addr cb, u64 control) = nvn_CommandBuf
 hook nvnCommandBufferFenceSync(addr cb, addr sync, i32 condition, i32 flags) = nvn_CommandBufferFenceSync
 hook nvnCommandBufferFinalize(addr cb) = nvn_CommandBufferFinalize
 hook nvnCommandBufferGetCommandMemoryUsed(addr cb) -> u64 = nvn_CommandBufferGetCommandMemoryUsed
+hook nvnCommandBufferGetCommandMemorySize(addr cb) -> u64 = nvn_CommandBufferGetCommandMemorySize
+hook nvnCommandBufferGetCommandMemoryFree(addr cb) -> u64 = nvn_CommandBufferGetCommandMemoryFree
 hook nvnCommandBufferGetControlMemoryUsed(addr cb) -> u64 = nvn_CommandBufferGetControlMemoryUsed
+hook nvnCommandBufferGetControlMemorySize(addr cb) -> u64 = nvn_CommandBufferGetControlMemorySize
+hook nvnCommandBufferGetControlMemoryFree(addr cb) -> u64 = nvn_CommandBufferGetControlMemoryFree
 hook nvnCommandBufferGetMemoryCallback(addr cb) -> addr = nvn_CommandBufferGetMemoryCallback
 hook nvnCommandBufferGetMemoryCallbackData(addr cb) -> addr = nvn_CommandBufferGetMemoryCallbackData
 hook nvnCommandBufferInitialize(addr cb, addr d) -> bool = nvn_CommandBufferInitialize

@@ -1198,6 +1198,8 @@ typedef NVNboolean (*PFNNVNPROGRAMINITIALIZEPROC)(NVNprogram*, NVNdevice*);
 typedef void (*PFNNVNPROGRAMFINALIZEPROC)(NVNprogram*);
 typedef void (*PFNNVNPROGRAMSETDEBUGLABELPROC)(NVNprogram*, const char*);
 typedef NVNboolean (*PFNNVNPROGRAMSETSHADERSPROC)(NVNprogram*, int, const NVNshaderData*);
+/* Extended stage descriptors are opaque here. The runtime reads their versioned layout in nvn_object.c. */
+typedef NVNboolean (*PFNNVNPROGRAMSETSHADERSEXTPROC)(NVNprogram*, int, const void*);
 typedef void (*PFNNVNMEMORYPOOLBUILDERSETDEVICEPROC)(NVNmemoryPoolBuilder*, NVNdevice*);
 typedef void (*PFNNVNMEMORYPOOLBUILDERSETDEFAULTSPROC)(NVNmemoryPoolBuilder*);
 typedef void (*PFNNVNMEMORYPOOLBUILDERSETSTORAGEPROC)(NVNmemoryPoolBuilder*, void*, size_t);
