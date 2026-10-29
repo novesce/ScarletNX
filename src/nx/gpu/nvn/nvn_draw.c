@@ -102,6 +102,13 @@ static void keep(void* kept, const void* made, size_t n, u64* gen) {
     new_gen(gen);
 }
 
+void nvn_draw_free(NvnDraw* d) {
+    if (!d) return;
+    if (d->own.pred && g_renderer->render_predicate_drop) g_renderer->render_predicate_drop(d->own.pred);
+    if (d->samples && g_renderer->samples_enable) g_renderer->samples_enable(d->ds.owner, 0);
+    free(d);
+}
+
 NvnDraw* nvn_draw_new(u32 owner) {
     NvnDraw* d = (NvnDraw*)calloc(1, sizeof *d);
     int i, s;

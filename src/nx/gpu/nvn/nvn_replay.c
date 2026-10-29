@@ -47,16 +47,15 @@ typedef struct {
    GPU thread's list of the submission being replayed's effects */
 typedef struct {
     ReplayQueue q[NVN_QUEUES];
-    u32 n;
     PMutex lock;
     Effect* fx;
     u32 nfx, fx_cap;
     u64 unknown; /* the ops logged as not replayed (GPU thread) */
     u32 shown;   /* the presents' syncpoint: up by one as each reaches the display, 0 before the first queue */
 } NvnReplayState;
-static NvnReplayState g_nvn_replay = {{{0, {0, 0}, 0}}, 0, PMUTEX_INIT, NULL, 0, 0, 0, 0};
+static NvnReplayState g_nvn_replay = {.lock = PMUTEX_INIT};
 
-enum { JOB_SUBMIT, JOB_FENCE, JOB_PRESENT };
+enum { JOB_SUBMIT, JOB_FENCE, JOB_PRESENT, JOB_DESTROY };
 typedef struct {
     u32 queue, kind, n;
     NvnReplayPresent present;
@@ -66,9 +65,10 @@ typedef struct {
 u32 nvn_replay_queue(void) {
     u32 i;
     pm_lock(&g_nvn_replay.lock);
-    if (g_nvn_replay.n == NVN_QUEUES) fatal("nvn: more than %d queues", NVN_QUEUES);
+    for (i = 0; i < NVN_QUEUES && g_nvn_replay.q[i].syncpt; i++) {
+    }
+    if (i == NVN_QUEUES) fatal("nvn: more than %d live queues", NVN_QUEUES);
     if (!g_nvn_replay.shown) g_nvn_replay.shown = syncpt_alloc();
-    i = g_nvn_replay.n++;
     g_nvn_replay.q[i].d = nvn_draw_new(0x80000000u | i); /* renderer.h: the NVN replay's queues from 0x80000000 */
     g_nvn_replay.q[i].syncpt = syncpt_alloc();
     pm_unlock(&g_nvn_replay.lock);
@@ -244,6 +244,11 @@ static void run(void* arg) {
             break;
         }
         case JOB_FENCE: stream_incr(q->syncpt); break;
+        case JOB_DESTROY:
+            nvn_draw_free(q->d);
+            q->d = NULL;
+            stream_incr(q->syncpt);
+            break;
         case JOB_PRESENT: {
             const NvnReplayPresent* p = &j->present;
             u64 cpu = p->gva ? gmmu_translate(p->gva) : 0;
@@ -309,6 +314,27 @@ void nvn_replay_finish(u32 queue) {
     gpu_call(run, job(queue, JOB_FENCE, 0), NULL, 0);
     pm_unlock(&g_nvn_replay.lock);
     syncpt_wait(id, value, -1);
+}
+/* Finalization closes the queue to new submissions on the game's side. Its last job drops GPU-thread state, and
+   its ordered fence completes before the slot and syncpoint can belong to another queue. */
+void nvn_replay_queue_free(u32 queue) {
+    u32 id, value;
+    if (!queue || queue > NVN_QUEUES) return;
+    pm_lock(&g_nvn_replay.lock);
+    ReplayQueue* q = &g_nvn_replay.q[queue - 1];
+    id = q->syncpt;
+    if (!id) {
+        pm_unlock(&g_nvn_replay.lock);
+        return;
+    }
+    value = syncpt_promise(id, 1);
+    gpu_call(run, job(queue, JOB_DESTROY, 0), NULL, 0);
+    pm_unlock(&g_nvn_replay.lock);
+    syncpt_wait(id, value, -1);
+    pm_lock(&g_nvn_replay.lock);
+    syncpt_free(id);
+    *q = (ReplayQueue){0};
+    pm_unlock(&g_nvn_replay.lock);
 }
 u32 nvn_replay_present(u32 queue, const NvnReplayPresent* p, u32* shown) {
     Job* j = job(queue, JOB_PRESENT, 0);

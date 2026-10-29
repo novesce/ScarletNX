@@ -604,6 +604,12 @@ snx_test_target(snx-test-nvn-commands 11)
 target_include_directories(snx-test-nvn-commands PRIVATE "${PROJECT_SOURCE_DIR}/src")
 snx_hookgen(snx-test-nvn-commands SPEC "${PROJECT_SOURCE_DIR}/src/nx/gpu/nvn/nvn.hook" PREFIX nvn NAME gpu/nvn/nvn.hook)
 add_test(NAME nvn_commands COMMAND snx-test-nvn-commands)
+add_executable(snx-test-nvn-queue-lifetime nvn_queue_lifetime.c
+    "${PROJECT_SOURCE_DIR}/src/nx/gpu/nvn/nvn_replay.c")
+snx_test_target(snx-test-nvn-queue-lifetime 11)
+add_dependencies(snx-test-nvn-queue-lifetime snx_settings)
+target_include_directories(snx-test-nvn-queue-lifetime PRIVATE "${PROJECT_SOURCE_DIR}/src" "${PROJECT_BINARY_DIR}/settingsgen")
+add_test(NAME nvn_queue_lifetime COMMAND snx-test-nvn-queue-lifetime)
 foreach(bad IN ITEMS
         unknown_type 2 "unknown type 'u128'"
         stack_argument 2 "would be on the stack"

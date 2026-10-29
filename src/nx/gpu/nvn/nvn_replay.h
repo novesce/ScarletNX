@@ -7,6 +7,8 @@
 
 /* a new queue's replay state: its index (1 up), whose syncpoint its fences count on */
 u32 nvn_replay_queue(void);
+/* Finalize after the queue's last submitted work, releasing its draw state, syncpoint and replay slot. */
+void nvn_replay_queue_free(u32 queue);
 u32 nvn_replay_syncpt(u32 queue);
 /* the syncpoint the presents count up on as they reach the display (nvn_replay_present), every queue's */
 u32 nvn_replay_shown_syncpt(void);
