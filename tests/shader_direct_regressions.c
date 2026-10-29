@@ -1503,6 +1503,30 @@ static void issue126_shader_modes(void) {
     code = translate(loop, 4, ST_FS, &info, &words, 1);
     check_translated(code, &info, "a handle loaded before a loop reaches the sample in its body");
     free(code);
+    /* A conditional exit kills only the lanes that take it. The other lanes carry the handle into the loop. */
+    const u64 conditional_exits[] = {EXIT & ~(7ull << 16), (EXIT & ~31ull) | 13ull};
+    for (size_t i = 0; i < sizeof conditional_exits / sizeof *conditional_exits; i++) {
+        const u64 after_exit[] = {0x4c98078800070006ull, conditional_exits[i], tex_b, FMUL_KEEP | 5, back};
+        code = translate(after_exit, 5, ST_FS, &info, &words, 1);
+        check_translated(code, &info, "a handle survives a predicate or condition-code exit before a loop");
+        check(code && info.ntex == 1 && info.tex[0].bindless && info.tex[0].bl_cbuf == 2 &&
+                  info.tex[0].cbuf_off == 0,
+              "the surviving lanes retain the original handle source");
+        free(code);
+        const u64 store = 0xeb20000a00f70c10ull | (6ull << 39);
+        const u64 store_after_exit[] = {0x4c98078800070006ull, conditional_exits[i], store, FMUL_KEEP | 5, back};
+        code = translate(store_after_exit, 5, ST_VS, &info, &words, 1);
+        check_translated(code, &info, "a vertex image-store handle survives a conditional exit before a loop");
+        check(code && info.nimg == 1 && info.img[0].bindless && info.img[0].bl_cbuf == 2 &&
+                  info.img[0].cbuf_off == 0 && info.img[0].type == 5,
+              "the vertex loop retains its 3D storage image descriptor");
+        free(code);
+        const u64 overwritten[] = {0x4c98078800070006ull, conditional_exits[i], store, FMUL_KEEP | 6, back};
+        code = translate(overwritten, 5, ST_VS, &info, &words, 1);
+        check_refused(code, &info, "untracked surface handle",
+                      "a conditional exit does not hide a handle overwritten on the loop back edge");
+        free(code);
+    }
     const u64 loop_rewrites[] = {0x4c98078800070006ull, tex_b, FMUL_KEEP | 6, back};
     code = translate(loop_rewrites, 4, ST_FS, &info, &words, 1);
     check_refused(code, &info, "untracked texture handle",

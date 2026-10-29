@@ -1647,7 +1647,8 @@ static int direct_can_reach(const u64* insn, u32 n, u32 from, u32 use) {
             op = decode(insn[k]);
             if (!op) return -1;
             switch (op->id) {
-                case O_EXIT:
+                /* Lanes that do not take a conditional exit keep their register definitions. */
+                case O_EXIT: fall = !flow_always(insn[k]); break;
                 case O_KIL:
                 case O_RET:
                 case O_PRET:
