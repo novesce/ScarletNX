@@ -63,6 +63,31 @@ void ui_draw_tile(App* app, GuiRect r, const char* text, const void* image, unsi
     g_gui_ui.drawn[g_gui_ui.ndrawn - 1].tile = 1;
 }
 const char* ui_tr(const char* english) { return english; }
+/* the area the drawing is kept in while a list draws shifted: none (all of it) when its width is 0 */
+static GuiRect g_clip;
+static int g_clips; /* the times it was set */
+void ui_clip(App* app, const GuiRect* r) {
+    (void)app;
+    g_clip = r ? *r : (GuiRect){0, 0, 0, 0};
+    g_clips += r != NULL;
+}
+/* a list's scroll bar, 5 pixels wide here: the last one drawn (its rows' span, the rows it has and shows), and how many */
+static GuiRect g_bar;
+static size_t g_bar_count, g_bar_shown;
+static int g_bars;
+int ui_bar_width(App* app, size_t count, size_t shown) {
+    (void)app;
+    return shown && count > shown ? 5 : 0;
+}
+int ui_bar(App* app, GuiRect r, const UiList* list, size_t count, size_t shown) {
+    (void)list;
+    if (!ui_bar_width(app, count, shown)) return 0;
+    g_bar = r;
+    g_bar_count = count;
+    g_bar_shown = shown;
+    g_bars++;
+    return 5;
+}
 void ui_draw_label(App* app, GuiRect r, const char* text, unsigned color) {
     ui_draw_row(app, r, text, 0, NULL, color, 0, false);
     g_gui_ui.drawn[g_gui_ui.ndrawn - 1].label = 1;
@@ -196,16 +221,21 @@ static void test_draw(void) {
     lists[UI_MAIN_GAMES].focus = 3;
     ui_main_layout(gui_rect(10, 20, 400, 300), 1, r);
     g_gui_ui.ndrawn = 0;
+    g_bars = 0;
     ui_main_draw(&app, r, 1, lists);
     /* the label, three of LoadList's four rows (max_rows), Games's four (the fifth is past its last), the status */
     assert(g_gui_ui.ndrawn == 1 + 3 + 4 + 1);
     assert(d[0].label && !strcmp(d[0].text, "Pick one") && d[0].color == UI_COLOR_SOFT);
     is(d[0].r, 14, 24, 392, 17);
+    /* LoadList's rows more than it shows: its scroll bar over the three shown, max_row_width wide, they beside it;
+       Games's, whose code gives no count, none */
+    assert(g_bars == 1 && g_bar_count == 4 && g_bar_shown == 3);
+    is(g_bar, 14, 51, 200, 2 * 19 + 17);
     assert(!strcmp(d[1].text, "Load Switch") && !d[1].focused && !d[1].attr); /* its attr_cb: keys in use */
-    is(d[1].r, 14, 51, 200, 17);                                              /* max_row_width */
+    is(d[1].r, 14, 51, 200 - 5, 17);
     assert(!strcmp(d[2].text, "Load 3DS game") && d[2].focused);
-    is(d[2].r, 14, 70, 200, 17);
-    is(ui_main_row(r, 1, UI_MAIN_LOAD_LIST, 1), 14, 70, 200, 17);       /* as drawn */
+    is(d[2].r, 14, 70, 200 - 5, 17);
+    is(ui_main_row(r, 1, UI_MAIN_LOAD_LIST, 1), 14, 70, 200, 17);       /* its place, the bar's room in it */
     is(ui_main_row(r, 1, UI_MAIN_GAMES, 3), 14, 154 + 3 * 19, 300, 17); /* max_row_width */
     is(ui_main_row(r, 1, UI_MAIN_STATUS, 0), 0, 0, 0, 0);               /* not a list */
 #ifdef SDL_PLATFORM_ANDROID
@@ -213,7 +243,7 @@ static void test_draw(void) {
 #else
     assert(!strcmp(d[3].text, "Settings") && d[3].color == UI_COLOR_FOCUS);
 #endif
-    assert(d[2].attr == 0 && d[3].attr == UI_ATTR_MORE_DOWN); /* the last row shown, rows below it */
+    assert(d[2].attr == 0 && d[3].attr == 0); /* the last row shown, rows below it: the bar says it, no arrow */
     assert(!strcmp(d[4].text, "Game 0") && d[4].attr == UI_ATTR_TITLE);
     assert(!strcmp(d[5].text, "Game 1") && d[5].attr == UI_ATTR_FAILURE);
     assert(!strcmp(d[6].text, "(null)") && d[6].attr == UI_ATTR_OPEN && !d[6].focused);
@@ -227,19 +257,30 @@ static void test_draw(void) {
     assert(app.width == 300); /* each row asked with its own width, max_row_width */
     assert(d[8].label && !strcmp(d[8].text, "ready"));
     is(d[8].r, 14, 257, 392, 58);
-    /* scrolled: the rows from the first, an arrow up on it; the arrow down only while rows are left below */
+    /* scrolled: the rows from the first, the bar's thumb lower (main.c's); without a bar an arrow up on the first, the
+       arrow down only while rows are left below */
     lists[UI_MAIN_LOAD_LIST].first = 1;
     lists[UI_MAIN_GAMES].first = 1;
     g_gui_ui.ndrawn = 0;
     ui_main_draw(&app, r, 1, lists);
-    assert(!strcmp(d[1].text, "Load 3DS game") && d[1].focused && d[1].attr == UI_ATTR_MORE_UP);
+    assert(!strcmp(d[1].text, "Load 3DS game") && d[1].focused && d[1].attr == 0);
 #ifdef SDL_PLATFORM_ANDROID
-    assert(!strcmp(d[3].text, "Settings") && d[3].attr == UI_ATTR_MORE_DOWN);
+    assert(!strcmp(d[3].text, "Settings") && d[3].attr == 0);
 #else
     assert(!strcmp(d[3].text, "Decor") && d[3].attr == 0);
 #endif
     assert(!strcmp(d[4].text, "Game 1") && d[4].attr == (UI_ATTR_FAILURE | UI_ATTR_MORE_UP));
     assert(!strcmp(d[6].text, "Game 3") && d[6].attr == 0);
+    /* scrolled between two rows: each drawn up by shift, kept inside the list's area while they are, as before after */
+    lists[UI_MAIN_GAMES].first = 0;
+    lists[UI_MAIN_GAMES].shift = 7;
+    g_clips = 0;
+    g_gui_ui.ndrawn = 0;
+    ui_main_draw(&app, r, 1, lists);
+    assert(!strcmp(d[4].text, "Game 0") && d[4].r.y == 154 - 7 && d[7].r.y == 154 + 3 * 19 - 7 && g_clips == 1 &&
+           !g_clip.w);
+    lists[UI_MAIN_GAMES].shift = 0;
+    lists[UI_MAIN_GAMES].first = 1;
     /* the code's attributes: Load Switch with no keys; a scene's button */
     app.keys_missing = true;
     lists[UI_MAIN_LOAD_LIST].first = 0;
@@ -273,6 +314,23 @@ static void test_draw(void) {
     g_gui_ui.ndrawn = 0;
     ui_main_draw(&app, r, 2, lists);
     assert(!strcmp(d[2].text, "Game 3") && d[2].attr == UI_ATTR_MORE_UP);
+    /* the code's count of its rows: past the one shown a scroll bar over it, the row beside it and no arrows; all
+       shown at 1x, none */
+    lists[UI_MAIN_GAMES].count = 4;
+    lists[UI_MAIN_GAMES].first = 1;
+    g_gui_ui.ndrawn = 0;
+    g_bars = 0;
+    ui_main_draw(&app, r, 2, lists);
+    assert(g_bars == 2 && g_bar_count == 4 && g_bar_shown == 1);
+    is(g_bar, r[UI_MAIN_GAMES].x, r[UI_MAIN_GAMES].y, 384, 34);
+    assert(!strcmp(d[2].text, "Game 1") && d[2].attr == UI_ATTR_FAILURE && d[2].r.w == 384 - 5 && app.width == 384 - 5);
+    ui_main_layout(gui_rect(10, 20, 400, 300), 1, r);
+    g_gui_ui.ndrawn = 0;
+    g_bars = 0;
+    lists[UI_MAIN_GAMES].first = 0;
+    ui_main_draw(&app, r, 1, lists);
+    assert(g_bars == 1 && g_bar_count == 4 && d[7].r.w == 300);
+    lists[UI_MAIN_GAMES].count = 0;
     puts("PASS the drawing: labels, rows from items and from get_row_info, focus, colours, scroll, attributes");
 }
 
@@ -288,6 +346,9 @@ static void test_hit(void) {
     assert(item == UI_MAIN_LOAD_LIST_LOAD_3DS_GAME && row == 1);
     ui_main_act(&app, item, row, UI_HIT_CLICK);
     assert(app.calls[LOAD_3DS] == 1 && app.hits[LOAD_3DS] == UI_HIT_CLICK);
+    /* on LoadList's scroll bar, at its rows' right: no row there */
+    assert(!ui_main_hit(&app, r, 1, lists, 14 + 200 - 3, 75, 0, &item, &row) && item == -1);
+    assert(ui_main_hit(&app, r, 1, lists, 14 + 200 - 6, 75, 0, &item, &row) && row == 1);
     /* past max_row_width: no row there, in a list with items or without */
     assert(!ui_main_hit(&app, r, 1, lists, 300, 60, 0, &item, &row) && item == -1);
     assert(!ui_main_hit(&app, r, 1, lists, 350, 157, 0, &item, &row) && item == -1);
@@ -296,12 +357,32 @@ static void test_hit(void) {
     assert(ui_main_hit(&app, r, 1, lists, 20, 154 + 19 + 3, UI_HIT_RELEASE, &item, &row) ==
            (UI_HIT_HOVER | UI_HIT_RELEASE));
     assert(item == UI_MAIN_GAMES && row == 2);
+    /* shifted up by 10: the row under a point is the one drawn there, and a point over the list's area is none of it */
+    lists[UI_MAIN_GAMES].shift = 10;
+    assert(ui_main_hit(&app, r, 1, lists, 20, 154 + 19 + 3 - 10, 0, &item, &row) && item == UI_MAIN_GAMES && row == 2);
+    assert(ui_main_hit(&app, r, 1, lists, 20, 158, 0, &item, &row) && item == UI_MAIN_GAMES && row == 1);
+    item = 0;
+    ui_main_hit(&app, r, 1, lists, 20, r[UI_MAIN_GAMES].y - 1, 0, &item, &row);
+    assert(item != UI_MAIN_GAMES);
+    lists[UI_MAIN_GAMES].shift = 0;
+    item = UI_MAIN_GAMES;
+    row = 2;
     ui_main_act(&app, item, row, UI_HIT_RELEASE);
     assert(app.calls[GAMES] == 1 && app.rows[GAMES] == 2 && app.hits[GAMES] == UI_HIT_RELEASE);
     /* a row past get_row_info's last is not there; each asked with its width */
     app.width = 0;
     assert(!ui_main_hit(&app, r, 1, lists, 20, 154 + 19 * 3 + 3, 0, &item, &row));
     assert(app.width == 300);
+    /* the code's count past the rows shown: the bar's room at their right is no row's */
+    ui_main_layout(gui_rect(10, 20, 400, 300), 2, r);
+    lists[UI_MAIN_GAMES].count = 4;
+    lists[UI_MAIN_GAMES].first = 0;
+    assert(!ui_main_hit(&app, r, 2, lists, r[UI_MAIN_GAMES].x + 384 - 2, r[UI_MAIN_GAMES].y + 4, 0, &item, &row) &&
+           item == -1);
+    assert(ui_main_hit(&app, r, 2, lists, r[UI_MAIN_GAMES].x + 384 - 7, r[UI_MAIN_GAMES].y + 4, 0, &item, &row) &&
+           item == UI_MAIN_GAMES && row == 0 && app.width == 384 - 5);
+    lists[UI_MAIN_GAMES].count = 0;
+    ui_main_layout(gui_rect(10, 20, 400, 300), 1, r);
     /* the label is hit, and acts on nothing */
     assert(ui_main_hit(&app, r, 1, lists, 20, 260, 0, &item, &row) == UI_HIT_HOVER && item == UI_MAIN_STATUS);
     ui_main_act(&app, item, row, UI_HIT_CLICK);
@@ -337,6 +418,16 @@ static void test_follow_and_keys(void) {
     ui_main_follow(r, 1, UI_MAIN_LOAD_LIST, 4, &list);
     assert(list.first == 1);
     list.pointed = false;
+    /* where the scroll bar's thumb put it (free): the focus off its rows moves nothing, kept among the rows */
+    list.free = true;
+    list.first = 0;
+    list.focus = 3;
+    ui_main_follow(r, 1, UI_MAIN_LOAD_LIST, 4, &list);
+    assert(list.first == 0);
+    list.first = 3;
+    ui_main_follow(r, 1, UI_MAIN_LOAD_LIST, 4, &list);
+    assert(list.first == 1);
+    list.free = false;
     /* Games (edge) moves as little as it takes */
     list.first = 0;
     list.focus = 7;

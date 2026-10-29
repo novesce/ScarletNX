@@ -39,11 +39,13 @@ and plays its sound test.
 | The game's own C and C++ libraries (SceLibc, SceLibm, SceLibstdcxx) and the Clib, malloc on a heap in guest memory | `src/vita/hle/libc.c`, `heap.c` |
 | sceGxm on Vulkan: guest memory imported with `VK_EXT_external_memory_host`, USSE programs translated to SPIR-V through `src/common/utilities/spirv_emit.c` | `src/vita/gpu/` (`render.c`, `usse.c`, `vk.c`, `present.c`) |
 | Movies: SceMp4 (MP4 demuxed from memory with libavformat, the file read through the game's callbacks), sceAvcdec (H.264 with libavcodec, the picture laid out in the guest's buffer on the GPU, `picture.comp`), sceAudiodec (AAC and ATRAC9) and SceCodecEngine's memory | `src/vita/hle/` (`mp4.c`, `videodec.c`, `audiodec.c`) |
+| Guest memory's writes: the pages the renderer copied to the GPU (textures, color surfaces, the framebuffer) write-protected, a fault marking a page written and letting the write through, so unchanged memory isn't copied again (`mprotect` and the fault handler; off on Windows, where everything is copied each time) | `src/vita/runtime/watch.c` |
 | Keyboard, mouse (touch), gamepads and scripted presses (`--script=ms:hex,...`, SceCtrl's button bits, each held for `--press_len=` ms) | `src/vita/platform/input.c` |
 
 The driver's settings (`--key=value`) are the `g_vita_debug_ini` table of `src/nx/runtime/settings.txt`: `vita_hle_trace` prints each import call,
-`vita_jit_trace` each block compiled at run time, `vita_gxm_trace` each scene and draw. `--vulkan_video=1` (the
-Switch runtime's setting) stops the game when it makes an AVC decoder: decoding the Vita's movies with Vulkan Video is
+`vita_jit_trace` each block compiled at run time, `vita_gxm_trace` each scene and draw (and why a draw was
+skipped). `--shot_every=N` (`vita_shot_every`, with `--shot=PATH`) saves a screenshot every N vblanks, as
+`PATH_0000.ppm` on. `--vulkan_video=1` (the Switch runtime's setting) stops the game when it makes an AVC decoder: decoding the Vita's movies with Vulkan Video is
 not implemented yet, and FFmpeg decodes them on the CPU.
 
 ## The shader corpus
@@ -69,10 +71,13 @@ bugs this driver ran into were found.
 
 ## Limits
 
-- Color surfaces are A8B8G8R8. Textures are U8U8U8U8, U8, BC1 to BC3 (UBC1 to UBC3) and linear YUV420 (a movie's
+- Color surfaces are A8B8G8R8, linear, or swizzled or tiled (laid out on the GPU both ways, `swizzle.comp`), and
+  stencil is drawn (S8D24). Textures are U8U8U8U8, U8, BC1 to BC3 (UBC1 to UBC3) and linear YUV420 (a movie's
   frames, made RGBA on the GPU, `yuv.comp`), linear, swizzled or tiled (a swizzled or tiled one made linear on the GPU,
-  `swizzle.comp`), with their mipmaps laid out as Vita3K does. Other formats, cube textures, MSAA and stencil are not
-  yet.
+  `swizzle.comp`), with their mipmaps laid out as Vita3K does. Other formats, cube textures and MSAA (a scene drawn
+  at one sample a pixel) are not yet.
+- A scene's notifications are written once the GPU drew it, and the next scene is recorded meanwhile, as on the
+  console: a game waits for them (sceGxmNotificationWait) before it writes what a scene reads.
 - A fragment program that reads its pixel's color (`GXP_FLAG_FRAGCOLOR_USED`, a program that blends itself) reads
   the color target as an input attachment in place, which needs `VK_KHR_dynamic_rendering_local_read`. With
   `VK_EXT_rasterization_order_attachment_access` the primitives of one draw see each other's colors in order as on
@@ -87,7 +92,9 @@ bugs this driver ran into were found.
   reads. Any of these makes the program fail to translate with its name in the log.
 - One guest thread runs at a time.
 - PGF fonts, networking and the common dialogs answer as unavailable.
-- SceNgs is silent: its voices finish at once. A C++ exception the game throws ends it.
+- SceNgs plays 16-bit PCM and HE-ADPCM players through their patches into the master buss. Its equalizer, envelope,
+  pauser and filter modules pass the sound unchanged, and module callbacks aren't made. A C++ exception the game
+  throws ends it.
 
 ## Sources
 

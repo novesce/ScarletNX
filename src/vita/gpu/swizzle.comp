@@ -19,6 +19,8 @@ layout(push_constant) uniform Params {
     uint k;        /* swizzled: log2 of the smaller side */
     uint tiled;    /* nonzero: 32x32 tiles */
     uint tiles_x;  /* tiled: tiles a row */
+    uint reverse;  /* nonzero: the linear rows (src) into the texture (dst), elements of four bytes or more */
+    uint dst_base; /* reversed: the texture's first word in the bound destination */
 };
 
 layout(std430, binding = 0) readonly restrict buffer Src {

@@ -101,12 +101,28 @@ void vita_gxm_display_done(VitaProcess* p, VitaThread* t) {
     g->queue_head = (g->queue_head + 1) % g->max_pending;
     --g->queue_count;
 }
+/* the notifications whose scenes the GPU drew written, oldest first */
+static void notifications_poll(VitaProcess* p) {
+    VitaGxm* g = p->gxm;
+    unsigned done = 0;
+    while (done < g->note_count && vita_render_done(p, g->notes[done].serial)) {
+        vita_write32(p, g->notes[done].address, g->notes[done].value);
+        ++done;
+    }
+    if (!done) return;
+    g->note_count -= done;
+    memmove(g->notes, g->notes + done, g->note_count * sizeof *g->notes);
+}
+void vita_gxm_poll(VitaProcess* p) {
+    if (p->gxm) notifications_poll(p);
+}
 /* VITA_WAIT_GXM's a: 0 the GPU idle (sceGxmFinish), 1 the display queue empty (sceGxmDisplayQueueFinish), 2 room in
    it (sceGxmDisplayQueueAddEntry, which calls again: its r0 kept) */
 bool vita_gxm_wait_try(VitaProcess* p, VitaThread* t, uint64_t now) {
     (void)now;
     VitaGxm* g = p->gxm;
     if (!g) return true;
+    notifications_poll(p);
     if (t->wait.kind == VITA_WAIT_DISPLAY) return display_ready(p, t);
     switch (t->wait.a) {
         case 0:
@@ -175,7 +191,7 @@ static uint32_t create_context(VitaProcess* p, VitaThread* t) {
     c->depth_func = DEPTH_FUNC_ALWAYS;
     c->depth_write = 0;
     for (unsigned side = 0; side < 2; ++side) {
-        c->stencil_func[side] = 0x07000000u; /* SCE_GXM_STENCIL_FUNC_ALWAYS */
+        c->stencil_func[side] = 0x0e000000u; /* SCE_GXM_STENCIL_FUNC_ALWAYS */
         c->stencil_masks[side][0] = c->stencil_masks[side][1] = 0xff;
     }
     vita_write32(p, out, c->address);
@@ -474,9 +490,12 @@ static uint32_t begin_scene(VitaProcess* p, VitaThread* t) {
     c->in_scene = true;
     ++p->gxm->scenes;
     if (g_settings.vita_gxm_trace)
-        printf("gxm: scene %" PRIu64 " on %ux%u, color 0x%08" PRIx32 " format 0x%08" PRIx32 "\n", p->gxm->scenes,
-               (unsigned)r->width, (unsigned)r->height, c->has_color ? c->color.data : 0,
-               c->has_color ? c->color.format : 0);
+        printf("gxm: scene %" PRIu64 " on %ux%u, color 0x%08" PRIx32 " format 0x%08" PRIx32 " stride %u type 0x%08" PRIx32
+               " scale %u, depth 0x%08" PRIx32 " control 0x%08" PRIx32 "\n",
+               p->gxm->scenes, (unsigned)r->width, (unsigned)r->height, c->has_color ? c->color.data : 0,
+               c->has_color ? c->color.format : 0, c->has_color ? (unsigned)c->color.stride : 0,
+               c->has_color ? c->color.type : 0, c->has_color ? (unsigned)c->color.flags : 0,
+               c->has_depth ? c->depth.depth : 0, c->has_depth ? c->depth.control : 0);
     vita_render_begin_scene(p, c);
     return 0;
 }
@@ -488,13 +507,19 @@ static uint32_t end_scene(VitaProcess* p, VitaThread* t) {
     if (!c) return SCE_GXM_ERROR_INVALID_POINTER;
     if (!c->in_scene) return SCE_GXM_ERROR_NOT_WITHIN_SCENE;
     c->in_scene = false;
-    vita_render_end_scene(p, c);
-    if (notifications[0] || notifications[1]) vita_render_idle(p, true);
-    for (unsigned i = 0; i < 2; ++i)
-        if (notifications[i]) {
-            uint32_t address = vita_read32(p, notifications[i]);
-            if (address) vita_write32(p, address, vita_read32(p, notifications[i] + 4));
+    uint64_t serial = vita_render_end_scene(p, c);
+    VitaGxm* g = p->gxm;
+    for (unsigned i = 0; i < 2; ++i) {
+        uint32_t address = notifications[i] ? vita_read32(p, notifications[i]) : 0;
+        if (!address) continue;
+        if (g->note_count == GXM_NOTES) { /* the oldest drawn first */
+            vita_render_wait(p, g->notes[0].serial);
+            notifications_poll(p);
         }
+        g->notes[g->note_count].address = address, g->notes[g->note_count].value = vita_read32(p, notifications[i] + 4);
+        g->notes[g->note_count++].serial = serial;
+    }
+    notifications_poll(p);
     return 0;
 }
 static uint32_t set_vertex_program(VitaProcess* p, VitaThread* t) {
@@ -965,11 +990,19 @@ static uint32_t get_notification_region(VitaProcess* p, VitaThread* t) {
     if (!g->notification_region) g->notification_region = vita_alloc(p, &p->user, 0x1000, 0x1000);
     return g->notification_region;
 }
-/* sceGxmNotificationWait(notification): met once its address holds its value, which the scene's end wrote */
+/* sceGxmNotificationWait(notification): met once its address holds its value: the scene that names it last drawn,
+   waited for (the game's own point to wait, while the GPU drew the scenes it ended before) */
 static uint32_t notification_wait(VitaProcess* p, VitaThread* t) {
     uint32_t n = arg(p, t, 0);
     if (!n) return SCE_GXM_ERROR_INVALID_POINTER;
-    vita_render_idle(p, true);
+    VitaGxm* g = p->gxm;
+    uint32_t address = vita_read32(p, n);
+    for (unsigned i = g ? g->note_count : 0; i-- > 0;)
+        if (g->notes[i].address == address) {
+            vita_render_wait(p, g->notes[i].serial);
+            break;
+        }
+    notifications_poll(p);
     return 0;
 }
 /* sceGxmGetRenderTargetMemSize(params, size*): the driver memory a render target takes, which the game allocates

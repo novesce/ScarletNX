@@ -88,6 +88,8 @@ uint32_t vita_heap_in_use(VitaProcess* p, uint32_t heap);
 /* the waits other modules meet (vita/runtime/process.c asks): true when met, with the thread's result set */
 bool vita_kernel_wait_try(VitaProcess* p, VitaThread* t, uint64_t now);
 bool vita_gxm_wait_try(VitaProcess* p, VitaThread* t, uint64_t now);
+/* the notifications of the scenes the GPU drew since written (gxm.c): at each vblank too, for a game that reads them */
+void vita_gxm_poll(VitaProcess* p);
 
 /* net.c: what an offline console's network library answers for a function the runtime doesn't know: its library's
    error, 0 for a library that isn't the network's */
@@ -111,11 +113,12 @@ void vita_audio_free(VitaProcess* p);
 void vita_gxm_display_next(VitaProcess* p, VitaThread* t);
 void vita_gxm_display_done(VitaProcess* p, VitaThread* t);
 void vita_gxm_free(VitaProcess* p);
-/* mp4.c, videodec.c, audiodec.c: their state, freed with the process; the size of the unit SceMp4 last copied to
-   address (0 for none), which a raw AAC frame doesn't say itself */
+/* mp4.c, videodec.c, audiodec.c, ngs.c: their state, freed with the process; the size of the unit SceMp4 last
+   copied to address (0 for none), which a raw AAC frame doesn't say itself */
 void vita_mp4_free(VitaProcess* p);
 void vita_videodec_free(VitaProcess* p);
 void vita_audiodec_free(VitaProcess* p);
+void vita_ngs_free(VitaProcess* p);
 uint32_t vita_mp4_unit_size(VitaProcess* p, uint32_t address);
 /* fiber.c: the running fiber's entry returned: the thread goes on after its sceFiberRun */
 void vita_fiber_ended(VitaProcess* p, VitaThread* t);

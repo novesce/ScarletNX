@@ -8,6 +8,7 @@
    variables they export (_Ctype, _Stdout, the exceptions' vtables) get their contents in their slots. The functions
    are the vitasdk database's names (MIT); the layouts are Dinkumware's as the game's code reads them */
 #include "vita/hle/hle.h"
+#include "vita/runtime/watch.h"
 #include "common/utilities/common.h"
 #include <ctype.h>
 #include <inttypes.h>
@@ -676,6 +677,7 @@ static uint32_t lc_fread(VitaProcess* p, VitaThread* t) {
     FILE* f = stream(p, arg(p, t, 3));
     uint32_t size = arg(p, t, 1), count = arg(p, t, 2), buffer = arg(p, t, 0);
     if (!f || !size || !count || !vita_mapped(p, buffer, (uint32_t)((uint64_t)size * count))) return 0;
+    vita_watch_release(buffer, (uint32_t)((uint64_t)size * count)); /* the system writes it (watch.h) */
     return (uint32_t)fread(host(p, buffer), size, count, f);
 }
 static uint32_t lc_fwrite(VitaProcess* p, VitaThread* t) {

@@ -19,8 +19,10 @@ void vita_render_draw(VitaProcess* p, GxmContext* c, uint32_t primitive, uint32_
                       uint32_t count, uint32_t instances);
 /* the scene submitted: its serial */
 uint64_t vita_render_end_scene(VitaProcess* p, GxmContext* c);
-/* whether the submission of serial is done, and the work submitted so far all done (waiting for it when wait) */
+/* whether the submission of serial is done (waiting for it: vita_render_wait), and the work submitted so far all
+   done (waiting for it when wait) */
 bool vita_render_done(VitaProcess* p, uint64_t serial);
+bool vita_render_wait(VitaProcess* p, uint64_t serial);
 bool vita_render_idle(VitaProcess* p, bool wait);
 uint64_t vita_render_submitted(VitaProcess* p);
 /* sceDisplay's framebuffer (A8B8G8R8, pitch pixels a row) shown in the window from its memory on the GPU; false when it

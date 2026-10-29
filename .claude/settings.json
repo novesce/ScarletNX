@@ -10,6 +10,27 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit|Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/skills/ste100/check.py\" --hook",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/skills/ste100/check.py\" --hook",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "Stop": [
@@ -17,9 +38,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "f=; for d in \"$(git rev-parse --show-toplevel 2>/dev/null)\" \"$CLAUDE_PROJECT_DIR\" .; do [ -n \"$d\" ] && [ -f \"$d/.claude/audit-state.json\" ] && { f=\"$d/.claude/audit-state.json\"; break; }; done\n[ -n \"$f\" ] || exit 0\ncommand -v jq >/dev/null 2>&1 || exit 0\ntp=$(jq -r '.transcript_path // empty' 2>/dev/null); if [ -n \"$tp\" ] && [ -f \"$tp\" ] && ! grep -qE '\"content\":\"(<command-message>[^\"]*</command-message>\\\\n)?<command-name>/code-audit</command-name>|\"input\":\\{\"skill\":\"code-audit\"' \"$tp\"; then jq -n --arg f \"$f\" '{systemMessage:\"Audit loop guard: \\($f) belongs to another session (this transcript never invoked code-audit); not blocking.\"}'; exit 0; fi\njq -e . \"$f\" >/dev/null 2>&1 || { jq -n --arg f \"$f\" '{decision:\"block\",reason:(\"The code-audit loop guard found \\($f) but it is not valid JSON. Repair it (or delete it if no audit is running), then continue the loop.\")}'; exit 0; }\njq -e '.complete == true' \"$f\" >/dev/null 2>&1 && exit 0\njq -e '.awaiting_agents == true' \"$f\" >/dev/null 2>&1 && { printf '{\"systemMessage\":\"Audit loop paused: waiting on dispatched agents. The loop resumes when their reports arrive.\"}\\n'; exit 0; }\n[ -n \"$(find \"$f\" -mmin +360 2>/dev/null)\" ] && { jq -n --arg f \"$f\" '{systemMessage:\"Stale \\($f) (>6h) ignored by the audit-loop guard. Delete it or set complete:true.\"}'; exit 0; }\njq '([.findings[]?|select(.status==\"open\")]|length) as $open | (.pass // 1) as $pass | (if .phase == \"B\" then \"B\" else \"A\" end) as $phase | {decision:\"block\",reason:(\"code-audit loop is ACTIVE (Phase \\($phase), pass \\($pass), \\($open) findings open) and the audit state has complete:false. Rule 0 of the code-audit skill forbids ending the turn before step 12. Do NOT ask the user whether to continue: invoking the skill already authorized every pass. \" + (if $phase == \"B\" then \"Phase B: fix the open findings in severity order (CRITICAL and HIGH first, then MEDIUM, LOW, NIT; step 5), build and run (step 6), then the confirmation round (step 9 fresh read, step 10 re-analyze, step 11 decision).\" else \"Phase A is read-only: fix nothing. Run the next full audit pass (dispatch the partition reviewers, step 8.5), then step 9 fresh read, step 10 re-analyze, step 11 decision.\" end) + \" The loop ends only via the step 11 predicate followed by the step 12 Final Report, which is when you set complete:true.\")}' \"$f\"",
+            "command": "f=; for d in \"$(git rev-parse --show-toplevel 2>/dev/null)\" \"$CLAUDE_PROJECT_DIR\" .; do [ -n \"$d\" ] && [ -f \"$d/.claude/audit-state.json\" ] && { f=\"$d/.claude/audit-state.json\"; break; }; done\n[ -n \"$f\" ] || exit 0\ncommand -v jq >/dev/null 2>&1 || exit 0\ntp=$(jq -r '.transcript_path // empty' 2>/dev/null); if [ -n \"$tp\" ] && [ -f \"$tp\" ] && ! grep -qE '\"content\":\"(<command-message>[^\"]*</command-message>\\\\n)?<command-name>/code-audit</command-name>|\"input\":\\{\"skill\":\"code-audit\"' \"$tp\"; then jq -n --arg f \"$f\" '{systemMessage:\"Audit loop guard: \\($f) belongs to another session. This transcript never invoked code-audit, so the guard does not block.\"}'; exit 0; fi\njq -e . \"$f\" >/dev/null 2>&1 || { jq -n --arg f \"$f\" '{decision:\"block\",reason:(\"The code-audit loop guard found \\($f) but it is not valid JSON. Repair it, or delete it if no audit runs. Then continue the loop.\")}'; exit 0; }\njq -e '.complete == true' \"$f\" >/dev/null 2>&1 && exit 0\njq -e '.awaiting_agents == true' \"$f\" >/dev/null 2>&1 && { printf '{\"systemMessage\":\"Audit loop paused: it waits for the agents that it dispatched. The loop resumes when their reports arrive.\"}\\n'; exit 0; }\n[ -n \"$(find \"$f\" -mmin +360 2>/dev/null)\" ] && { jq -n --arg f \"$f\" '{systemMessage:\"The audit-loop guard ignores the stale \\($f) (>6h). Delete it or set complete:true.\"}'; exit 0; }\njq '([.findings[]?|select(.status==\"open\")]|length) as $open | (.pass // 1) as $pass | (if .phase == \"B\" then \"B\" else \"A\" end) as $phase | {decision:\"block\",reason:(\"code-audit loop is ACTIVE (Phase \\($phase), pass \\($pass), \\($open) findings open) and the audit state has complete:false.\\n\\nYou must not end the turn before step 12 (Rule 0 of the code-audit skill). Do NOT ask the user if you can continue. The call of the skill already authorized each pass.\\n\\n\" + (if $phase == \"B\" then \"Phase B: fix the open findings in severity order: CRITICAL and HIGH first, then MEDIUM, LOW and NIT (step 5). Then build and run (step 6). Then do the confirmation round: step 9 fresh read, step 10 re-analyze, step 11 decision.\" else \"Phase A is read-only: fix nothing. Run the next full audit pass, and dispatch the partition reviewers (step 8.5). Then do step 9 fresh read, step 10 re-analyze and step 11 decision.\" end) + \"\\n\\nThe loop ends only after the step 11 predicate and the step 12 Final Report. Set complete:true at that time.\")}' \"$f\"",
             "timeout": 10,
-            "statusMessage": "Checking audit loop state..."
+            "statusMessage": "Audit loop state check..."
           }
         ]
       }

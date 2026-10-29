@@ -1,8 +1,10 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
    Copyright 2026 the ScarletNX contributors */
-/* The log (platform/plat.c): nothing on disk before the game's module is loaded, the lines from before then at the
-   top of the log (only the first ones when they don't all fit), the time stamp only at the start of a line, a cut
-   line still ending its line, the per-thread redirect, LOG_LIMIT, fatal, and crash mode reaching the log */
+/* The log (platform/plat.c): nothing on disk before the game's module is loaded, the run before's log moved into
+   logs/ by its date and logs/ kept to the last runs, the lines from before then at the top of the log (only the first
+   ones when they don't all fit), the time stamp only at the start of a line, a cut line still ending its line, the
+   per-thread redirect, LOG_LIMIT, fatal, the log cut past log_max keeping its start and its end, and crash mode
+   reaching the log */
 #include "nx/runtime/platform/plat.c"
 #include <setjmp.h>
 #include <stdlib.h>
@@ -26,7 +28,7 @@ static unsigned checks, failures;
         }                                                                                                              \
     } while (0)
 
-static char g_text[65536];
+static char g_text[2 << 20];
 /* read back in text mode, as the log, the console and the redirect are written: on Windows each "\n" is "\r\n" on
    disk */
 static const char* slurp(const char* path) {
@@ -53,15 +55,36 @@ int main(int argc, char** argv) {
     FILE* r;
     int i, code, kept = 0, contiguous = 1;
     const char* dir = argc > 1 ? argv[1] : ".";
+    char runs[1200], path[1400], stamp[32];
+    const SnxU64 before = 1767225600; /* 2026-01-01 00:00:00 UTC */
     snprintf(log, sizeof log, "%s/LogTest.log", dir);
     snprintf(err, sizeof err, "%s/LogTest.stderr", dir);
     snprintf(redir, sizeof redir, "%s/LogTest.redirect", dir);
+    snprintf(runs, sizeof runs, "%s/logs", dir);
     remove(log);
+    snx_remove_tree(runs);
     if (!freopen(err, "w", stderr)) return 2;
+
+    /* the run before's log, last written at a known time, and five older runs' in logs/ beside a file of the
+       player's */
+    {
+        static const char* const older[] = {"2025-01-01_00-00-00.log",   "2025-01-03_00-00-00.log",
+                                            "2025-01-03_00-00-00-2.log", "2025-01-04_00-00-00.log",
+                                            "2025-01-05_00-00-00.log",   "notes.txt"};
+        FILE* f = fopen(log, "w");
+        CHECK(f && fputs("the run before\n", f) >= 0 && !fclose(f), "the run before's log was not written");
+        CHECK(!snx_set_file_time(log, before), "the run before's log has no time");
+        CHECK(!snx_mkdirs(runs), "logs/ was not made");
+        for (i = 0; i < 6; i++) {
+            snprintf(path, sizeof path, "%s/%s", runs, older[i]);
+            f = fopen(path, "w");
+            CHECK(f && !fclose(f), older[i]);
+        }
+    }
 
     /* before the module: stderr only, and kept for the log (60-byte lines: they don't all fit in the 4 KiB) */
     for (i = 0; i < 100; i++) LOG("early %02d ..........................................\n", i);
-    CHECK(!fopen(log, "r"), "a log exists before the module is loaded");
+    CHECK(!strcmp(slurp(log), "the run before\n"), "the log was written before the module is loaded");
     g_mod = &mod;
     snprintf(g_statedir, sizeof g_statedir, "%s/", dir);
     snprintf(g_exename, sizeof g_exename, "LogTest");
@@ -78,6 +101,27 @@ int main(int argc, char** argv) {
     }
     CHECK(kept > 10 && kept < 100 && contiguous, "the early lines kept are not the first ones without a gap");
     CHECK(strstr(t, "] after the module\n") != NULL, "the line after the module is missing");
+    CHECK(!strstr(t, "the run before"), "the log kept the run before's lines");
+    /* the run before's log in logs/, named by when it was last written (the local time), and the runs' logs there
+       down to the 4 newest: with this run's, 5; the player's file stays */
+    {
+        time_t when = (time_t)before;
+        struct tm* tm = localtime(&when); /* one thread: Windows has no localtime_r */
+        static const char* const gone[] = {"2025-01-01_00-00-00.log", "2025-01-03_00-00-00.log"};
+        static const char* const stay[] = {"2025-01-03_00-00-00-2.log", "2025-01-04_00-00-00.log",
+                                           "2025-01-05_00-00-00.log", "notes.txt"}; /* -2 is the later of a second */
+        CHECK(tm && strftime(stamp, sizeof stamp, "%Y-%m-%d_%H-%M-%S", tm), "the run before's time has no date");
+        snprintf(path, sizeof path, "%s/%s.log", runs, stamp);
+        CHECK(!strcmp(slurp(path), "the run before\n"), "the run before's log is not in logs/ by its date");
+        for (i = 0; i < 2; i++) {
+            snprintf(path, sizeof path, "%s/%s", runs, gone[i]);
+            CHECK(!snx_path_exists(path), gone[i]);
+        }
+        for (i = 0; i < 4; i++) {
+            snprintf(path, sizeof path, "%s/%s", runs, stay[i]);
+            CHECK(snx_path_exists(path), stay[i]);
+        }
+    }
 
     /* a line too long for the buffer still ends its line */
     memset(line, 'x', sizeof line - 1);
@@ -105,6 +149,48 @@ int main(int argc, char** argv) {
     for (i = 0; i < 5; i++) WARN_LIMIT(3, "warned\n");
     t = slurp(log);
     CHECK(count(t, "limited") == 2 && count(t, "warned") == 3, "LOG_LIMIT or WARN_LIMIT let the wrong count through");
+
+    /* past log_max (1 MiB here), cut more than once: the run's start stays, one line says what went, the last lines
+       all stay, and the frontend's toast is told once */
+    {
+        size_t size;
+        unsigned char* whole;
+        const char *mark, *first;
+        int last = -1, n, ordered = 1;
+        CHECK(!log_full_take(), "the toast was told before any cut");
+        /* a long line across the start's 64 KiB: the start ends before it, with room after it in those 64 KiB where a
+           start taken again at the next cut would hold the first cut's line too */
+        while (snx_file_size(log) < LOG_HEAD - 1200) LOG("short\n");
+        memset(line, 'y', 1900);
+        line[1900] = 0;
+        LOG("%s\n", line);
+        g_settings.log_size_limit = 1;
+        for (i = 0; i < 30000; i++) /* verbose: the log's, not stderr's */
+            logf_(2, "cut test %06d ..............................................................\n", i);
+        whole = snx_read_file(log, &size);
+        CHECK(whole && size <= (1u << 20) && size > (1u << 19) / 2, "the cut log is not between a quarter and 1 MiB");
+        t = whole ? (const char*)whole : "";
+        CHECK(t[0] == '[' && !strncmp(t + 8, "] early 00 ", 11) &&
+                  strstr(t, "] after the module"), /* read in binary: \r\n on Windows */
+              "the run's start was cut");
+        mark = strstr(t, "] log: reached log_max=1 MiB: ");
+        CHECK(mark && strstr(mark, " MiB of lines between the run's start and here cut (Debug > Log size limit") &&
+                  count(t, "] log: reached log_max=") == 1,
+              "not one line says what the cuts took");
+        first = strstr(t, "] short"); /* the run's start, to the line before the long one */
+        CHECK(first && mark && first < mark && !strstr(t, "yyyy") && !strstr(t, "cut test 000000") &&
+                  strstr(t, "cut test 029999"),
+              "the cut did not keep the start and the end, the middle gone");
+        for (first = mark ? strstr(mark, "cut test ") : NULL; first; first = strstr(first + 1, "cut test ")) {
+            n = atoi(first + 9);
+            if (last >= 0 && n != last + 1) ordered = 0;
+            last = n;
+        }
+        CHECK(ordered && last == 29999, "the lines after the cut have a gap");
+        CHECK(log_full_take() == 1 && !log_full_take(), "the toast was not told once, with the limit");
+        free(whole);
+        g_settings.log_size_limit = 16;
+    }
 
     /* fatal: the log, the box, and an exit with 1, even with a redirect set */
     r = fopen(redir, "w");

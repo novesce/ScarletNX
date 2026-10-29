@@ -9,7 +9,9 @@
    texture, w by h elements (powers of two), is at the Morton index of x and y below min(w, h) = 2^k, interleaved y
    in bit 0, with the larger side's bits above k after them. A tiled texture's 32x32 tiles are each 1024 elements in
    rows, the tiles in rows of tiles_x. Elements of four bytes or more give a word from one load (a uniform branch on
-   es); smaller ones a byte at a time from up to four elements. */
+   es); smaller ones a byte at a time from up to four elements. Reversed (reverse nonzero, elements of four bytes or
+   more only), linear rows become the texture: each word of the rows goes to its place in dst from dst_base, as a
+   swizzled or tiled color surface's store writes its memory. */
 
 uint part1by1(uint v) {
     v &= 0x0000ffffu;
@@ -33,6 +35,11 @@ void main() {
     uint w = gl_GlobalInvocationID.x;
     if (w >= words) return;
     uint d = w << 2u;
+    if (reverse != 0u) {
+        uint shift = es - 2u;
+        dst[dst_base + (source_element(d >> es) << shift) + ((d >> 2u) & ((1u << shift) - 1u))] = src[src_base + w];
+        return;
+    }
     if (es >= 2u) {
         uint shift = es - 2u;
         dst[w] = src[src_base + (source_element(d >> es) << shift) + ((d >> 2u) & ((1u << shift) - 1u))];

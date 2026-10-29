@@ -16,7 +16,7 @@ recompiles on the phone, then the game opens.
   (`/data/data/org.scarletnx/files`): `games/` goes there, the extractions in its `cache/work/`, the games' logs in
   its `state/` and the menu's own files in its `config/` and `state/` ([USAGE](USAGE.md#folders)). It needs no permission and nothing slows it down as the shared storage's
   FUSE does; it goes with the app, which Android 10 and later ask about before uninstalling it. The system's Files app
-  shows it as *ScarletNX*, to copy dumps, keys and saves in and out, and the menu's *Open Data Folder* opens it there.
+  shows it as *ScarletNX*, to copy dumps, keys and saves in and out, and the Data row's *Open Folder* in the menu's *Folders* (Settings > App > Folders) opens it there.
   Settings > App > Folders may move the data, the games or the extractions to the shared storage; it asks first, as
   games may run slower there, and takes the folder at a second tap.
   `HOME` stays the app's own files, for `.switch/prod.keys`. An older version kept the data in `/sdcard/ScarletNX`
@@ -49,10 +49,10 @@ recompiles on the phone, then the game opens.
   game's menu over it, in the menu's look (a gamepad's Home does on every system): the on-screen controls'
   settings, the touch screen's, and *Exit*; back again returns to the game. Leaving it for the home screen keeps it:
   its window is made anew when it comes back.
-- **Share Log**, in the menu, saves the message on the screen, the last run's output (`last-run.log`, which the
-  menu keeps on every system), the menu's own log and fatal errors (`scarletnx-console.log`, `scarletnx-error.log`,
-  [GUI](GUI.md)) and the newest game log to `scarletnx.log` in the data folder's `state/`, then opens the share sheet
-  with that file.
+- **Share Log**, in the menu, asks how; its Share Zip saves the message on the screen, the last run's output (`last-run.log`, which the
+  menu keeps on every system), the menu's own log and fatal errors (`scarletnx-console-<date>.log`, `scarletnx-error.log`,
+  [GUI](GUI.md)) and the newest game log as `summary.txt` of `scarletnx-logs-<date>.zip` in the data folder's
+  `state/share/`, the logs themselves beside it, then opens that folder in the Files app, to share from there.
 
 The app runs on arm64 phones and on x86_64 Android (the emulator, some tablets and Chromebooks): the recompiler makes
 the code of the device it runs on. It installs from Android 5.0 (API 21). A game needs Vulkan 1.3: on a device without

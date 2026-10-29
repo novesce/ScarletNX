@@ -69,6 +69,7 @@ static bool make_device(VkPhysicalDevice phys, uint32_t family, void* user) {
     want.features.fragmentStoresAndAtomics = features.features.fragmentStoresAndAtomics;
     want.features.shaderClipDistance = features.features.shaderClipDistance;
     want.features.textureCompressionBC = features.features.textureCompressionBC;
+    want.features.depthClamp = features.features.depthClamp;
     void* const enable[] = {&want, &want12, &want13, v->raster_order ? &want_ro : NULL,
                             v->local_read ? &want_lr : NULL};
     snx_vk_chain(enable, sizeof enable / sizeof *enable);
@@ -84,11 +85,19 @@ static bool make_device(VkPhysicalDevice phys, uint32_t family, void* user) {
     v->host_alignment = host.minImportedHostPointerAlignment ? host.minImportedHostPointerAlignment : 4096;
     v->preserve_infnan = p12.shaderSignedZeroInfNanPreserveFloat32;
     v->bc = features.features.textureCompressionBC;
+    v->depth_clamp = features.features.depthClamp;
     VkFormatProperties d16;
     vkGetPhysicalDeviceFormatProperties(phys, VK_FORMAT_D16_UNORM, &d16);
     const VkFormatFeatureFlags blit = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT |
                                       VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
     v->depth16_blit = (d16.optimalTilingFeatures & blit) == blit;
+    static const VkFormat stencils[2] = {VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT};
+    v->stencil_format = VK_FORMAT_UNDEFINED;
+    for (unsigned i = 0; i < 2 && !v->stencil_format; ++i) {
+        VkFormatProperties f;
+        vkGetPhysicalDeviceFormatProperties(phys, stencils[i], &f);
+        if (f.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) v->stencil_format = stencils[i];
+    }
     return true;
 }
 /* the window's swapchain, made anew for its size */
@@ -219,20 +228,21 @@ static bool frame_image(VitaVk* v, uint32_t width, uint32_t height) {
     g.frame_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     return true;
 }
-void vita_vk_present(VkBuffer buffer, VkDeviceSize offset, uint32_t pitch, uint32_t width, uint32_t height) {
+bool vita_vk_present(VkBuffer buffer, VkDeviceSize offset, uint32_t pitch, uint32_t width, uint32_t height) {
     VitaVk* v = &g.vk;
-    if (!g.up || !v->host.surface) return;
-    if (!v->swap.swapchain && !swapchain_make(v)) return;
-    if (!frame_image(v, width, height)) return;
+    if (!g.up || !v->host.surface) return false;
+    if (!v->swap.swapchain && !swapchain_make(v)) return false;
+    if (!frame_image(v, width, height)) return false;
     unsigned slot = v->ring.slot;
     uint32_t index = 0;
-    VkResult r = vkAcquireNextImageKHR(v->device, v->swap.swapchain, UINT64_MAX, v->acquired[slot], VK_NULL_HANDLE,
-                                       &index);
+    /* an image the window can take now, or none this vblank: the game's threads run on this one, which a wait for
+       the display's refresh (FIFO) would stall each vblank. The framebuffer stays in guest memory for the next */
+    VkResult r = vkAcquireNextImageKHR(v->device, v->swap.swapchain, 0, v->acquired[slot], VK_NULL_HANDLE, &index);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) {
         swapchain_make(v);
-        return;
+        return false;
     }
-    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) return;
+    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) return false; /* VK_NOT_READY, VK_TIMEOUT: none free yet */
     VkCommandBuffer cb = vita_vk_commands();
     image_barrier(cb, g.frame, g.frame_layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                   VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
@@ -276,4 +286,5 @@ void vita_vk_present(VkBuffer buffer, VkDeviceSize offset, uint32_t pitch, uint3
                            .pImageIndices = &index};
     r = vkQueuePresentKHR(v->queue, &pi);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) swapchain_make(v);
+    return r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR;
 }

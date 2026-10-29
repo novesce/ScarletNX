@@ -1,14 +1,14 @@
 # snx-code-quality: the rules with their wrong and right forms
 
-Every C block here is strict ISO C99 (`-std=c99 -pedantic-errors`), and each wrong/right pair gives the same
-results under ASan and UBSan except where the right form is meant to differ. Read the rule in doubt.
+Every C block here is strict ISO C99 (`-std=c99 -pedantic-errors`). Each wrong/right pair gives the same results
+under ASan and UBSan, except where the right form differs on purpose. Read the rule in doubt.
 
 ## 1. No state another value already says
 
 **Do:** let the value carry its own presence. A pointer is absent when it is NULL.
 
-**Why:** two fields saying one thing drift apart. Once `is_present` and `p` disagree, every reader has
-to guess which one is true.
+**Why:** two fields that say one thing drift apart. When `is_present` and `p` do not agree, every reader must guess
+which one is true.
 
 <!-- snippet: flag-wrong -->
 ```c
@@ -29,22 +29,21 @@ int opt_present(const Opt* o) { return o->p != NULL; }
 
 **Does not apply when:**
 - NULL is a value of its own ("present and empty").
-- Every value of the type is valid (a `u32` offset where 0 is a real offset). Then reserve zero first
-  (leave slot or byte 0 unused, so 0 still means none, as in rule 2); keep a flag only when nothing can
-  be reserved.
+- Every value of the type is valid (a `u32` offset where 0 is a real offset). Then reserve zero first:
+  leave slot or byte 0 unused, so 0 still means none, as in rule 2. Keep a flag only when you cannot reserve a
+  value.
 - The flag says something else: `has_keys` in `extract.c` says the keys file exists, while `keys`
   always holds a path.
 
 ## 2. Indices, not pointer chains
 
-**Do:** keep the objects in one array and link them by index (`u32`), with 0 as none: slot 0 of the
-array is never a real object. Not `UINT32_MAX` or -1: `if (!n)` then reads like a null pointer check,
-a compare with zero is the cheapest there is, and no index needs an out-of-range case. To sort a list,
-sort an array of (key, index) pairs with `qsort` instead of merge-sorting `next` pointers.
+**Do:** keep the objects in one array and link them by index (`u32`), with 0 as none. Slot 0 of the array is
+never a real object. Do not use `UINT32_MAX` or -1 for none. With 0, `if (!n)` reads like a null pointer check, a
+compare with zero is the cheapest compare, and no index needs an out-of-range case. To sort a list, sort an array of
+(key, index) pairs with `qsort`. Do not do a merge sort on `next` pointers.
 
-**Why:** walking an array touches memory in order, while a chain of pointers jumps across the heap. An
-index stays valid when the array is reallocated and when the array is written out (rule 5). A pointer
-does neither.
+**Why:** a walk through an array touches memory in order, but a chain of pointers jumps across the heap. An index
+stays valid when the code reallocates the array, and when it writes the array out (rule 5). A pointer does neither.
 
 <!-- snippet: indices-wrong -->
 ```c
@@ -86,19 +85,19 @@ int belongs_to(const FsTree* tree, u32 n) {
 ```
 
 **Does not apply when:**
-- The code holding the index cannot reach the array, or the array dies first. An index means nothing
+- The code that holds the index cannot get to the array, or the array dies first. An index means nothing
   without its array, so pass the owner along.
 - Objects come and go in the middle of the array. Removal leaves a hole (keep a free list) or
   renumbers everything after it (fix every index that pointed there).
-- Objects of different owners link to each other, like a thread waiting on several kernel objects.
-  Use a pointer there, or an index into one table they all share.
+- Objects of different owners link to each other, like a thread that waits on several kernel objects.
+  Use a pointer there, or an index into one table that they all share.
 
 ## 3. One allocation per owner
 
-**Do:** an object's arrays come from one allocation carved by offsets, and are freed with one `free`.
-When the sizes are fixed, a struct holding the arrays is the simplest block. When they are known only
-at run time, put each array at a multiple of its type's size: a size is always a multiple of the
-alignment, and C99 has no `alignof`.
+**Do:** the arrays of an object come from one allocation that offsets divide, and one `free` releases them. When
+the sizes are constant, a struct that holds the arrays is the simplest block. When the sizes are available only at
+run time, put each array at a multiple of the size of its type. A size is always a multiple of the alignment, and
+C99 has no `alignof`.
 
 **Why:** one block keeps an owner's data together and leaves less to fragment. It also turns a
 cleanup path with one `free` per array into a single `free`.
@@ -149,20 +148,19 @@ against `SIZE_MAX`, which matter when a size comes from the guest.
 - One of the arrays grows on its own. A `realloc` moves the whole block, so give that array a block of
   its own.
 - The parts live for different lengths of time.
-- A part is large and rarely used: allocate it when it is first needed.
-- What you are building starts to look like a general allocator (free lists across owners, size
-  classes). The RFC asks for chunking, not for a new malloc.
+- A part is large and rarely used: allocate it at its first use.
+- What you build starts to look like a general allocator (free lists across owners, size classes). The RFC
+  asks for chunks of one allocation, not for a new malloc.
 
 ## 4. Atomics on cache lines of their own
 
-**Do:** when two atomics (or a lock and the data next to it) are written by different threads, give each
-its own cache line with a `char` array between them. Atomics are plain integers reached through the
-`__atomic_*` builtins, as `src/` does, not C11's `_Atomic`. Defining two next to each other at file scope
-puts them together too: keep them in one padded struct instead.
+**Do:** when different threads write two atomics, give each its own cache line. Put a `char` array between them.
+This also applies to a lock and the data next to it. Atomics are plain integers that the code reaches through the
+`__atomic_*` builtins, as `src/` does, not C11's `_Atomic`. Two definitions next to each other at file scope also put
+them together. Keep them in one padded struct instead.
 
-**Why:** a core writes a whole 64-byte line. Two threads writing two variables in the same line take
-that line from each other on every write, as slowly as if they wrote one shared variable. This is
-false sharing.
+**Why:** a core writes a whole 64-byte line. Two threads that write two variables in the same line take that line
+from each other on every write. This is as slow as if they wrote one shared variable. This is false sharing.
 
 <!-- snippet: sharing-wrong -->
 ```c
@@ -185,21 +183,22 @@ typedef char snx_queue_apart[offsetof(Queue, completed) - offsetof(Queue, submit
 ```
 
 **Does not apply when:**
-- One thread writes both, or they are flags read often and written rarely. Padding then buys nothing.
+- One thread writes both, or they are flags that threads read often and write rarely. Then the padding buys
+  nothing.
 - There are many of them. Each padded atomic costs a full line, and in an array of per-object atomics
   that adds up.
 
-The padding keeps the two apart from each other, not from a neighbouring allocation: `malloc` aligns to
-16, not 64. Pad before the first one too when that matters.
+The padding keeps the two apart from each other, not from an allocation next to them: `malloc` aligns to 16, not
+64. When that matters, pad before the first one too.
 
 ## 5. No stored pointers in data
 
-**Do:** a structure that is data (tables, trees, anything that could be saved or shared) refers to its
-parts by index or by offset from its own start, not by address. Native byte order and widths are fine.
-The point is that the block means the same wherever it is copied.
+**Do:** refer to the parts of a data structure by index or by offset from its start, not by address. A data
+structure is a table, a tree, or anything that the code could save or share. Native byte order and widths are fine.
+The point is that the block means the same at each place that the code copies it to.
 
-**Why:** an address is only valid in this process and at this moment. Data with offsets can be copied,
-written out, read back or mapped elsewhere without fixing it up.
+**Why:** an address is valid only in this process and at this moment. You can copy data with offsets, write it out,
+read it back or map it elsewhere, and it needs no fix-up.
 
 <!-- snippet: serial-wrong -->
 ```c
@@ -227,26 +226,29 @@ const char* table_name(const NodeTable* t, u32 i) {
 **Does not apply when:**
 - The member is a handle to something outside the data: `FILE*`, `SDL_Window*`, a Vulkan object, a
   function pointer. Keep those in a runtime struct beside the data, not inside it.
-- The structure is never copied, written out or shared, and a pointer is plainly simpler. The RFC's
-  words are "unless absolutely necessary", so say why in a comment.
+- The code never copies, writes out or shares the structure, and a pointer is plainly simpler. The words of
+  the RFC are "unless absolutely necessary", so say why in a comment.
 - The access is hot enough that an add per access shows up in a measurement. Measure first.
 
 ## 6. One global per file
 
-**Do:** keep a file's mutable state in one struct and define one global of it, `g_<file>` (static unless
-another file needs it). Function-local `static`s are globals too and go in it. What another file reads is
-declared once in the header next to the file: the struct's type with the global, or a function that
-answers it. Atomics that different threads write still get a cache line each (rule 4), padded inside it.
+**Do:** keep the mutable state of a file in one struct, and define one global of it, `g_<file>`. The global is
+static unless another file needs it. Function-local `static`s are globals too and go in it. Declare what another file
+reads one time, in the header next to the file. That is the type of the struct with the global, or a function that
+answers it. Atomics that different threads write still get a cache line each (rule 4), with padding inside the
+struct.
 
-In `src/nx/hle/` the struct is a member of `g_hle` (`hle/hle.h`) instead of a global of the file: its type
-and its initializer macro (`HLE_IPC_INIT`) are in the header beside the file, `hle.c` defines `g_hle` with
-them, and the code reads `g_hle.ipc.lk`. The objects the file makes and frees are pools in that struct, not
-`malloc`s: a static array with a bound, taken with `POOL_TAKE` under the lock that guards it and made non-zero
-before the lock is let go, freed with `POOL_PUT`.
+In `src/nx/hle/`, the struct is a member of `g_hle` (`hle/hle.h`), not a global of the file. Its type and its
+initializer macro (`HLE_IPC_INIT`) are in the header beside the file. `hle.c` defines `g_hle` with them, and the code
+reads `g_hle.ipc.lk`.
 
-**Why:** loose globals scatter one subsystem's state over a file, each with its own name, initialization and
-lock, so nothing shows what belongs together or what a lock guards. One struct is one place to read, reset in
-a test, dump in a crash report or move into a context later.
+The objects that the file makes and frees are pools in that struct, not `malloc`s. A pool is a static array with a
+bound. The code takes an object with `POOL_TAKE` under the lock that guards the pool. It makes the object non-zero
+before it releases the lock. It frees the object with `POOL_PUT`.
+
+**Why:** loose globals scatter the state of one subsystem over a file, each with its own name, initialization and
+lock. Thus nothing shows what belongs together or what a lock guards. One struct is one place to read, reset in a
+test, dump in a crash report or move into a context later.
 
 <!-- snippet: globals-wrong -->
 ```c
@@ -275,5 +277,5 @@ u32 ipc_ring_count(void) { return __atomic_load_n(&g_ipc.ring_n, __ATOMIC_RELAXE
 
 **Does not apply when:**
 - The object is `const`: a table is data, not state.
-- The variable is `_Thread_local`: each thread has its own, so it can't live in a shared struct.
-- A third-party file (`.cache/cpm`), which is never edited.
+- The variable is `_Thread_local`: each thread has its own, so it cannot live in a shared struct.
+- A third-party file (`.cache/cpm`), which nobody edits.

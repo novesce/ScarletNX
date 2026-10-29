@@ -7,8 +7,9 @@
 #include <SDL3/SDL_dialog.h>
 #include <SDL3/SDL_video.h>
 
-/* iOS: from here on stdout and stderr go to logs/scarletnx-console.log in the app's Documents, which the Files app shows,
-   after a banner naming the device, the system and the limits it puts on the app (a phone shows no console) */
+/* iOS: from here on stdout and stderr go to the day's launcher log, logs/scarletnx-console-YYYY-MM-DD.log in the app's
+   Documents (gui/log.h), which the Files app shows, after a banner naming the device, the system and the limits it puts
+   on the app (a phone shows no console) */
 void gui_apple_log_start(void);
 /* iOS: one line of what the app uses now (memory it is charged for and may still take, CPU time, thermal state, power
    mode), for the log every few seconds of a run */
@@ -20,8 +21,6 @@ void gui_apple_start(void);
    it cannot open */
 int gui_apple_pick(SDL_Window* window, int folder, SDL_DialogFileCallback done, void* data, char* message,
                    size_t size);
-/* A file to the user: iOS's share sheet, the Finder showing it on macOS; 0 with message when it cannot */
-int gui_apple_share(SDL_Window* window, const char* path, char* message, size_t size);
 /* iOS: the runtime's arguments (argv[0] the first, NULL-terminated) for the game the menu plays once it has closed,
    in this process, which is the only one an iOS app has */
 void gui_apple_play(const char* const* argv);

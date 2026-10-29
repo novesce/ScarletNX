@@ -41,7 +41,10 @@ static uint32_t wait_vblank(VitaProcess* p, VitaThread* t, uint32_t count) {
 static uint32_t wait_vblank_start(VitaProcess* p, VitaThread* t) { return wait_vblank(p, t, 1); }
 static uint32_t wait_vblank_start_multi(VitaProcess* p, VitaThread* t) { return wait_vblank(p, t, vita_arg(p, t, 0)); }
 
-bool vita_display_vblank(VitaProcess* p) { return vita_present_vblank(p); }
+bool vita_display_vblank(VitaProcess* p) {
+    vita_gxm_poll(p);
+    return vita_present_vblank(p);
+}
 
 const VitaHle vita_hle_display[] = {
     {0x7a410b64u, "sceDisplaySetFrameBuf", set_frame_buf},

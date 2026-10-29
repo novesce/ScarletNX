@@ -549,6 +549,13 @@ setting Emulated cores
     help On = a guest thread runs only while it holds one of the console's cores, one thread per core at a time, in
     help priority order. Off = every guest thread runs as soon as the host schedules it (svcGetCurrentProcessorNumber
     help still answers the thread's core)
+setting Log size limit
+    key log_max
+    int 1 1024
+    default 16
+    help The game log's size in MiB, 1 to 1024: past it the run's start stays and the oldest lines after it go, said in
+    help the log and once over the game, so the log always ends with the last lines. The 5 last runs' logs are kept,
+    help the ones before this run's in logs/ beside it, named by when each was last written
 setting Answer unknown commands
     key auto_stub_ipc
     int 0 1
@@ -994,6 +1001,12 @@ setting Vita press length
     int 0 INT_MAX
     default 300
     help How long each press of the Vita game's script is held, in ms (--press_len= too)
+setting Vita screenshot interval
+    key vita_shot_every
+    int 0 INT_MAX
+    default 0
+    help With --shot=PATH, also a screenshot every this many vblanks (60 a second), PATH_0000.ppm on; 0 = only the
+    help last frame's
 
 section Game: g_game_ini
 section Display: g_display_ini

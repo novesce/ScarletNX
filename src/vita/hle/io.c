@@ -11,6 +11,7 @@
 #define _DEFAULT_SOURCE /* fseeko */
 #endif
 #include "vita/hle/hle.h"
+#include "vita/runtime/watch.h"
 #include "common/utilities/endian.h"
 #include "common/utilities/common.h"
 #include <stdio.h>
@@ -166,6 +167,7 @@ static uint32_t io_read(VitaProcess* p, VitaThread* t) {
     if (i < 0) return SCE_ERRNO(EBADF);
     if (!size) return 0;
     if (!vita_mapped(p, buffer, size)) return SCE_ERRNO(EINVAL);
+    vita_watch_release(buffer, size); /* the system writes it: a watched page would refuse it (EFAULT) */
     return (uint32_t)fread(vita_ptr(p, buffer), 1, size, p->files[i].host);
 }
 static uint32_t io_write(VitaProcess* p, VitaThread* t) {
@@ -195,6 +197,7 @@ static uint32_t io_pread(VitaProcess* p, VitaThread* t) {
     FILE* f = p->files[i].host;
     int64_t was = io_tell(f);
     if (io_seek(f, offset, SEEK_SET)) return SCE_ERRNO(EINVAL);
+    vita_watch_release(buffer, size);
     uint32_t got = (uint32_t)fread(vita_ptr(p, buffer), 1, size, f);
     (void)io_seek(f, was, SEEK_SET);
     return got;

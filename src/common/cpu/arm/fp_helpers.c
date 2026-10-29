@@ -10,6 +10,8 @@
    The included aarch64/helpers/fp.c and fp_arithmetic.c carry their own notices (QEMU's softfloat and
    target/arm, LGPL-2.1-or-later and the SoftFloat-2a, BSD and GPL-2.0-or-later portions of softfloat). */
 #include "common/cpu/arm/simd.h"
+#include <stdbool.h>
+#include <string.h>
 /* Share the integer implementation of ARM's FP pseudocode, not the A64 register ABI. Namespace this copy so both
    runtime libraries can coexist. */
 #define snx_fp_binary   snx_arm_soft_binary
@@ -40,10 +42,148 @@ static u64 step(CPU* c, u64 x, u64 y, int half) {
     /* FPHalvedSub(3, product): a single rounding of the exact difference / 2. */
     return fp_fused(c, 0x40400000, product ^ 0x80000000u, 0x3f800000, 32, -1);
 }
+/* ---- the host's floating point where it gives ARM's bits ----
+   IEEE 754's basic operations round the same on every IEEE host (square roots and fused products aren't taken:
+   the game modules link no maths library, and x86-64's baseline has no fused multiply): with round to nearest, operands and results that
+   are finite and normal (or zero), no trap enabled, and the sticky inexact flag already set (the only flag such an
+   operation could raise), the host's result is ARM's and leaves FPSCR as ARM would. Flush to zero and default NaN
+   don't apply then: no denormal or NaN is involved. Anything else takes the exact software path below. Each
+   operation is a statement of its own and contraction is off: a product rounds before it is added, as VMLA's */
+#pragma STDC FP_CONTRACT OFF
+static float f32_of(uint64_t v) {
+    uint32_t b = (uint32_t)v;
+    float f;
+    memcpy(&f, &b, sizeof f);
+    return f;
+}
+static uint64_t bits_f32(float f) {
+    uint32_t b;
+    memcpy(&b, &f, sizeof b);
+    return b;
+}
+static double f64_of(uint64_t v) {
+    double d;
+    memcpy(&d, &v, sizeof d);
+    return d;
+}
+static uint64_t bits_f64(double d) {
+    uint64_t b;
+    memcpy(&b, &d, sizeof b);
+    return b;
+}
+/* a finite value that is normal or a zero (zero only when allowed: a product's or quotient's zero may have
+   underflowed) */
+static bool plain(uint64_t v, uint32_t width, bool zero) {
+    uint64_t e = width == 32 ? (v >> 23) & 0xff : (v >> 52) & 0x7ff, top = width == 32 ? 0xff : 0x7ff;
+    uint64_t m = width == 32 ? v & 0x7fffff : v & 0xfffffffffffffull;
+    return e != top && (e != 0 || (m == 0 && zero));
+}
+static bool host_add(uint64_t x, uint64_t y, uint32_t width, int sub, uint64_t* out) {
+    if (width == 32) {
+        float a = f32_of(x), b = f32_of(y);
+        float r = sub ? a - b : a + b;
+        *out = bits_f32(r);
+    } else {
+        double a = f64_of(x), b = f64_of(y);
+        double r = sub ? a - b : a + b;
+        *out = bits_f64(r);
+    }
+    return plain(*out, width, true); /* a sum of normals is zero only exactly */
+}
+static bool host_mul_div(uint64_t x, uint64_t y, uint32_t width, int div, uint64_t* out) {
+    if (width == 32) {
+        float a = f32_of(x), b = f32_of(y);
+        if (div && b == 0.0f) return false;
+        float r = div ? a / b : a * b;
+        *out = bits_f32(r);
+    } else {
+        double a = f64_of(x), b = f64_of(y);
+        if (div && b == 0.0) return false;
+        double r = div ? a / b : a * b;
+        *out = bits_f64(r);
+    }
+    /* zero only from a zero operand (else it underflowed) */
+    return plain(*out, width, (x & ~(1ull << (width - 1))) == 0 || (!div && (y & ~(1ull << (width - 1))) == 0));
+}
+static bool host_fp(const CPU* c, uint32_t ixc, uint64_t x, uint64_t y, uint64_t add, uint32_t op, uint32_t width,
+                    uint32_t param, uint64_t* out) {
+    uint64_t sign = 1ull << (width - 1), product;
+    if ((width != 32 && width != 64) || (c->fpcr & 0x00c09f00u)) return false; /* rounding mode, trap enables */
+    switch (op) {
+        case AV_FCMP:
+        case AV_FCMPE: /* no flag, ordered */
+            if (!plain(x, width, true) || !plain(y, width, true)) return false;
+            if (width == 32) {
+                float a = f32_of(x), b = f32_of(y);
+                *out = a < b ? 8 : a == b ? 6 : 2;
+            } else {
+                double a = f64_of(x), b = f64_of(y);
+                *out = a < b ? 8 : a == b ? 6 : 2;
+            }
+            return true;
+        default: break;
+    }
+    if (!ixc) return false;
+    switch (op) {
+        case AV_FADD:
+        case AV_FSUB:
+            return plain(x, width, true) && plain(y, width, true) && host_add(x, y, width, op == AV_FSUB, out);
+        case AV_FMUL:
+        case AV_FDIV:
+            return plain(x, width, true) && plain(y, width, true) && host_mul_div(x, y, width, op == AV_FDIV, out);
+        case AV_FMLA:
+        case AV_FMLS:
+        case AV_FNMLA:
+        case AV_FNMLS:
+        case AV_FNMUL:
+            if (!plain(x, width, true) || !plain(y, width, true) || !host_mul_div(x, y, width, 0, &product))
+                return false;
+            if (op == AV_FMLS || op == AV_FNMLA || op == AV_FNMUL) product ^= sign;
+            if (op == AV_FNMUL) {
+                *out = product;
+                return true;
+            }
+            if (op == AV_FNMLA || op == AV_FNMLS) add ^= sign;
+            return plain(add, width, true) && host_add(add, product, width, 0, out);
+        case AV_ITOF: { /* a 32-bit integer, no fraction bits */
+            unsigned iw = (param >> 8) & 255, fb = (param >> 16) & 255;
+            if (iw != 32 || fb) return false;
+            uint32_t v = (uint32_t)x;
+            bool uns = param & (1u << 28);
+            if (width == 32) *out = bits_f32(uns ? (float)v : (float)(int32_t)v);
+            else *out = bits_f64(uns ? (double)v : (double)(int32_t)v);
+            return true;
+        }
+        case AV_FTOI: { /* toward zero (VCVT's), in range, to a 32-bit integer */
+            unsigned rm = (param >> 24) & 15, iw = (param >> 8) & 255, fb = (param >> 16) & 255;
+            if (rm == 8) rm = (c->fpcr >> 22) & 3;
+            if (rm != 3 || iw != 32 || fb || !plain(x, width, true)) return false;
+            double d = width == 32 ? (double)f32_of(x) : f64_of(x);
+            bool uns = param & (1u << 28);
+            if (uns ? !(d > -1.0 && d < 4294967296.0) : !(d > -2147483649.0 && d < 2147483648.0)) return false;
+            *out = uns ? (uint32_t)d : (uint32_t)(int32_t)d;
+            return true;
+        }
+        case AV_FCVT: { /* between single and double, to nearest */
+            unsigned to = param & 255, rm = (param >> 24) & 15;
+            if (rm == 8) rm = (c->fpcr >> 22) & 3;
+            if (rm || !plain(x, width, true) || to == width || (to != 32 && to != 64)) return false;
+            if (to == 64) {
+                *out = bits_f64((double)f32_of(x));
+                return true;
+            }
+            *out = bits_f32((float)f64_of(x));
+            return plain(*out, 32, (x & ~sign) == 0);
+        }
+        default: return false;
+    }
+}
 uint64_t snx_arm_fp(SnxArmCPU* cpu, uint64_t x, uint64_t y, uint64_t add, uint32_t op, uint32_t width, uint32_t param) {
     CPU c; /* only fpcr/fpsr are consumed by the raw-bit primitives */
     c.fpcr = param & (1u << 30) ? (cpu->fpscr & (1u << 26)) | 0x03000000 : cpu->fpscr;
     c.fpsr = 0;
+    uint64_t fast;
+    if (host_fp(&c, cpu->fpscr & 0x10u, x, y, add, op, width, param, &fast)) return fast;
     unsigned rm = (param >> 24) & 15, iw = (param >> 8) & 255, fb = (param >> 16) & 255;
     int uns = !!(param & (1u << 28));
     uint64_t sign = 1ull << (width - 1), result = 0, product;

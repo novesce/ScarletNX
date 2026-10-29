@@ -114,8 +114,11 @@ static bool fail(T* t, const char* format, ...) {
 static void global(T* t, uint32_t id) {
     if (t->global_count < GLOBALS) t->globals[t->global_count++] = id;
 }
+/* a module-scope variable; a register bank (Private) starts as zeros, so a read of a register the program didn't
+   write is the same on every device */
 static uint32_t var(T* t, uint32_t storage, uint32_t type) {
-    uint32_t id = spv_emit_variable(&t->e, storage, type);
+    uint32_t id = storage == SPV_STORAGE_PRIVATE ? spv_emit_variable_zeroed(&t->e, storage, type)
+                                                 : spv_emit_variable(&t->e, storage, type);
     global(t, id);
     return id;
 }
@@ -1666,6 +1669,8 @@ static void vertex_inputs(T* t) {
                 for (unsigned i = 0; i < 4 && s * 4 + i < words; ++i)
                     store_word(t, B_PA, resource + s * 4 + i, SPV(&t->e, SPV_OP_COMPOSITE_EXTRACT, t->t_u32, vec, i));
             }
+            /* a three-component float parameter's fourth is 1, as a typed one's (a position's w) */
+            if (words == 3 && components == 3 && type == T_F32) store_word(t, B_PA, resource + 3, cu(t, 0x3f800000u));
             slot += (words + 3) / 4;
             continue;
         }
@@ -1731,6 +1736,13 @@ static uint32_t frag_coord(T* t) {
     }
     return t->frag_coord;
 }
+/* the components to store for an input of n components into regs registers of type: as many as the registers hold,
+   up to four, and at least n */
+static unsigned input_components(unsigned n, unsigned regs, Type type) {
+    unsigned fit = regs * packed_count(type);
+    fit = fit > 4 ? 4 : fit;
+    return fit > n ? fit : n;
+}
 static void fragment_inputs(T* t) {
     const unsigned char* gxp = t->gxp;
     const unsigned char* varyings = gxp_at(gxp, GXP_VARYINGS);
@@ -1774,8 +1786,11 @@ static void fragment_inputs(T* t) {
                 }
                 vec = SPV(&t->e, SPV_OP_LOAD, t->t_v4f, *input);
             }
-            store_input(t, B_PA, pa, type, vector_value(t, vec, n, K_FLOAT));
-            pa += ((size >> 4) & 3) + 1;
+            /* the registers the varying takes, whole: the iterator writes them all, and a program reads past its
+               components (a three-component one's fourth register), which the vertex program's outputs give */
+            unsigned regs = ((size >> 4) & 3) + 1;
+            store_input(t, B_PA, pa, type, vector_value(t, vec, input_components(n, regs, type), K_FLOAT));
+            pa += regs;
         }
         uint32_t coord_index = info & 0x40f;
         if (coord_index != 0xf) { /* a non-dependent texture read, into PA (texture.cpp: do_texture_queries) */
@@ -1806,8 +1821,10 @@ static void fragment_inputs(T* t) {
                 uint32_t xy = SPV(&t->e, SPV_OP_VECTOR_SHUFFLE, t->t_v2f, coord, coord, 0, 1);
                 sampled = SPV(&t->e, SPV_OP_IMAGE_SAMPLE_IMPLICIT_LOD, t->t_v4f, sampler, xy);
             }
-            store_input(t, B_PA, pa, type, vector_value(t, sampled, texture_components(format), K_FLOAT));
-            pa += ((size >> 6) & 3) + 1;
+            unsigned regs = ((size >> 6) & 3) + 1; /* its registers, whole, as a varying's */
+            store_input(t, B_PA, pa, type,
+                        vector_value(t, sampled, input_components(texture_components(format), regs, type), K_FLOAT));
+            pa += regs;
         }
     }
 }
@@ -1867,6 +1884,8 @@ static void uniforms(T* t) {
         uint32_t runtime = spv_emit_type_runtime_array(&t->e, t->t_u32, 4), zero = 0;
         uint32_t block = spv_emit_type_struct(&t->e, &runtime, &zero, 1);
         spv_emit_decorate(&t->e, block, SPV_DECORATION_BLOCK, NULL, 0);
+        /* only read: a vertex stage may write no storage buffer without vertexPipelineStoresAndAtomics */
+        spv_emit_member_decorate(&t->e, block, 0, SPV_DECORATION_NON_WRITABLE, NULL, 0);
         uint32_t buffer = spv_emit_resource(&t->e, SPV_STORAGE_STORAGE_BUFFER, block, 0, t->fragment ? 1 : 0);
         global(t, buffer);
         t->buffer = buffer;
@@ -1921,10 +1940,12 @@ static void uniforms(T* t) {
         uint32_t texture = snx_ld_le16(d + i * 4) / 4, reg = base + snx_ld_le16(d + i * 4 + 2);
         if (texture < USSE_TEXTURES && reg < BANK_WORDS) t->dependent[reg] = (uint8_t)(texture + 1);
     }
-    /* the literals: (SA offset, float) pairs */
+    /* the literals: (register, word) pairs, the register from container 19's base as the dependent samplers' (at 0 the
+       program's uniforms would be overwritten, and the registers it reads left as they were) */
     uint32_t literals = snx_ld_le32(gxp + GXP_LITERALS_COUNT);
     const unsigned char* l = gxp_at(gxp, GXP_LITERALS);
-    for (uint32_t i = 0; i < literals; ++i) store_word(t, B_SA, snx_ld_le32(l + i * 8), cu(t, snx_ld_le32(l + i * 8 + 4)));
+    for (uint32_t i = 0; i < literals; ++i)
+        store_word(t, B_SA, base + snx_ld_le32(l + i * 8), cu(t, snx_ld_le32(l + i * 8 + 4)));
 }
 /* the vertex outputs (gxp.cpp: get_vertex_outputs) from O0 on, in order, and the position's viewport transform
    (make_vert_finalize_function) */
@@ -1942,11 +1963,11 @@ static void vertex_outputs(T* t) {
         uint32_t field[5];
         for (unsigned i = 0; i < 5; ++i)
             field[i] = SPV(&t->e, SPV_OP_LOAD, t->t_f32, SPV(&t->e, SPV_OP_ACCESS_CHAIN, pointer, t->push, cu(t, i)));
-        /* enabled: z' = (z_offset + z_scale * z / w) * w, clamped at 0; disabled: x, y from window coordinates, z = w */
+        /* enabled: z' = z_scale * z + z_offset * w, whose z' / w is the viewport's z_offset + z_scale * z / w, linear in
+           clip space for the clipper to interpolate (the depth clamp, where the device has it, keeps what lies past
+           [0, 1] as the console does); disabled: x, y from window coordinates, z = w */
         uint32_t enabled = op2(t, SPV_OP_F_ORD_GREATER_THAN, t->t_bool, field[0], cf(t, 0.5f));
-        uint32_t zw = op2(t, SPV_OP_F_DIV, t->t_f32, pos.c[2], pos.c[3]);
-        uint32_t z = ext2(t, t->t_f32, SPV_GLSL_F_MAX, ext3(t, t->t_f32, SPV_GLSL_FMA, zw, field[4], field[3]), cf(t, 0));
-        z = op2(t, SPV_OP_F_MUL, t->t_f32, z, pos.c[3]);
+        uint32_t z = ext3(t, t->t_f32, SPV_GLSL_FMA, pos.c[2], field[4], op2(t, SPV_OP_F_MUL, t->t_f32, pos.c[3], field[3]));
         uint32_t sx = op2(t, SPV_OP_F_SUB, t->t_f32, op2(t, SPV_OP_F_MUL, t->t_f32, pos.c[0],
                                                           op2(t, SPV_OP_F_DIV, t->t_f32, cf(t, 2), field[1])), cf(t, 1));
         uint32_t sy = op2(t, SPV_OP_F_SUB, t->t_f32, op2(t, SPV_OP_F_MUL, t->t_f32, pos.c[1],
@@ -1976,6 +1997,14 @@ static void vertex_outputs(T* t) {
         global(t, variable);
         SPV_VOID(&t->e, SPV_OP_STORE, variable, SPV(&t->e, SPV_OP_COMPOSITE_CONSTRUCT, t->t_v4f, v.c[0], v.c[1], v.c[2], v.c[3]));
         o += outputs[i].components;
+    }
+    /* the varyings it doesn't write as zero, as its output registers start: a fragment program may read one (a game
+       pairs programs so), which a missing output would leave undefined */
+    for (unsigned i = 0; i < 13; ++i) {
+        if (outputs[i].present) continue;
+        uint32_t variable = spv_emit_location(&t->e, SPV_STORAGE_OUTPUT, t->t_v4f, outputs[i].location);
+        global(t, variable);
+        SPV_VOID(&t->e, SPV_OP_STORE, variable, SPV(&t->e, SPV_OP_COMPOSITE_CONSTRUCT, t->t_v4f, cf(t, 0), cf(t, 0), cf(t, 0), cf(t, 0)));
     }
     if (vo1 & 0x100) {
         out.num = o;

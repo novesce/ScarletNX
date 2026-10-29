@@ -183,6 +183,7 @@ struct VitaNet;
 struct VitaTrophy;
 struct VitaVideodec;
 struct VitaAudiodec;
+struct VitaNgs;
 typedef struct VitaProcess {
     unsigned char* mem; /* the reservation */
     VitaImage image;
@@ -212,6 +213,8 @@ typedef struct VitaProcess {
     struct VitaMp4* mp4;
     struct VitaVideodec* videodec;
     struct VitaAudiodec* audiodec;
+    /* SceNgs's voices (vita/hle/ngs.c), made at sceNgsSystemInit */
+    struct VitaNgs* ngs;
     bool exited;
     int32_t exit_code;
     /* the run-time compiler: blocks the module lacks (vita/runtime/jit.c), NULL without one */

@@ -137,18 +137,7 @@ int gui_android_play(const char* const* argv, char* message, size_t size) {
     return ok;
 }
 
-int gui_android_share(const char* path, char* message, size_t size) {
-    JNIEnv* env = (JNIEnv*)SDL_GetAndroidJNIEnv();
-    jvalue arg;
-    int ok;
-    if (!env) return call("share", "", NULL, message, size);
-    arg.l = (*env)->NewStringUTF(env, path);
-    ok = call("share", "(Ljava/lang/String;)V", &arg, message, size);
-    (*env)->DeleteLocalRef(env, arg.l);
-    return ok;
-}
 int gui_android_background(char* message, size_t size) { return call("toBack", "()V", NULL, message, size); }
-int gui_android_open_data(char* message, size_t size) { return call("openData", "()V", NULL, message, size); }
 int gui_android_open_folder(const char* path, char* message, size_t size) {
     JNIEnv* env = (JNIEnv*)SDL_GetAndroidJNIEnv();
     jvalue arg;

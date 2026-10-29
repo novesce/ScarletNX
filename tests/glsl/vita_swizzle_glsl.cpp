@@ -15,7 +15,7 @@
 namespace vita_swizzle_shader {
 using namespace glsl;
 struct Deswizzler : Invocation {
-    uint words, elements, src_base, es, width, wl, k, tiled, tiles_x;
+    uint words, elements, src_base, es, width, wl, k, tiled, tiles_x, reverse, dst_base;
     const leuint* src;
     leuint* dst;
 #include "vita/gpu/swizzle.glsl"
@@ -74,9 +74,42 @@ static void one(bool tiled, uint32_t width, uint32_t height, uint32_t es) {
         d.words = words, d.elements = elements, d.src_base = base, d.es = es, d.width = width;
         d.wl = std::bit_width(width) - 1;
         d.k = std::bit_width(width < height ? width : height) - 1;
-        d.tiled = tiled, d.tiles_x = (width + 31) >> 5;
+        d.tiled = tiled, d.tiles_x = (width + 31) >> 5, d.reverse = 0, d.dst_base = 0;
         d.src = src.data(), d.dst = dst.data();
     });
+    // reversed (a color surface's store, elements of four bytes or more): the rows back where they came from
+    if (es >= 2) {
+        std::vector<glsl::leuint> back(base + (span * bytes + 3) / 4 + 1);
+        back[back.size() - 1] = guard;
+        glsl::dispatch<Deswizzler>(glsl::uvec3((words + 63) / 64, 1, 1), glsl::uvec3(64, 1, 1), [&](Deswizzler& d) {
+            d.words = words, d.elements = elements, d.src_base = 0, d.es = es, d.width = width;
+            d.wl = std::bit_width(width) - 1;
+            d.k = std::bit_width(width < height ? width : height) - 1;
+            d.tiled = tiled, d.tiles_x = (width + 31) >> 5, d.reverse = 1, d.dst_base = base;
+            d.src = dst.data(), d.dst = back.data();
+        });
+        for (uint32_t y = 0; y < height; y++)
+            for (uint32_t x = 0; x < width; x++) {
+                // the source element linear element (x, y) came from, as the references place it
+                uint32_t e = 0;
+                if (tiled)
+                    e = (((x >> 5) + ((width + 31) >> 5) * (y >> 5)) << 10) | (x & 31) | ((y & 31) << 5);
+                else {
+                    uint32_t min = width < height ? width : height, k = std::bit_width(min) - 1, m = min - 1;
+                    uint32_t mx = x & m, my = y & m, morton = 0;
+                    for (uint32_t b = 0; b < k; b++) morton |= ((my >> b) & 1) << (2 * b) | ((mx >> b) & 1) << (2 * b + 1);
+                    e = (((x >> k) | (y >> k)) << (2 * k)) | morton;
+                }
+                for (uint32_t w = 0; w < bytes / 4; w++)
+                    if ((uint32_t)back[base + e * (bytes / 4) + w] != (uint32_t)src[base + e * (bytes / 4) + w] &&
+                        failures++ < 10)
+                        std::printf("%s %ux%u reversed: element (%u, %u) isn't back\n", tiled ? "tiled" : "swizzled",
+                                    width, height, x, y);
+            }
+        if ((uint32_t)back[back.size() - 1] != guard && failures++ < 10)
+            std::printf("%s %ux%u reversed: the word past the texture was written\n", tiled ? "tiled" : "swizzled",
+                        width, height);
+    }
     std::vector<uint8_t> want(elements * bytes);
     const uint8_t* s = (const uint8_t*)(src.data() + base);
     if (tiled)

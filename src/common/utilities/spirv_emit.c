@@ -1858,13 +1858,14 @@ void spv_emit_member_decorate(SpvEmitter* e, uint32_t type, uint32_t member, uin
     put(&e->decorations, decoration);
     for (size_t i = 0; i < count; i++) put(&e->decorations, operands[i]);
 }
-uint32_t spv_emit_variable(SpvEmitter* e, uint32_t storage, uint32_t type) {
+static uint32_t variable(SpvEmitter* e, uint32_t storage, uint32_t type, uint32_t initializer) {
     uint32_t pointer = spv_emit_type_pointer(e, storage, type), id = spv_emit_id(e);
     assert(storage != SPV_STORAGE_FUNCTION);
-    instruction(&e->types, SPV_OP_VARIABLE, 4);
+    instruction(&e->types, SPV_OP_VARIABLE, initializer ? 5 : 4);
     put(&e->types, pointer);
     put(&e->types, id);
     put(&e->types, storage);
+    if (initializer) put(&e->types, initializer);
     if (storage == SPV_STORAGE_INPUT || storage == SPV_STORAGE_OUTPUT) {
         if (e->interface_count == e->interface_capacity) {
             size_t capacity = e->interface_capacity ? e->interface_capacity * 2 : 16;
@@ -1876,6 +1877,14 @@ uint32_t spv_emit_variable(SpvEmitter* e, uint32_t storage, uint32_t type) {
         e->interface[e->interface_count++] = id;
     }
     return id;
+}
+uint32_t spv_emit_variable(SpvEmitter* e, uint32_t storage, uint32_t type) { return variable(e, storage, type, 0); }
+uint32_t spv_emit_variable_zeroed(SpvEmitter* e, uint32_t storage, uint32_t type) {
+    uint32_t zero = spv_emit_id(e);
+    instruction(&e->types, SPV_OP_CONSTANT_NULL, 3);
+    put(&e->types, type);
+    put(&e->types, zero);
+    return variable(e, storage, type, zero);
 }
 uint32_t spv_emit_resource(SpvEmitter* e, uint32_t storage, uint32_t type, uint32_t set, uint32_t binding) {
     uint32_t id = spv_emit_variable(e, storage, type);

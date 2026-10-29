@@ -25,6 +25,8 @@ typedef struct {
     bool preserve_infnan; /* shaderSignedZeroInfNanPreserveFloat32: the shaders declare SignedZeroInfNanPreserve */
     bool bc; /* the device samples BC1 to BC3 (textureCompressionBC) */
     bool depth16_blit; /* D16 depth images blit both ways (a depth surface scaled to and from its samples) */
+    bool depth_clamp;  /* the device clamps depth rather than clipping it (depthClamp), as the console does */
+    VkFormat stencil_format; /* a depth and stencil format it renders to (D24S8, else D32S8), UNDEFINED for none */
     /* the color attachment read as an input attachment while rendered to (VK_KHR_dynamic_rendering_local_read), in
        primitive order within a draw (VK_EXT_rasterization_order_attachment_access) */
     bool local_read, raster_order;
@@ -53,6 +55,6 @@ uint32_t vita_vk_memory_type(uint32_t bits, VkMemoryPropertyFlags properties);
 /* the renderer's per-submission resources, freed when the slot's submission is done */
 void vita_vk_on_retire(void (*retire)(unsigned slot, uint64_t serial));
 /* Shows the framebuffer: width by height pixels, pitch pixels a row, R8G8B8A8 bytes at offset in buffer, scaled into
-   the window. Nothing without a window */
-void vita_vk_present(VkBuffer buffer, VkDeviceSize offset, uint32_t pitch, uint32_t width, uint32_t height);
+   the window. False when nothing was shown: no window, or no swapchain image free this time */
+bool vita_vk_present(VkBuffer buffer, VkDeviceSize offset, uint32_t pitch, uint32_t width, uint32_t height);
 #endif

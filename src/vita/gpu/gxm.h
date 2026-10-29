@@ -16,6 +16,7 @@
 #define GXM_TARGETS          16u
 #define GXM_MAPPINGS         128u
 #define GXM_DISPLAY_QUEUE    16u
+#define GXM_NOTES            64u
 /* the handles the API gives for what the runtime keeps (programs, render targets, sync objects, the patcher): addresses
    in and past the runtime's page that nothing maps, never read by the game */
 #define GXM_HANDLE_TARGET    0x80006000u
@@ -54,6 +55,10 @@ typedef struct {
     void* shader;
 } GxmFragmentProgram;
 #define GXM_COLOR_SWIZZLE3_RGB 0x00100000u /* SCE_GXM_COLOR_SWIZZLE3_RGB: a three-component format's B first */
+/* SceGxmColorSurfaceType: how a color surface's memory lays its pixels out (rows, 32x32 tiles, or Morton order) */
+#define GXM_COLOR_SURFACE_LINEAR   0x00000000u
+#define GXM_COLOR_SURFACE_TILED    0x04000000u
+#define GXM_COLOR_SURFACE_SWIZZLED 0x08000000u
 /* a color surface as sceGxmColorSurfaceInit made it (the guest's SceGxmColorSurface holds these words) */
 typedef struct {
     uint32_t flags, width, height, stride, data, format, type, output_register_size;
@@ -67,6 +72,7 @@ typedef struct {
 #define GXM_DEPTH_TILED       0x10000u
 #define GXM_DEPTH_STRIDE_SHIFT 17u
 #define GXM_DEPTH_D16         0x2444u /* SCE_GXM_DEPTH_STENCIL_FORMAT_D16 >> 12 */
+#define GXM_DEPTH_S8D24       0x1266u /* SCE_GXM_DEPTH_STENCIL_FORMAT_S8D24 >> 12 */
 typedef struct {
     uint32_t control, depth, stencil;
     float background_depth;
@@ -103,6 +109,13 @@ typedef struct {
 typedef struct VitaGxm {
     bool initialized;
     uint32_t notification_region; /* sceGxmGetNotificationRegion's, made at its first call */
+    /* the notifications ended scenes name (sceGxmEndScene): each address written with its value once the GPU drew
+       the submission of serial, in order */
+    struct {
+        uint32_t address, value;
+        uint64_t serial;
+    } notes[GXM_NOTES];
+    unsigned note_count;
     uint32_t callback, data_size, max_pending;
     /* the display queue: entries' copies of the game's data in guest memory, oldest first, each with the GPU
        submission it shows the results of */

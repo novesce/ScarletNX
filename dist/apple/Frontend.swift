@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright 2026 the ScarletNX contributors
 // The system's side of the iOS and macOS apps (docs/APPLE.md), for src/gui/apple.m: the document picker SDL lacks on
-// iOS, and the log handed to the user. The menu and the runtime are SDL's window; this only presents over it.
+// iOS. The menu and the runtime are SDL's window; this only presents over it.
 import Foundation
 
 #if os(iOS)
@@ -62,23 +62,7 @@ public func snxApplePick(_ window: UnsafeMutableRawPointer, _ folder: Bool, _ do
     return true
 }
 
-@_cdecl("snx_apple_share")
-public func snxAppleShare(_ window: UnsafeMutableRawPointer, _ path: UnsafePointer<CChar>) -> Bool {
-    guard let top = presenter(window) else { return false }
-    let sheet = UIActivityViewController(activityItems: [URL(fileURLWithPath: String(cString: path))],
-                                         applicationActivities: nil)
-    // an iPad shows it as a popover, which needs somewhere to point
-    if let popover = sheet.popoverPresentationController {
-        popover.sourceView = top.view
-        popover.sourceRect = CGRect(x: top.view.bounds.midX, y: top.view.bounds.midY, width: 0, height: 0)
-        popover.permittedArrowDirections = []
-    }
-    top.present(sheet, animated: true)
-    return true
-}
-
 #elseif os(macOS)
-import AppKit
 
 /// SDL has macOS's own file and folder dialogs: apple.m asks for none here
 @_cdecl("snx_apple_pick")
@@ -88,10 +72,4 @@ public func snxApplePick(_ window: UnsafeMutableRawPointer, _ folder: Bool,
     false
 }
 
-/// The log, selected in a Finder window, to send or keep
-@_cdecl("snx_apple_share")
-public func snxAppleShare(_ window: UnsafeMutableRawPointer, _ path: UnsafePointer<CChar>) -> Bool {
-    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: String(cString: path))])
-    return true
-}
 #endif

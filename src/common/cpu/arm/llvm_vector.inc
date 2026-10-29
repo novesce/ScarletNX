@@ -35,8 +35,8 @@ static void vset(ArmIR* a, unsigned offset, unsigned width, LLVMValueRef x) {
     }
     put(a, offsetof(SnxArmCPU, d) + (offset & ~7u), result);
 }
-static LLVMValueRef fp_call(ArmIR* a, SnxArmVectorOp op, unsigned width, unsigned param, LLVMValueRef x, LLVMValueRef y,
-                            LLVMValueRef z) {
+static LLVMValueRef fp_helper(ArmIR* a, SnxArmVectorOp op, unsigned width, unsigned param, LLVMValueRef x,
+                              LLVMValueRef y, LLVMValueRef z) {
     LLVMValueRef fn = LLVMGetNamedFunction(a->mod, "snx_arm_fp");
     LLVMTypeRef params[] = {a->ptr, a->i64, a->i64, a->i64, a->i32, a->i32, a->i32};
     LLVMTypeRef type = LLVMFunctionType(a->i64, params, 7, 0);
@@ -44,6 +44,85 @@ static LLVMValueRef fp_call(ArmIR* a, SnxArmVectorOp op, unsigned width, unsigne
                            c32(a, op), c32(a, width),      c32(a, param)};
     if (!fn) fn = LLVMAddFunction(a->mod, "snx_arm_fp", type);
     return LLVMBuildCall2(a->b, type, fn, args, 7, "");
+}
+/* The host's floating point inline, where it gives the helper's bits (fp_helpers.c's host_fp, which says why): round
+   to nearest, no trap enabled, the inexact flag already set, operands and results finite and normal or zero (a
+   product's or quotient's zero only from a zero operand). The native result is computed, and the helper called only
+   when one of those fails. Each operation is an instruction of its own, without fast-math flags: exact IEEE, a
+   product rounded before it is added */
+static LLVMValueRef fp_plain(ArmIR* a, LLVMValueRef v, unsigned width, LLVMValueRef zero_ok) {
+    LLVMTypeRef t = width == 32 ? a->i32 : a->i64;
+    unsigned shift = width == 32 ? 23 : 52;
+    uint64_t top = width == 32 ? 0xff : 0x7ff, mantissa = (1ull << shift) - 1;
+    LLVMValueRef e = band(a, LLVMBuildLShr(a->b, v, LLVMConstInt(t, shift, 0), ""), LLVMConstInt(t, top, 0));
+    LLVMValueRef m = band(a, v, LLVMConstInt(t, mantissa, 0));
+    LLVMValueRef finite = LLVMBuildICmp(a->b, LLVMIntNE, e, LLVMConstInt(t, top, 0), "");
+    LLVMValueRef normal = LLVMBuildICmp(a->b, LLVMIntNE, e, LLVMConstInt(t, 0, 0), "");
+    LLVMValueRef zero = band(a, LLVMBuildICmp(a->b, LLVMIntEQ, m, LLVMConstInt(t, 0, 0), ""), zero_ok);
+    return band(a, finite, bor(a, normal, zero));
+}
+static LLVMValueRef fp_is_zero(ArmIR* a, LLVMValueRef v, unsigned width) {
+    LLVMTypeRef t = width == 32 ? a->i32 : a->i64;
+    LLVMValueRef magnitude = band(a, v, LLVMConstInt(t, width == 32 ? 0x7fffffffu : 0x7fffffffffffffffull, 0));
+    return LLVMBuildICmp(a->b, LLVMIntEQ, magnitude, LLVMConstInt(t, 0, 0), "");
+}
+static LLVMValueRef fp_call(ArmIR* a, SnxArmVectorOp op, unsigned width, unsigned param, LLVMValueRef x, LLVMValueRef y,
+                            LLVMValueRef z) {
+    int compare = op == AV_FCMP || op == AV_FCMPE;
+    int arithmetic = op == AV_FADD || op == AV_FSUB || op == AV_FMUL || op == AV_FDIV || op == AV_FMLA ||
+                     op == AV_FMLS || op == AV_FNMLA || op == AV_FNMLS || op == AV_FNMUL;
+    if ((width != 32 && width != 64) || (!compare && !arithmetic)) return fp_helper(a, op, width, param, x, y, z);
+    LLVMTypeRef it = width == 32 ? a->i32 : a->i64;
+    LLVMTypeRef ft = width == 32 ? LLVMFloatTypeInContext(a->ctx) : LLVMDoubleTypeInContext(a->ctx);
+    LLVMValueRef yes = LLVMConstInt(a->i1, 1, 0);
+    LLVMValueRef xi = vcast(a, x, width, 0), yi = vcast(a, y, width, 0), zi = vcast(a, z, width, 0);
+    /* the rounding mode and the trap enables (Advanced SIMD's standard FPSCR has neither), and the inexact flag */
+    LLVMValueRef fpscr = GET(a, fpscr);
+    uint32_t mask = (param & (1u << 30) ? 0 : 0x00c09f00u) | (compare ? 0 : 0x10u);
+    LLVMValueRef ok = cmp(a, LLVMIntEQ, band(a, fpscr, c32(a, mask)), c32(a, compare ? 0 : 0x10u));
+    ok = band(a, ok, band(a, fp_plain(a, xi, width, yes), fp_plain(a, yi, width, yes)));
+    LLVMValueRef fx = LLVMBuildBitCast(a->b, xi, ft, ""), fy = LLVMBuildBitCast(a->b, yi, ft, ""), result;
+    if (compare) { /* NZCV: less 8, equal 6, greater 2 */
+        LLVMValueRef less = LLVMBuildFCmp(a->b, LLVMRealOLT, fx, fy, "");
+        LLVMValueRef equal = LLVMBuildFCmp(a->b, LLVMRealOEQ, fx, fy, "");
+        result = LLVMBuildSelect(a->b, less, c64(a, 8), LLVMBuildSelect(a->b, equal, c64(a, 6), c64(a, 2), ""), "");
+    } else {
+        LLVMValueRef xz = fp_is_zero(a, xi, width), yz = fp_is_zero(a, yi, width), r;
+        switch (op) {
+            case AV_FADD: r = LLVMBuildFAdd(a->b, fx, fy, ""); break;
+            case AV_FSUB: r = LLVMBuildFSub(a->b, fx, fy, ""); break;
+            case AV_FDIV: ok = band(a, ok, LLVMBuildNot(a->b, yz, "")); /* fall through */
+            default: r = op == AV_FDIV ? LLVMBuildFDiv(a->b, fx, fy, "") : LLVMBuildFMul(a->b, fx, fy, ""); break;
+        }
+        LLVMValueRef ri = LLVMBuildBitCast(a->b, r, it, "");
+        LLVMValueRef zero_ok = op == AV_FADD || op == AV_FSUB ? yes : op == AV_FDIV ? xz : bor(a, xz, yz);
+        ok = band(a, ok, fp_plain(a, ri, width, zero_ok));
+        if (op != AV_FADD && op != AV_FSUB && op != AV_FMUL && op != AV_FDIV) {
+            /* the multiply-accumulates: the product (r), negated for FMLS, FNMLA and FNMUL, then added */
+            if (op == AV_FMLS || op == AV_FNMLA || op == AV_FNMUL) r = LLVMBuildFNeg(a->b, r, "");
+            if (op != AV_FNMUL) {
+                LLVMValueRef fz = LLVMBuildBitCast(a->b, zi, ft, "");
+                ok = band(a, ok, fp_plain(a, zi, width, yes));
+                if (op == AV_FNMLA || op == AV_FNMLS) fz = LLVMBuildFNeg(a->b, fz, "");
+                r = LLVMBuildFAdd(a->b, fz, r, "");
+                ok = band(a, ok, fp_plain(a, LLVMBuildBitCast(a->b, r, it, ""), width, yes));
+            }
+            ri = LLVMBuildBitCast(a->b, r, it, "");
+        }
+        result = vcast(a, ri, 64, 0);
+    }
+    LLVMBasicBlockRef from = LLVMGetInsertBlock(a->b), slow = block(a, "fp_helper"), done = block(a, "fp_done");
+    LLVMBuildCondBr(a->b, ok, done, slow);
+    LLVMPositionBuilderAtEnd(a->b, slow);
+    LLVMValueRef helped = fp_helper(a, op, width, param, x, y, z);
+    LLVMBasicBlockRef helped_from = LLVMGetInsertBlock(a->b);
+    LLVMBuildBr(a->b, done);
+    LLVMPositionBuilderAtEnd(a->b, done);
+    LLVMValueRef joined = LLVMBuildPhi(a->b, a->i64, "");
+    LLVMValueRef values[2] = {result, helped};
+    LLVMBasicBlockRef blocks[2] = {from, helped_from};
+    LLVMAddIncoming(joined, values, blocks, 2);
+    return joined;
 }
 static void vector_memory(ArmIR* a, const SnxArmVector* v) {
     LLVMValueRef base = reg(a, v->n), addr, end, offset = c32(a, (uint32_t)v->imm);

@@ -4,6 +4,7 @@
 #define _DEFAULT_SOURCE /* MAP_ANONYMOUS, MAP_NORESERVE */
 #endif
 #include "vita/runtime/process.h"
+#include "vita/runtime/watch.h"
 #include "vita/hle/hle.h"
 #include "vita/loader/vpk.h"
 #include "common/utilities/common.h"
@@ -52,10 +53,12 @@ bool vita_string(VitaProcess* p, uint32_t address, char* out, size_t size) {
 
 /* ---- memory: pages made accessible (zero) and taken back ---- */
 static bool commit(VitaProcess* p, uint32_t address, uint32_t size) {
+    vita_watch_release(address, size);
     return !snx_vm_protect(p->mem + address, size, SNX_VM_READ_WRITE);
 }
 /* inaccessible again, and zero when committed next */
 static void decommit(VitaProcess* p, uint32_t address, uint32_t size) {
+    vita_watch_release(address, size);
 #ifdef _WIN32
     (void)snx_vm_protect(p->mem + address, size, SNX_VM_NONE);
 #else
@@ -315,9 +318,11 @@ void vita_process_free(VitaProcess* p) {
     vita_mp4_free(p);
     vita_videodec_free(p);
     vita_audiodec_free(p);
+    vita_ngs_free(p);
     vita_net_free(p);
     vita_trophy_free(p);
     vita_gxm_free(p);
+    vita_watch_free();
     if (p->mem) snx_vm_release(p->mem, VITA_SPACE + 0x10000);
     free(p->unknown_logged);
     free(p->hle);

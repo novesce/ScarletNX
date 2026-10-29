@@ -209,6 +209,14 @@ flush-to-zero, default-NaN, and alternate-half-precision modes. Rounding modes R
 per lane. Reciprocal step instructions round the product before subtracting, as ARMv8-A specifies, which is
 not the same as a fused step.
 
+The host's floating point gives the same bits where IEEE 754 makes it: with round to nearest, no trap enabled, the
+sticky inexact flag already set, and operands and results that are finite and normal (or zero, where no underflow
+hides in it), an add, subtract, multiply, divide, non-fused multiply-accumulate, compare, integer conversion or
+single/double conversion can raise no other flag, and flush-to-zero and default-NaN don't apply. The emitter computes
+those natively inline and calls `snx_arm_fp` only when a condition fails (`fp_call` in `llvm_vector.inc`), and the
+helper takes the same path first (`host_fp` in `fp_helpers.c`). `tests/arm_fp_host.c` holds the helper's two paths
+to the same bits and FPSCR; one game spent most of its CPU time in the software path before.
+
 Thumb16 and Thumb32 are supported (see `thumb_decode.c`, `llvm_thumb.inc`): integer data processing, loads/stores (immediate, literal, register, pre/post-indexed, unprivileged), push/pop, LDM/STM, branches (B/Bcc/BL/BLX/BX, CBZ/CBNZ, TBB/TBH), bitfield (SBFX/UBFX/BFI/BFC), extends, MOVW/MOVT/ADDW/SUBW, MUL/MLA/MLS, wide data-processing with shifted and modified-immediate operands, and IT blocks (conditions applied per instruction against current flags, as ARMv8-A specifies). Thumb32 coprocessor (VFP/NEON) shares the A32 vector emitter.
 
 ## Limits and memory model

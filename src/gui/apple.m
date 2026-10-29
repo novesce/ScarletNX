@@ -4,6 +4,7 @@
    SDL's give dist/apple/Frontend.swift to present its pickers and share sheet over */
 #include "gui/apple.h"
 #include "gui/i18n.h"
+#include "gui/log.h"
 #include <SDL3/SDL.h>
 #include <TargetConditionals.h>
 #include <stdbool.h>
@@ -20,7 +21,6 @@
 
 /* dist/apple/Frontend.swift. window is the SDL window's UIWindow or NSWindow; done gets the path picked, NULL for none */
 extern bool snx_apple_pick(void* window, bool folder, void (*done)(void* data, const char* path), void* data);
-extern bool snx_apple_share(void* window, const char* path);
 
 #if TARGET_OS_IPHONE
 extern size_t os_proc_available_memory(void); /* <os/proc.h>, which not every SDK header set declares the same way */
@@ -93,9 +93,11 @@ void gui_apple_log_start(void) {
                                                                 inDomains:NSUserDomainMask].firstObject;
         NSURL* logs = [documents URLByAppendingPathComponent:@"logs" isDirectory:YES];
         const char* path = NULL;
+        char today[64];
+        gui_log_console_name(today, sizeof today); /* the day it starts on: gui_log's lines go there too */
         if (logs) {
             [NSFileManager.defaultManager createDirectoryAtURL:logs withIntermediateDirectories:YES attributes:nil error:NULL];
-            path = [logs URLByAppendingPathComponent:@"scarletnx-console.log"].path.fileSystemRepresentation;
+            path = [logs URLByAppendingPathComponent:@(today)].path.fileSystemRepresentation;
         }
         time_t now = time(NULL);
         if (!path || !freopen(path, "a", stderr)) return;
@@ -190,13 +192,6 @@ int gui_apple_pick(SDL_Window* window, int folder, SDL_DialogFileCallback done, 
     pick_done = NULL;
     snprintf(message, size, "%s",
              native ? snx_tr("The document picker did not open.") : snx_tr("No window to show the picker over."));
-    return 0;
-}
-
-int gui_apple_share(SDL_Window* window, const char* path, char* message, size_t size) {
-    void* native = native_window(window);
-    if (native && snx_apple_share(native, path)) return 1;
-    snprintf(message, size, snx_tr("The log could not be shown: it is at %s"), path);
     return 0;
 }
 

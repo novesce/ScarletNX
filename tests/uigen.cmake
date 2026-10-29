@@ -122,7 +122,7 @@ foreach(line
         "#include \"gui/icons.h\"\n"
         "    {UI_BUTTON, UI_COLOR_NONE, UI_ICONS_ROWS, 0, GUI_ICON_GAMEPAD_2},\n"
         "    {UI_BUTTON, UI_COLOR_NONE, -1, 5, GUI_ICON_LOG_OUT},\n"
-        "ui_draw_row(app, ui_row(r[UI_ICONS_ROWS], i, 17, 2, 0, 0, s), ui_tr(ui_icons_texts + ui_icons_items[item].text), ui_icons_items[item].icon, NULL,\n"
+        "ui_draw_row(app, ui_beside_bar(ui_row(r[UI_ICONS_ROWS], i, 17, 2, 0, 0, s), bw), ui_tr(ui_icons_texts + ui_icons_items[item].text), ui_icons_items[item].icon, NULL,\n"
         "    ui_draw_row(app, r[UI_ICONS_EXIT], ui_tr(ui_icons_texts + 5), ui_icons_items[UI_ICONS_EXIT].icon, NULL, ui_icons_items[UI_ICONS_EXIT].color, 0, false);\n"
         # the list's rows; its row bounds in px, times the scale
         "static const int16_t ui_main_load_list_rows[] = {\n    UI_MAIN_LOAD_LIST_LOAD_SWITCH_NSP_XCI_NRO,\n"
@@ -138,15 +138,22 @@ foreach(line
         "        case 'd':\n"
         # the stubs: a decorative button does nothing, a stubbed list has no rows
         "void ui_main_load_list_decor_action_cb(App* app, uint32_t hit) {\n    (void)app;\n    (void)hit;\n}\nunsigned ui_main_load_list_decor_attr_cb(App* app) {\n    (void)app;\n    return 0;\n}\n"
-        # a static list's rows get their attributes by item, and the arrows of the rows hidden above and below
+        # a static list's rows get their attributes by item, and the arrows of the rows hidden above and below while it
+        # has no scroll bar, which main.c draws beside the rows shown while its rows are more, the rows beside it
         "static unsigned ui_main_attr(App* app, int item) {\n    (void)app;\n    switch (item) {\n"
         "        case UI_MAIN_LOAD_LIST_DROP: return ui_main_load_list_drop_attr_cb(app);\n"
-        "        unsigned attr = ui_main_attr(app, item);\n        if (i == 0 && row > 0) attr |= UI_ATTR_MORE_UP;\n        if (i + 1 == n && row + 1 < sizeof ui_main_load_list_rows / sizeof *ui_main_load_list_rows) attr |= UI_ATTR_MORE_DOWN;\n"
+        "    bw = ui_bar(app, ui_rows_span(ui_row(r[UI_MAIN_LOAD_LIST], 0, 17, 2, 200 * s, 400 * s, s), ui_row(r[UI_MAIN_LOAD_LIST], n ? n - 1 : 0, 17, 2, 200 * s, 400 * s, s)), &lists[UI_MAIN_LOAD_LIST], sizeof ui_main_load_list_rows / sizeof *ui_main_load_list_rows, n);\n"
+        "        unsigned attr = ui_main_attr(app, item);\n        if (i == 0 && row > 0 && !bw) attr |= UI_ATTR_MORE_UP; /* else the bar says it */\n        if (i + 1 == n && row + 1 < sizeof ui_main_load_list_rows / sizeof *ui_main_load_list_rows && !bw) attr |= UI_ATTR_MORE_DOWN;\n"
         # a list without items asks for the row after the last one shown first: the row's own label may be a buffer the
         # next call writes; each asked with the row's width, for a label cut to fit, and drawn in that box
-        "        GuiRect box = ui_row(r[UI_MAIN_GAMES], i, 17, 2, 0, 0, s);\n        UiRowInfo next;\n        bool more = i + 1 == n && ui_main_games_get_row_info(app, row + 1, box.w, &next);\n        info.label = NULL;\n        info.icon = 0;\n        info.image = NULL;\n        info.attr = 0;\n        if (!ui_main_games_get_row_info(app, row, box.w, &info)) break;\n        if (i == 0 && row > 0) info.attr |= UI_ATTR_MORE_UP;\n        if (more) info.attr |= UI_ATTR_MORE_DOWN;\n        ui_draw_row(app, box, info.label ? info.label : \"(null)\", info.icon, info.image, "
+        # its scroll bar from the code's count of its rows; scrolled between two rows (shift), one more row shows under
+        # them, the drawing kept in the list's area
+        "    n = ui_main_shown(r, scale, UI_MAIN_GAMES);\n    bw = ui_bar(app, ui_rows_span(ui_row(r[UI_MAIN_GAMES], 0, 17, 2, 0, 0, s), ui_row(r[UI_MAIN_GAMES], n ? n - 1 : 0, 17, 2, 0, 0, s)), &lists[UI_MAIN_GAMES], lists[UI_MAIN_GAMES].count, n);\n"
+        "    n += lists[UI_MAIN_GAMES].shift > 0;\n    if (lists[UI_MAIN_GAMES].shift) ui_clip(app, &r[UI_MAIN_GAMES]);\n"
+        "        GuiRect box = ui_beside_bar(ui_row(r[UI_MAIN_GAMES], i, 17, 2, 0, 0, s), bw);\n        UiRowInfo next;\n        box.y -= lists[UI_MAIN_GAMES].shift;\n        bool more = i + 1 == n && ui_main_games_get_row_info(app, row + 1, box.w, &next);\n        info.label = NULL;\n        info.icon = 0;\n        info.image = NULL;\n        info.attr = 0;\n        if (!ui_main_games_get_row_info(app, row, box.w, &info)) break;\n        if (i == 0 && row > 0 && !bw) info.attr |= UI_ATTR_MORE_UP; /* else the bar says it */\n        if (more && !bw) info.attr |= UI_ATTR_MORE_DOWN;\n        ui_draw_row(app, box, info.label ? info.label : \"(null)\", info.icon, info.image, "
         # the hit test: a row of a list without items is there while get_row_info says so, hit where it is drawn
-        "        GuiRect box = ui_row(r[UI_MAIN_GAMES], i, 17, 2, 0, 0, s);\n        *row = lists[UI_MAIN_GAMES].first + i;\n        if (!ui_main_games_get_row_info(app, *row, box.w, &info)) break;\n        if (ui_in(box, x, y)) {\n            *item = UI_MAIN_GAMES;\n"
+        "    n = ui_main_shown(r, scale, UI_MAIN_GAMES);\n    bw = ui_bar_width(app, lists[UI_MAIN_GAMES].count, n);\n    n += lists[UI_MAIN_GAMES].shift > 0;\n    for (i = 0; i < n && ui_in(r[UI_MAIN_GAMES], x, y); i++) {\n"
+        "        GuiRect box = ui_beside_bar(ui_row(r[UI_MAIN_GAMES], i, 17, 2, 0, 0, s), bw);\n        box.y -= lists[UI_MAIN_GAMES].shift;\n        *row = lists[UI_MAIN_GAMES].first + i;\n        if (!ui_main_games_get_row_info(app, *row, box.w, &info)) break;\n        if (ui_in(box, x, y)) {\n            *item = UI_MAIN_GAMES;\n"
         # ui.txt's texts as shown, through main.c's ui_tr
         "ui_tr(ui_main_texts + ui_main_items[item].text)"
         "        unsigned attr = ui_other_more_attr_cb(app, row);\n"

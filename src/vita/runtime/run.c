@@ -10,6 +10,7 @@
 #include "vita/runtime/process.h"
 #include "vita/runtime/jit.h"
 #include "vita/runtime/lockstep.h"
+#include "vita/runtime/watch.h"
 #include "vita/hle/hle.h"
 #include "common/utilities/common.h"
 #include "snx_settings.h"
@@ -21,6 +22,7 @@
 #ifdef _WIN32
 #include <synchapi.h>
 #else
+#include <pthread.h>
 #include <signal.h>
 #include <time.h>
 #endif
@@ -53,10 +55,13 @@ static sigjmp_buf fault_jump;
 static volatile sig_atomic_t fault_armed;
 static unsigned char* fault_base;
 static volatile uintptr_t fault_address;
+static pthread_t fault_thread; /* the guest's: another thread's fault is never the guest's data abort */
 static void on_fault(int signal, siginfo_t* info, void* context) {
     (void)context;
     uintptr_t at = (uintptr_t)info->si_addr;
-    if (fault_armed && fault_base && at >= (uintptr_t)fault_base && at < (uintptr_t)fault_base + VITA_SPACE + 0x10000) {
+    if (vita_watch_fault(at)) return; /* a watched page's first write (watch.h): it goes on */
+    if (fault_armed && fault_base && pthread_equal(pthread_self(), fault_thread) && at >= (uintptr_t)fault_base &&
+        at < (uintptr_t)fault_base + VITA_SPACE + 0x10000) {
         fault_address = at - (uintptr_t)fault_base;
         fault_armed = 0;
         siglongjmp(fault_jump, 1);
@@ -78,6 +83,7 @@ static void faults_install(unsigned char* base) {
     sigaction(SIGSEGV, &sa, NULL);
     sigaction(SIGBUS, &sa, NULL);
     fault_base = base;
+    fault_thread = pthread_self();
 }
 #endif
 
@@ -226,6 +232,7 @@ int vita_run(VitaProcess* p, double seconds) {
     VitaThread* last = NULL; /* the thread that ran the last slice */
 #ifndef _WIN32
     faults_install(p->mem);
+    if (!vita_watch_init(p)) printf("vita: guest memory's writes aren't watched: the GPU copies its memory each time\n");
     if (sigsetjmp(fault_jump, 1)) {
         report_fault(p, running, "data abort at", (uint32_t)fault_address);
         result = 1;

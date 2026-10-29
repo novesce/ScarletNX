@@ -68,6 +68,13 @@ if(SNX_TEST_SANITIZERS)
 endif()
 # one Python for the scripted tests: without it they are left out
 find_package(Python3 QUIET COMPONENTS Interpreter)
+# CLAUDE.md and .claude/ in ASD-STE100 (.claude/skills/ste100), and the checker's own test
+if(Python3_Interpreter_FOUND)
+    add_test(NAME claude_ste100 COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/.claude/skills/ste100/check.py" --all)
+    if(UNIX)
+        add_test(NAME claude_ste100_checker COMMAND sh "${PROJECT_SOURCE_DIR}/.claude/skills/ste100/test/test-check.sh")
+    endif()
+endif()
 # x86-64, by any of the names hosts give it
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
     set(snx_test_x86 ON)
@@ -435,6 +442,10 @@ add_executable(snx-test-arm-decode arm_decode.c "${PROJECT_SOURCE_DIR}/src/commo
     "${PROJECT_SOURCE_DIR}/src/common/cpu/arm/vector_decode.c")
 snx_test_target(snx-test-arm-decode 11)
 add_test(NAME arm_decode COMMAND snx-test-arm-decode)
+add_executable(snx-test-arm-fp-host arm_fp_host.c)
+snx_test_target(snx-test-arm-fp-host 11)
+target_link_libraries(snx-test-arm-fp-host PRIVATE snx_arm_rt)
+add_test(NAME arm_fp_host COMMAND snx-test-arm-fp-host)
 add_executable(snx-test-arm-exec arm_exec_test.c)
 snx_test_target(snx-test-arm-exec 11)
 target_link_libraries(snx-test-arm-exec PRIVATE snx_llvm)
@@ -1839,6 +1850,7 @@ add_test(NAME unattended_script COMMAND snx-test-unattended-script)
 # the log's file, early lines, stamps, redirect, limits, fatal and crash mode (platform/plat.c)
 add_executable(snx-test-platform-log platform_log.c "${PROJECT_SOURCE_DIR}/src/common/filesystem/host.c")
 snx_test_target(snx-test-platform-log 11)
+target_link_libraries(snx-test-platform-log PRIVATE scarletnx-common) # the runs' logs: snx_list_dir, snx_file_time
 add_test(NAME platform_log COMMAND snx-test-platform-log "${CMAKE_CURRENT_BINARY_DIR}")
 if(NOT WIN32 AND TARGET SDL3::SDL3) # SDL3 is there with a driver that draws (cmake/dependencies.cmake)
     # written-page tracking, decommit, pread, file maps, replace, folders, waits and threads (platform/plat_posix.c and

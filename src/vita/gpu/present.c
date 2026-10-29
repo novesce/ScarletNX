@@ -4,6 +4,7 @@
 #include "vita/gpu/render.h"
 #include "vita/gpu/vk.h"
 #include "vita/platform/input.h"
+#include "snx_settings.h"
 #include <SDL3/SDL.h>
 #include <signal.h>
 #include <stdio.h>
@@ -27,8 +28,16 @@ void vita_present_init(const char* title, const char* shot) {
     signal(SIGTERM, on_signal);
     vita_input_init();
 }
+/* the framebuffer shown last as PATH<suffix>.ppm, once the GPU drew it */
+static void shot_write(VitaProcess* p, const char* suffix);
 bool vita_present_vblank(VitaProcess* p) {
     if (p->display.base) vita_render_show(p, p->display.base, p->display.pitch, p->display.width, p->display.height);
+    unsigned every = (unsigned)g_settings.vita_screenshot_interval;
+    if (g_present.shot && every && p->display.base && p->display.vblanks % every == 0) {
+        char suffix[16];
+        snprintf(suffix, sizeof suffix, "_%04u", (unsigned)(p->display.vblanks / every - 1));
+        shot_write(p, suffix);
+    }
     SDL_Event event;
     while (SDL_WasInit(SDL_INIT_EVENTS) && SDL_PollEvent(&event)) {
         if (event.type == SDL_EVENT_QUIT || event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) return false;
@@ -37,12 +46,11 @@ bool vita_present_vblank(VitaProcess* p) {
     return !g_interrupted;
 }
 /* SceDisplay's formats: A8B8G8R8 (0, the bytes R, G, B, A) and the others the runtime doesn't show yet */
-void vita_present_shot(VitaProcess* p) {
-    if (!g_present.shot || !p->display.base) return;
+static void shot_write(VitaProcess* p, const char* suffix) {
     vita_render_idle(p, true);
-    char* path = malloc(strlen(g_present.shot) + 5);
+    char* path = malloc(strlen(g_present.shot) + strlen(suffix) + 5);
     if (!path) return;
-    sprintf(path, "%s.ppm", g_present.shot);
+    sprintf(path, "%s%s.ppm", g_present.shot, suffix);
     FILE* f = fopen(path, "wb");
     if (f) {
         fprintf(f, "P6\n%u %u\n255\n", (unsigned)p->display.width, (unsigned)p->display.height);
@@ -55,6 +63,9 @@ void vita_present_shot(VitaProcess* p) {
         printf("Screenshot: %s\n", path);
     }
     free(path);
+}
+void vita_present_shot(VitaProcess* p) {
+    if (g_present.shot && p->display.base) shot_write(p, "");
 }
 void vita_present_free(void) {
     vita_input_free();

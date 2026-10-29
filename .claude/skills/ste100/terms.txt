@@ -1,0 +1,26 @@
+# Technical names that end in -ing. STE lets a technical name keep its form. Add a name only when it is the
+# name of a thing (a Vulkan binding, a setting), not to keep an -ing verb form. One a line, in lower case.
+binding
+bindings
+encoding
+encodings
+heading
+headings
+mapping
+mappings
+padding
+rounding
+setting
+settings
+staging
+tiling
+warning
+warnings
+finding
+findings
+aliasing
+lighting
+rendering
+tracking
+false sharing
+floating point

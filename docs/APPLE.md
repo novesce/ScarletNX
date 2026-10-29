@@ -15,16 +15,16 @@ same shape as Android's `MainActivity` and `src/gui/android.c`:
 - `src/gui/apple.m` (Objective-C) is the menu's side: the data folder, the game the menu plays, and the SDL window's
   `UIWindow` or `NSWindow` for the Swift to present over.
 - `dist/apple/Frontend.swift` (Swift) is the system's side, called from `apple.m` through `@_cdecl` functions: on iOS,
-  the document picker SDL lacks there and the share sheet; on macOS, the Finder showing the saved log.
+  the document picker SDL lacks there.
 
 ### macOS
 
 `ScarletNX.app` is the desktop program in a bundle: `scarletnx` in `Contents/MacOS`, the themes and the
 licenses in `Contents/share`, where an installed copy looks for them. It works as on Linux. The menu extracts and
 recompiles through the driver as a child process, with SDL's own file and folder dialogs. Its data folder is
-`~/Library/Application Support/scarletnx`. *Share Log* saves the log and selects it in a Finder window. The app is
-signed ad hoc, as Apple silicon runs no unsigned code. A copy from a download may need *Open* from the Finder's menu
-the first time.
+`~/Library/Application Support/scarletnx`. *Share Log* saves the logs' zip in the Logs folder's `share/` and opens it in
+the Finder. The app is signed ad hoc, as Apple silicon runs no unsigned code. A copy from a download may need *Open*
+from the Finder's menu the first time.
 
 The Vulkan driver is MoltenVK, Ryujinx's build of it ([V380-Ori/Ryujinx.MoltenVK](https://github.com/V380-Ori/Ryujinx.MoltenVK)),
 which carries the patches an emulator's pipelines need and mainline MoltenVK lacks. Both apps carry it in their
@@ -50,8 +50,10 @@ menu's driver:
   copied into it first. The thread has a 64 MiB stack, which LLVM's passes need.
 - **A game** runs in the app's process once the menu closes (`src/nx/runtime/entry.c`): the runtime starts once per
   process, so the app ends with the game.
-- **Share Log** opens the share sheet with `scarletnx.log`.
-- **Logs.** Everything the app prints goes to `logs/scarletnx-console.log` in its Documents, after a banner with the
+- **Share Log** asks how, then saves `scarletnx-logs-<date>.zip` or `scarletnx.log` in `logs/share/` of its Documents
+  and opens that folder in the Files app, or opens `logs/`.
+- **Logs.** Everything the app prints goes to the day it starts on's `logs/scarletnx-console-<date>.log` in its
+  Documents (the 14 newest days kept), after a banner with the
   device, the system and the limits the app has, with the menu's own lines ([GUI](GUI.md)), and a fatal error, the
   menu's or a game's, is also written to `logs/scarletnx-error.log`. A phone shows no console, so these are what to read
   when a run fails; Share Log sends both.

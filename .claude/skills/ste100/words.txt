@@ -1,0 +1,25 @@
+# A word or phrase that ASD-STE100 does not approve, a tab, and what to write instead. check.py flags each one.
+utilize	use "use"
+utilise	use "use"
+e.g.	write "for example"
+i.e.	write "that is", or two sentences
+etc.	name all the items
+via	use "through" or "with"
+in order to	use "to"
+prior to	use "before"
+ensure	use "make sure"
+leverage	use "use"
+facilitate	use "help"
+commence	use "start"
+terminate	use "stop"
+whilst	use "while"
+amongst	use "among"
+basically	remove it
+have to	use "must"
+has to	use "must"
+figure out	use "find"
+carry out	use "do"
+look into	use "examine"
+a lot of	use "many" or "much"
+lots of	use "many" or "much"
+whether or not	use "if"

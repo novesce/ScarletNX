@@ -49,9 +49,9 @@ target_link_libraries(snx_gui_ui PRIVATE SDL3::SDL3) # its platform macros and k
 set_target_properties(snx_gui_ui PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
 target_compile_options(snx_gui_ui PRIVATE -Wall -Wextra -Werror=missing-prototypes)
 add_library(snx_gui_support STATIC aot.c model.c browser.c steps.c theme.c recent.c editor.c settings.c place.c clean.c
-            queue.c latin.c wide.c log.c ${gui_process}
+            queue.c latin.c wide.c log.c logzip.c ${gui_process}
             "${PROJECT_BINARY_DIR}/generated/gui_themes.c" "${PROJECT_BINARY_DIR}/generated/gui_glyphs.c")
-target_link_libraries(snx_gui_support PUBLIC scarletnx-common snx_setup snx_i18n snx_settings)
+target_link_libraries(snx_gui_support PUBLIC scarletnx-common snx_setup snx_i18n snx_settings snx_miniz)
 target_include_directories(snx_gui_support PRIVATE "${PROJECT_BINARY_DIR}/generated")
 set_target_properties(snx_gui_support PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
 target_compile_options(snx_gui_support PRIVATE -Wall -Wextra -Werror=missing-prototypes)
@@ -90,7 +90,7 @@ else()
 endif()
 if(APPLE)
     # the iOS and macOS frontend (docs/APPLE.md), as Android's is MainActivity and android.c: apple.m is the menu's
-    # side, dist/apple/Frontend.swift the system's (iOS's document picker and share sheet, the Finder on macOS)
+    # side, dist/apple/Frontend.swift the system's (iOS's document picker)
     add_library(snx_apple_frontend STATIC "${PROJECT_SOURCE_DIR}/dist/apple/Frontend.swift")
     # Swift 5's checks: the functions apple.m calls run on the main thread, which Swift 6 would want them to prove
     set_target_properties(snx_apple_frontend PROPERTIES Swift_LANGUAGE_VERSION 5)
@@ -211,6 +211,9 @@ if(BUILD_TESTING)
     add_executable(snx-test-gui-log "${PROJECT_SOURCE_DIR}/tests/gui_log.c")
     target_link_libraries(snx-test-gui-log PRIVATE snx_gui_support scarletnx-common)
     add_test(NAME gui_log COMMAND snx-test-gui-log)
+    add_executable(snx-test-gui-logzip "${PROJECT_SOURCE_DIR}/tests/gui_logzip.c")
+    target_link_libraries(snx-test-gui-logzip PRIVATE snx_gui_support scarletnx-common)
+    add_test(NAME gui_logzip COMMAND snx-test-gui-logzip)
     # cmake/gui_icons.cmake compiles icons.hex, and refuses a glyph missing, blank or out of its place by its icon
     add_test(NAME gui_icons COMMAND "${CMAKE_COMMAND}" "-DSOURCE=${PROJECT_SOURCE_DIR}"
              "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/gui-icons-test" -P "${PROJECT_SOURCE_DIR}/tests/gui_icons.cmake")

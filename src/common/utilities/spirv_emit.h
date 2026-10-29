@@ -95,6 +95,7 @@ enum {
     SPV_OP_CONSTANT_FALSE = 42,
     SPV_OP_CONSTANT = 43,
     SPV_OP_CONSTANT_COMPOSITE = 44,
+    SPV_OP_CONSTANT_NULL = 46,
     SPV_OP_FUNCTION = 54,
     SPV_OP_FUNCTION_PARAMETER = 55,
     SPV_OP_FUNCTION_END = 56,
@@ -245,6 +246,7 @@ enum {
     SPV_DECORATION_FLAT = 14,
     SPV_DECORATION_PATCH = 15,
     SPV_DECORATION_INVARIANT = 18,
+    SPV_DECORATION_NON_WRITABLE = 24,
     SPV_DECORATION_LOCATION = 30,
     SPV_DECORATION_COMPONENT = 31,
     SPV_DECORATION_BINDING = 33,
@@ -621,6 +623,9 @@ void spv_emit_member_decorate(SpvEmitter* e, uint32_t type, uint32_t member, uin
 /* a module-scope variable of type (the pointer is made here); an Input or Output one is kept in interface, the
    entry point's */
 uint32_t spv_emit_variable(SpvEmitter* e, uint32_t storage, uint32_t type);
+/* a Private (or Output) one that starts as zeros: a variable without an initializer holds undefined values until
+   written, which drivers give differently */
+uint32_t spv_emit_variable_zeroed(SpvEmitter* e, uint32_t storage, uint32_t type);
 /* a decorated resource: a Uniform block or a UniformConstant image or sampler at set and binding */
 uint32_t spv_emit_resource(SpvEmitter* e, uint32_t storage, uint32_t type, uint32_t set, uint32_t binding);
 /* an Input or Output at a location, or a built-in */

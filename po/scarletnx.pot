@@ -35,11 +35,6 @@ msgstr ""
 msgid "No window to show the picker over."
 msgstr ""
 
-#: src/gui/apple.m
-#, c-format
-msgid "The log could not be shown: it is at %s"
-msgstr ""
-
 #: src/gui/browser.c
 #, c-format
 msgid "DLC %u"
@@ -303,13 +298,13 @@ msgstr ""
 #. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
 #: src/gui/main.c
 #, snx-keys
-msgid "Tap: open. Swipe: page. Refresh. Back."
+msgid "Tap: open. Drag: scroll. Refresh. Back."
 msgstr ""
 
 #. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
 #: src/gui/main.c
 #, snx-keys
-msgid "Tap: open. Swipe: page. Refresh."
+msgid "Tap: open. Drag: scroll. Refresh."
 msgstr ""
 
 #. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
@@ -328,6 +323,12 @@ msgstr ""
 #: src/gui/main.c
 #, snx-keys
 msgid "AOT pack."
+msgstr ""
+
+#. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
+#: src/gui/main.c
+#, snx-keys
+msgid "Save states."
 msgstr ""
 
 #. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
@@ -417,7 +418,13 @@ msgstr ""
 #. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
 #: src/gui/main.c
 #, snx-keys
-msgid "Tap: delete."
+msgid "Tap: open or change."
+msgstr ""
+
+#. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
+#: src/gui/main.c
+#, snx-keys
+msgid "Tap: open or remove."
 msgstr ""
 
 #. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
@@ -503,13 +510,13 @@ msgstr ""
 #. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
 #: src/gui/main.c
 #, snx-keys
-msgid "Up/Down: select. Enter/Space: open. Left/Right/PgUp/PgDown: page. F5: refresh."
+msgid "Up/Down: select. Enter/Space: open. Left/Right/PgUp/PgDown: scroll. F5: refresh."
 msgstr ""
 
 #. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
 #: src/gui/main.c
 #, snx-keys
-msgid "Arrows: select. Enter/Space: open. PgUp/PgDown: page. F5: refresh."
+msgid "Arrows: select. Enter/Space: open. PgUp/PgDown: scroll. F5: refresh."
 msgstr ""
 
 #. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
@@ -611,13 +618,25 @@ msgstr ""
 #. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
 #: src/gui/main.c
 #, snx-keys
-msgid "Enter: change."
+msgid "Enter: open or change."
 msgstr ""
 
 #. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
 #: src/gui/main.c
 #, snx-keys
 msgid "Del: delete."
+msgstr ""
+
+#. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
+#: src/gui/main.c
+#, snx-keys
+msgid "Enter: open or remove."
+msgstr ""
+
+#. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
+#: src/gui/main.c
+#, snx-keys
+msgid "Enter: open."
 msgstr ""
 
 #. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
@@ -697,7 +716,7 @@ msgstr ""
 #. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
 #: src/gui/main.c
 #, snx-keys
-msgid "D-pad: select. A: open. LT/RT: page. Start: refresh. B: back."
+msgid "D-pad: select. A: open. LT/RT: scroll. Start: refresh. B: back."
 msgstr ""
 
 #. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
@@ -775,7 +794,19 @@ msgstr ""
 #. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
 #: src/gui/main.c
 #, snx-keys
-msgid "A: change."
+msgid "A: open or change."
+msgstr ""
+
+#. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
+#: src/gui/main.c
+#, snx-keys
+msgid "A: open or remove."
+msgstr ""
+
+#. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
+#: src/gui/main.c
+#, snx-keys
+msgid "A: open."
 msgstr ""
 
 #. Keys: "Key: what it does." sentences. Keep each key, or its translation in this file, and each ~
@@ -1262,7 +1293,7 @@ msgstr ""
 
 #: src/gui/main.c
 #, c-format
-msgid "%s could not be drawn: the game shows no icon"
+msgid "%s could not be drawn: the game shows Wimsy in grey"
 msgstr ""
 
 #: src/gui/main.c
@@ -1387,6 +1418,10 @@ msgstr ""
 
 #: src/gui/main.c
 msgid "Clean Cache"
+msgstr ""
+
+#: src/gui/main.c
+msgid "Save States"
 msgstr ""
 
 #: src/gui/main.c
@@ -1541,6 +1576,11 @@ msgstr ""
 
 #: src/gui/main.c
 #, c-format
+msgid "%s is a dump: its recompiled game keeps the save states"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
 msgid "\"%s\" always runs: a | in its name, which cheats_off= puts between two"
 msgstr ""
 
@@ -1673,7 +1713,7 @@ msgid "Install"
 msgstr ""
 
 #. A key of the foot's sentences, which a click finds by this word
-#: src/gui/main.c
+#: src/gui/main.c src/gui/ui.txt
 #, snx-key
 msgid "Folders"
 msgstr ""
@@ -1876,11 +1916,6 @@ msgstr ""
 #: src/gui/main.c
 #, c-format
 msgid "%zu game(s)"
-msgstr ""
-
-#: src/gui/main.c
-#, c-format
-msgid "Page %zu/%zu, %zu game(s)"
 msgstr ""
 
 #: src/gui/main.c
@@ -2098,7 +2133,7 @@ msgid "%s: each folder of an older version's lines is in a library now: %s"
 msgstr ""
 
 #: src/gui/main.c
-msgid "Dumps put here are listed, its subfolders' too: .nsp, .xci and .nro files. It stays on the list"
+msgid "Dumps put here are listed (.nsp, .xci and .nro), its subfolders' too while it says + subfolders. It stays on the list"
 msgstr ""
 
 #: src/gui/main.c
@@ -3096,6 +3131,53 @@ msgid "  default, %s free"
 msgstr ""
 
 #: src/gui/main.c
+msgid "Share Zip"
+msgstr ""
+
+#: src/gui/main.c src/gui/ui.txt
+msgid "Share Log"
+msgstr ""
+
+#: src/gui/main.c
+msgid "Open Logs Folder"
+msgstr ""
+
+#: src/gui/main.c
+msgid "Change Folder"
+msgstr ""
+
+#: src/gui/main.c
+msgid "Reset to Default"
+msgstr ""
+
+#: src/gui/main.c
+msgid "Remove from Library"
+msgstr ""
+
+#: src/gui/main.c
+msgid "Subfolders"
+msgstr ""
+
+#: src/gui/main.c
+msgid "How to share the logs?"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "%s: its subfolders' games are listed too"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "%s: its own games alone are listed, not its subfolders'"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "%s has no folder to open"
+msgstr ""
+
+#: src/gui/main.c
 #, c-format
 msgid "%s is compiled already, in %s"
 msgstr ""
@@ -3324,7 +3406,26 @@ msgid "Drop one local file path, not a list or remote URL."
 msgstr ""
 
 #: src/gui/main.c
-msgid "The log could not be saved: no working folder"
+msgid "the launcher's log has no folder in Documents"
+msgstr ""
+
+#: src/gui/main.c
+msgid "Settings > App > Folders' Logs names no folder"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "The logs could not be saved: cannot make %s: %s"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "The logs could not be saved: %s, of what was shared before, could not be deleted: %s"
+msgstr ""
+
+#: src/gui/main.c
+#, c-format
+msgid "The logs could not be saved: %s"
 msgstr ""
 
 #: src/gui/main.c
@@ -3334,12 +3435,12 @@ msgstr ""
 
 #: src/gui/main.c
 #, c-format
-msgid "Log saved to %s"
+msgid "%s is in %s, opened"
 msgstr ""
 
 #: src/gui/main.c
 #, c-format
-msgid "Log saved to %s (path copied)"
+msgid "%s is in %s; %s"
 msgstr ""
 
 #: src/gui/main.c
@@ -3535,12 +3636,6 @@ msgstr ""
 #. A key of the foot's sentences, which a click finds by this word
 #: src/gui/main.c
 #, snx-key
-msgid "Swipe"
-msgstr ""
-
-#. A key of the foot's sentences, which a click finds by this word
-#: src/gui/main.c
-#, snx-key
 msgid "Del"
 msgstr ""
 
@@ -3590,6 +3685,12 @@ msgstr ""
 #: src/gui/main.c
 #, snx-key
 msgid "S"
+msgstr ""
+
+#. A key of the foot's sentences, which a click finds by this word
+#: src/gui/main.c
+#, snx-key
+msgid "Save states"
 msgstr ""
 
 #. A key of the foot's sentences, which a click finds by this word
@@ -3707,15 +3808,11 @@ msgid "The game's .ini settings, the launcher's for the next runs, and its theme
 msgstr ""
 
 #: src/gui/model.c
-msgid "Saves the last run's output and game log to scarletnx.log in the data folder, then shares it"
+msgid "Saves the logs as one zip or as scarletnx.log in a folder it opens to share from, or opens their folder"
 msgstr ""
 
 #: src/gui/model.c
-msgid "Saves the last run's output and game log to scarletnx.log and copies its path"
-msgstr ""
-
-#: src/gui/model.c
-msgid "Opens the data folder, recompiled/ and the keys in it, in the system's Files app"
+msgid "Where the app keeps each kind of its files, and the libraries: each folder opened or changed"
 msgstr ""
 
 #: src/gui/process_posix.c
@@ -4178,14 +4275,6 @@ msgstr ""
 
 #: src/gui/ui.txt
 msgid "Install Keys"
-msgstr ""
-
-#: src/gui/ui.txt
-msgid "Share Log"
-msgstr ""
-
-#: src/gui/ui.txt
-msgid "Open Data Folder"
 msgstr ""
 
 #: src/common/utilities/setup.c

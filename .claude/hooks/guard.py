@@ -42,12 +42,12 @@ MSG_GAME = (
 )
 MSG_BROAD = 'Stage files by name (git add path...), not with -A, -u, ., *, :/ or commit -a.'
 MSG_PUSH = 'Never force-push. Fix the branch with a new commit instead.'
-MSG_PKILL = 'pkill/killall match the shell running them. Use `pgrep -a NAME`, then `kill PID`.'
+MSG_PKILL = 'pkill and killall match the shell that runs them. Use `pgrep -a NAME`, then `kill PID`.'
 MSG_PGREP_KILL = (
-    'kill with pgrep -f matches the shell running the command, whose command line holds the pattern. '
-    'List with `pgrep -a NAME`, then `kill PID` with the numbers in a separate command.'
+    'kill with pgrep -f matches the shell that runs the command, because its command line holds the pattern. '
+    'List the processes with `pgrep -a NAME`. Then run `kill PID` with the numbers in a separate command.'
 )
-MSG_SUDO = 'No sudo: the user installs system packages. Say what is needed and why.'
+MSG_SUDO = 'Do not use sudo. The user installs system packages. Tell the user what you need and why.'
 MSG_UPLOAD = 'Keys, dumps, work/ and games/ (and shader or texture dumps) never leave this machine.'
 
 
@@ -232,8 +232,8 @@ def main():
         project = os.environ.get('CLAUDE_PROJECT_DIR', os.getcwd()).rstrip('/') + '/'
         if path.startswith(project) and PROTECTED_PATHS.search(path[len(project) :]):
             print(
-                f'{path} is generated, third-party or a game file. Change the source, script or package pin '
-                'that produces it instead.',
+                f'{path} is a generated file, a third-party file or a game file. Change the source, script or '
+                'package pin that makes it.',
                 file=sys.stderr,
             )
             sys.exit(2)

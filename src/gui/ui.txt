@@ -33,8 +33,7 @@
 		[button]"Share Log" {
 			icon = share-2
 		}
-		[button]"Open Data Folder" {
-			for-platform = android
+		[button]"Folders" {
 			icon = folder-open
 		}
 		[button]"Exit" {
