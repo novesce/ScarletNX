@@ -225,7 +225,7 @@ void jit_init(void) {
     config.hook_direct_calls = nvn_trace_active();
     config.direct_svc = 1; /* g_rtapi's svcs, as the AOT module calls them */
     config.threads = (unsigned)g_settings.jit_threads;
-    config.region_instructions = (size_t)g_settings.jit_region_instructions;
+    config.region_instructions = (size_t)g_settings.jit_region_size;
     config.live_budget = (size_t)g_settings.jit_live_budget;
     config.report = jit_log;
     snprintf(g_jit_cache, sizeof(g_jit_cache), "%s%s.jitcache", g_cachedir, g_exename);
