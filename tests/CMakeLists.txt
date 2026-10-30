@@ -474,6 +474,14 @@ snx_test_target(snx-test-llvm-fp-fast 11)
 target_link_libraries(snx-test-llvm-fp-fast PRIVATE snx_llvm snx_driver ${CMAKE_DL_LIBS})
 add_test(NAME llvm_fp_fast COMMAND snx-test-llvm-fp-fast)
 
+# Exact vector reciprocal-square-root estimates, through real O0/O2 AOT and JIT steps.
+add_executable(snx-test-llvm-rsqrte llvm_rsqrte.c llvm_steps.c
+    "${PROJECT_SOURCE_DIR}/src/common/cpu/aarch64/cpu_helpers.c")
+snx_test_target(snx-test-llvm-rsqrte 11)
+snx_cpu_helpers_flags(snx-test-llvm-rsqrte)
+target_link_libraries(snx-test-llvm-rsqrte PRIVATE snx_llvm snx_driver ${CMAKE_DL_LIBS})
+add_test(NAME llvm_rsqrte COMMAND snx-test-llvm-rsqrte)
+
 add_executable(snx-test-a64-fp-arithmetic a64_fp_arithmetic_test.c
     "${PROJECT_SOURCE_DIR}/src/common/cpu/aarch64/cpu_helpers.c")
 snx_test_target(snx-test-a64-fp-arithmetic 11)
