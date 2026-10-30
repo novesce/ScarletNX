@@ -290,6 +290,23 @@ setting JIT threads
     words Auto|#
     help Threads compiling the code the recompiler missed: 0 = every CPU the game may use but two (at most 4).
     help They yield to the game
+setting JIT region size
+    key jit_region_instructions
+    int 0 INT_MAX
+    default 0
+    startup
+    words Auto|# instructions
+    help The most instructions one branch graph of missed code may hold when the JIT compiles it, so a huge function
+    help cannot stall the game for seconds. Branches out of it resume through the dispatch table. 0 = up to 4096, and
+    help a graph larger than that is cut into regions of 64
+setting JIT live budget
+    key jit_live_budget
+    int 0 INT_MAX
+    default 0
+    startup
+    words Auto|# instructions
+    help The instructions beyond the missed code itself that a miss the game is waiting on discovers (callees).
+    help The background queue keeps its larger budget. 0 = 64
 # The JIT's level is the recompile's Optimization level by default (g_recompile_ini's opt, 2), as an AOT pack built from
 # the cache needs the cache's level and the pack's to agree. A phone has no such setting: its JIT compiles at O0, as any
 # other level breaks it (guest_jit.c), and cmake/settings.cmake leaves the block out

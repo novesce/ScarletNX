@@ -231,7 +231,7 @@ static u32 fp_recip_estimate(u32 a) {
    one game's main thread: the results of the search for every a are this table, which tests/a64_fp_arithmetic_test.c
    checks against the search itself */
 #include "common/cpu/aarch64/helpers/fp_rsqrt_table.h"
-static u32 fp_rsqrt_estimate(u32 a) { return fp_rsqrt_estimates[a - 128]; }
+static u32 fp_rsqrt_estimate(u32 a) { return fp_rsqrt_estimates[a - 128] + 256u; }
 
 u32 urecpe32(u32 x) {
     if (!(x >> 31)) return 0xFFFFFFFFu;

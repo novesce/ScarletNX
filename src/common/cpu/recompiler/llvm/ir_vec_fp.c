@@ -452,7 +452,7 @@ static V rsqrt_table(SnxIr* ir, V index) {
     V table = LLVMGetNamedGlobal(ir->mod, "snx.frsqrte.table");
     if (!table) {
         V entries[384];
-        for (unsigned i = 0; i < 384; i++) entries[i] = ir_i32(ir, fp_rsqrt_estimates[i]);
+        for (unsigned i = 0; i < 384; i++) entries[i] = ir_i32(ir, fp_rsqrt_estimates[i] + 256u);
         table = LLVMAddGlobal(ir->mod, table_type, "snx.frsqrte.table");
         LLVMSetInitializer(table, LLVMConstArray(ir->t_i32, entries, 384));
         LLVMSetGlobalConstant(table, 1);
