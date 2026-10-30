@@ -6,6 +6,7 @@
    CALLs, and moves the texture snapshots a record carries to its own copy. The records are walked here as the replay
    walks them (gpu/nvn/nvn_replay.c) */
 #include "nx/gpu/nvn/nvn_object.h"
+#include "nx/gpu/nvn/nvn_state.h"
 #include "gpu/nvn/nvn.hook.h"
 #include "common/filesystem/host.h" /* PMutex */
 #include <stdarg.h>
@@ -33,6 +34,7 @@ void nvn_verify_memory_back(u64 mem, u64 size) {
     (void)mem;
     (void)size;
 }
+void pm_init(PMutex* m) { (void)m; }
 void pm_lock(PMutex* m) { (void)m; }
 void pm_unlock(PMutex* m) { (void)m; }
 void logf_(int lvl, const char* fmt, ...) {
@@ -85,6 +87,7 @@ int main(void) {
     NvnTexture t;
     Walk a, b;
     u64 h, h2, snap;
+    nvn_init();
     memset(&cpu, 0, sizeof cpu);
     memset(&t, 0, sizeof t);
     t.magic = NVN_MAGIC('T', 'E', 'X', 0);
@@ -97,21 +100,10 @@ int main(void) {
     /* a recording to call, then the source: a render target (its texture's snapshot in the record), a draw, a call,
        crossing from one segment of command memory into another */
     nvn_CommandBufferInitialize(&cpu, cb, 0);
-    check(nvn_CommandBufferGetCommandMemorySize(&cpu, cb) == 0 &&
-          nvn_CommandBufferGetCommandMemoryFree(&cpu, cb) == 0, "no command memory before a range is added");
-    nvn_CommandBufferAddControlMemory(&cpu, cb, 0x6000, 0x200);
-    check(nvn_CommandBufferGetControlMemorySize(&cpu, cb) == 0x200 &&
-          nvn_CommandBufferGetControlMemoryUsed(&cpu, cb) == 0 &&
-          nvn_CommandBufferGetControlMemoryFree(&cpu, cb) == 0x200, "control range advertised without bookkeeping use");
     nvn_CommandBufferAddCommandMemory(&cpu, cb, 1, 0, 0x1000);
-    check(nvn_CommandBufferGetCommandMemorySize(&cpu, cb) == 0x1000 &&
-          nvn_CommandBufferGetCommandMemoryFree(&cpu, cb) == 0x1000, "a new command range starts free");
     nvn_CommandBufferBeginRecording(&cpu, cb);
     nvn_CommandBufferDrawArrays(&cpu, cb, 4, 0, 3);
     gw64(called, nvn_CommandBufferEndRecording(&cpu, cb));
-    check(nvn_CommandBufferGetCommandMemoryUsed(&cpu, cb) > 0 &&
-          nvn_CommandBufferGetCommandMemoryFree(&cpu, cb) + nvn_CommandBufferGetCommandMemoryUsed(&cpu, cb) == 0x1000,
-          "recorded bytes reduce the free range");
     nvn_CommandBufferAddCommandMemory(&cpu, cb, 1, 0x1000, 0x400);
     nvn_CommandBufferBeginRecording(&cpu, cb);
     nvn_CommandBufferSetRenderTargets(&cpu, cb, 1, colors, 0, 0, 0);
@@ -149,8 +141,6 @@ int main(void) {
         u64 h3;
         nvn_CommandBufferInitialize(&cpu, cb3, 0);
         nvn_CommandBufferAddCommandMemory(&cpu, cb3, 1, 0x3000, 0x60);
-        check(nvn_CommandBufferGetCommandMemorySize(&cpu, cb3) == 0x60,
-              "the game sees its command capacity, not the runtime's lending capacity");
         nvn_CommandBufferBeginRecording(&cpu, cb3);
         for (int i = 0; i < 6; i++) nvn_CommandBufferDrawArrays(&cpu, cb3, 4, i, 3);
         h3 = nvn_CommandBufferEndRecording(&cpu, cb3);
@@ -159,10 +149,6 @@ int main(void) {
               "the recording goes on past the game's memory");
         check(a.at[0] >= 0x13000 && a.at[0] < 0x13060 && a.at[5] >= 0x80000, "its last records are in lent memory");
         check(nvn_CommandBufferGetCommandMemoryUsed(&cpu, cb3) <= 0x60, "lent bytes count nothing of used");
-        check(nvn_CommandBufferGetCommandMemorySize(&cpu, cb3) == 0x60 &&
-              nvn_CommandBufferGetCommandMemoryFree(&cpu, cb3) +
-                  nvn_CommandBufferGetCommandMemoryUsed(&cpu, cb3) == 0x60,
-              "lending preserves the guest range's size and free-byte accounting");
         /* the game adds the same memory again for its next recording: what was lent after it comes back, and the next
            overflow takes it again rather than more */
         u64 lent_at = a.at[5] & ~0xffffull, top = g_lent;

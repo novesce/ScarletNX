@@ -12,12 +12,13 @@
 
    Every NVN command is only recorded here: the queue's replay runs the records on the GPU thread once they are
    submitted (gpu/nvn/nvn_replay.c) */
+#include "nx/gpu/nvn/nvn_cmd.h"
 #include "nx/gpu/nvn/nvn_object.h"
+#include "nx/gpu/nvn/nvn_state.h"
 #include "nx/gpu/nvn/nvn_verify.h"
 #include "gpu/nvn/nvn.hook.h"
 #include "nx/runtime/platform/log.h"
 #include "nx/runtime/platform/plat.h"
-#include <stdlib.h>
 #include <string.h>
 
 #define CB(a) NVN_OBJ(NvnCmdBuf, a)
@@ -71,63 +72,50 @@ static void new_segment(NvnCmdBuf* o, u64 memory, u64 size) {
    done with what it recorded there, as on the console, and so with what the runtime lent after it, which goes back
    for the next lend. That game re-records its display lists into the same buffers every frame */
 #define LEND_SEGMENT (64u << 10)
-typedef struct {
-    u64 at, size, origin;
-    u32 taken, pad;
-} Lent;
-static struct {
-    PMutex lock; /* the game's threads record into several command buffers at once */
-    Lent* l;
-    u32 n, cap;
-    u64 total; /* bytes of the kernel region lent */
-} g_lend = {PMUTEX_INIT, NULL, 0, 0, 0};
 static void lend(u64 cb, u32 need) {
     NvnCmdBuf* o = CB(cb);
     u64 size = need > LEND_SEGMENT / 2 ? ((u64)need * 2 + 0xffff) & ~0xffffull : LEND_SEGMENT, at = 0;
     u32 i;
-    pm_lock(&g_lend.lock);
-    for (i = 0; i < g_lend.n && !at; i++)
-        if (!g_lend.l[i].taken && g_lend.l[i].size >= size) at = g_lend.l[i].at;
+    pm_lock(&g_nvn.cmd.lock);
+    for (i = 0; i < g_nvn.cmd.n && !at; i++)
+        if (!g_nvn.cmd.l[i].taken && g_nvn.cmd.l[i].size >= size) at = g_nvn.cmd.l[i].at;
     if (at)
         i--;
     else {
-        u64 was = g_lend.total;
-        if (g_lend.n == g_lend.cap) {
-            u32 cap = g_lend.cap ? g_lend.cap * 2 : 64;
-            Lent* l = (Lent*)realloc(g_lend.l, cap * sizeof *l);
-            if (!l) fatal("nvn: out of memory for the command memory lent");
-            g_lend.l = l;
-            g_lend.cap = cap;
-        }
+        u64 was = g_nvn.cmd.total;
+        if (g_nvn.cmd.n == NVN_LEND_MAX)
+            fatal("nvn: command buffers ran out of the game's command memory more than %u times at once, the segments "
+                  "of the runtime's own nvn_direct holds (%llu KiB lent)",
+                  NVN_LEND_MAX, (unsigned long long)(g_nvn.cmd.total >> 10));
         at = kmem_alloc(size, MS_KERNEL, PERM_RW);
-        i = g_lend.n++;
-        g_lend.l[i].at = at;
-        g_lend.l[i].size = size;
-        g_lend.total += size;
+        i = g_nvn.cmd.n++;
+        g_nvn.cmd.l[i].at = at;
+        g_nvn.cmd.l[i].size = size;
+        g_nvn.cmd.total += size;
         LOG_LIMIT(4, "nvn: command buffer %llx is out of the game's command memory, which its callback doesn't add to: "
                      "%llu KiB of the runtime's lent\n",
                   (unsigned long long)cb, (unsigned long long)(size >> 10));
-        if ((g_lend.total ^ was) > was) /* a new power of two of the total */
+        if ((g_nvn.cmd.total ^ was) > was) /* a new power of two of the total */
             LOG("nvn: %llu KiB of the runtime's memory lent to command buffers in all\n",
-                (unsigned long long)(g_lend.total >> 10));
+                (unsigned long long)(g_nvn.cmd.total >> 10));
     }
-    g_lend.l[i].taken = 1;
-    g_lend.l[i].origin = o->origin;
-    size = g_lend.l[i].size;
-    pm_unlock(&g_lend.lock);
+    g_nvn.cmd.l[i].taken = 1;
+    g_nvn.cmd.l[i].origin = o->origin;
+    size = g_nvn.cmd.l[i].size;
+    pm_unlock(&g_nvn.cmd.lock);
     new_segment(o, at, size);
     o->lent = 1;
 }
 /* the game adds [memory, memory + size) again: what was lent after it comes back */
 static void lend_return(u64 memory, u64 size) {
     u32 i;
-    pm_lock(&g_lend.lock);
-    for (i = 0; i < g_lend.n; i++)
-        if (g_lend.l[i].taken && g_lend.l[i].origin - memory < size) {
-            g_lend.l[i].taken = 0;
-            nvn_verify_memory_back(g_lend.l[i].at, g_lend.l[i].size);
+    pm_lock(&g_nvn.cmd.lock);
+    for (i = 0; i < g_nvn.cmd.n; i++)
+        if (g_nvn.cmd.l[i].taken && g_nvn.cmd.l[i].origin - memory < size) {
+            g_nvn.cmd.l[i].taken = 0;
+            nvn_verify_memory_back(g_nvn.cmd.l[i].at, g_nvn.cmd.l[i].size);
         }
-    pm_unlock(&g_lend.lock);
+    pm_unlock(&g_nvn.cmd.lock);
 }
 
 /* room for one record of size bytes with keep bytes after it (OP_RESERVE, 0 for the END), asking the game's memory
@@ -164,7 +152,7 @@ static u64 rec(CPU* c, u64 cb, u32 op, size_t payload) {
     u32 size = (u32)((8 + payload + 7) & ~(size_t)7);
     u64 at = alloc_keep(c, cb, size, OP_RESERVE);
     put_hdr(at, op, size);
-    memset(GP(at + 8), 0, size - 8);
+    memset(GP(at + 8), 0, size - 8); /* guest memory: every byte the game sees */
     return at + 8;
 }
 #define REC(c, cb, OP, T)            ((T*)(void*)GP(rec((c), (cb), (OP), sizeof(T))))
@@ -175,7 +163,7 @@ static u64 rec(CPU* c, u64 cb, u32 op, size_t payload) {
 int nvn_CommandBufferInitialize(CPU* c, u64 cb, u64 d) {
     NvnCmdBuf* o = CB(cb);
     (void)c;
-    memset(o, 0, sizeof *o);
+    memset(o, 0, sizeof *o); /* guest memory: every byte the game sees */
     o->magic = NVN_MAGIC('C', 'M', 'D', 'B');
     o->device = d;
     return 1;
@@ -210,17 +198,44 @@ void nvn_CommandBufferAddCommandMemory(CPU* c, u64 cb, u64 pool, i64 offset, u64
         fatal("nvn: command buffer %llx was given %llx bytes of command memory from pool %llx (memory %llx), which "
               "nvn_direct doesn't lend memory for",
               (unsigned long long)cb, (unsigned long long)size, (unsigned long long)pool, (unsigned long long)memory);
-    if (g_lend.n) lend_return(memory + (u64)offset, size);
+    if (g_nvn.cmd.n) lend_return(memory + (u64)offset, size);
     new_segment(CB(cb), memory + (u64)offset, size);
     CB(cb)->origin = memory + (u64)offset;
+    CB(cb)->game_end = memory + (u64)offset + size;
     CB(cb)->used = 0; /* GetCommandMemoryUsed counts from the memory the game last added, across recordings */
-    CB(cb)->command_size = size;
 }
-/* the control memory is the driver's own bookkeeping: the records need none */
+/* the control memory is the driver's own bookkeeping: the records need none. Its size is kept for the getters */
 void nvn_CommandBufferAddControlMemory(CPU* c, u64 cb, u64 memory, u64 size) {
     (void)c;
     (void)memory;
     CB(cb)->control_size = size;
+}
+/* The memory the game last added and what is left of it, which games check before they record. The command memory's
+   room is what a record can still take there before the runtime lends memory of its own (each record keeps room for a
+   JUMP after it): none once a lent segment is in use. The control memory is never used */
+u64 nvn_CommandBufferGetCommandMemorySize(CPU* c, u64 cb) {
+    const NvnCmdBuf* o = CB(cb);
+    (void)c;
+    return o->game_end - o->origin;
+}
+u64 nvn_CommandBufferGetCommandMemoryFree(CPU* c, u64 cb) {
+    const NvnCmdBuf* o = CB(cb);
+    (void)c;
+    return o->lent || !o->cur || o->cur + OP_RESERVE > o->end ? 0 : o->end - o->cur - OP_RESERVE;
+}
+u64 nvn_CommandBufferGetControlMemorySize(CPU* c, u64 cb) {
+    (void)c;
+    return CB(cb)->control_size;
+}
+u64 nvn_CommandBufferGetControlMemoryFree(CPU* c, u64 cb) {
+    (void)c;
+    return CB(cb)->control_size;
+}
+/* the game's driver's switch for its callback when control memory runs out: the records never use control memory */
+void nvn_CommandBufferSetControlMemoryCallbackEnabled(CPU* c, u64 cb, int on) {
+    (void)c;
+    (void)cb;
+    (void)on;
 }
 /* a recording starts with its first command, as in NVN: an empty one takes only its END */
 void nvn_CommandBufferBeginRecording(CPU* c, u64 cb) {
@@ -239,23 +254,6 @@ u64 nvn_CommandBufferGetCommandMemoryUsed(CPU* c, u64 cb) {
     const NvnCmdBuf* o = CB(cb);
     (void)c;
     return o->begin ? o->used : 0;
-}
-u64 nvn_CommandBufferGetCommandMemorySize(CPU* c, u64 cb) {
-    (void)c;
-    return CB(cb)->command_size;
-}
-u64 nvn_CommandBufferGetCommandMemoryFree(CPU* c, u64 cb) {
-    const NvnCmdBuf* o = CB(cb);
-    u64 used = nvn_CommandBufferGetCommandMemoryUsed(c, cb);
-    return used < o->command_size ? o->command_size - used : 0;
-}
-u64 nvn_CommandBufferGetControlMemorySize(CPU* c, u64 cb) {
-    (void)c;
-    return CB(cb)->control_size;
-}
-u64 nvn_CommandBufferGetControlMemoryFree(CPU* c, u64 cb) {
-    (void)c;
-    return CB(cb)->control_size; /* recording uses no control bytes */
 }
 u64 nvn_CommandBufferGetControlMemoryUsed(CPU* c, u64 cb) {
     (void)c;
@@ -460,6 +458,11 @@ void nvn_CommandBufferDownsample(CPU* c, u64 cb, u64 s, u64 d) { downsample(c, c
 void nvn_CommandBufferDownsampleTextureView(CPU* c, u64 cb, u64 s, u64 sv, u64 d, u64 dv) {
     downsample(c, cb, s, sv, d, dv);
 }
+/* the same resolve, which the game's driver makes in pieces of the tiled cache's tiles: its result is a Downsample's */
+void nvn_CommandBufferTiledDownsample(CPU* c, u64 cb, u64 s, u64 d) { downsample(c, cb, s, 0, d, 0); }
+void nvn_CommandBufferTiledDownsampleTextureView(CPU* c, u64 cb, u64 s, u64 sv, u64 d, u64 dv) {
+    downsample(c, cb, s, sv, d, dv);
+}
 static void clear_tex(CPU* c, u64 cb, u64 t, u64 v, u64 region, u64 value, i32 mask, u8 is_uint) {
     u64 payload = rec(c, cb, OP_CLEAR_TEX, SNAP_OFF(NvnPClearTex) + NVN_TEX_SNAP);
     NvnPClearTex* r = (NvnPClearTex*)(void*)GP(payload);
@@ -476,13 +479,32 @@ void nvn_CommandBufferClearTexture(CPU* c, u64 cb, u64 t, u64 v, u64 region, u64
 void nvn_CommandBufferClearTextureui(CPU* c, u64 cb, u64 t, u64 v, u64 region, u64 rgba, i32 mask) {
     clear_tex(c, cb, t, v, region, rgba, mask, 1);
 }
+/* signed integers: their words as given, as an integer clear's (the target's format says how to read them) */
+void nvn_CommandBufferClearTexturei(CPU* c, u64 cb, u64 t, u64 v, u64 region, u64 rgba, i32 mask) {
+    clear_tex(c, cb, t, v, region, rgba, mask, 1);
+}
 static void copy_stride(CPU* c, u64 cb, i64 stride, i32 image) {
     NvnPCopyStride* r = REC(c, cb, OP_COPY_STRIDE, NvnPCopyStride);
     r->stride = stride;
     r->image = image;
 }
-void nvn_CommandBufferSetCopyRowStride(CPU* c, u64 cb, i64 stride) { copy_stride(c, cb, stride, 0); }
-void nvn_CommandBufferSetCopyImageStride(CPU* c, u64 cb, i64 stride) { copy_stride(c, cb, stride, 1); }
+/* recorded for the copies after them, and kept for the getters (32 bits, as the game's driver keeps them) */
+void nvn_CommandBufferSetCopyRowStride(CPU* c, u64 cb, i64 stride) {
+    copy_stride(c, cb, stride, 0);
+    CB(cb)->row_stride = (i32)stride;
+}
+void nvn_CommandBufferSetCopyImageStride(CPU* c, u64 cb, i64 stride) {
+    copy_stride(c, cb, stride, 1);
+    CB(cb)->image_stride = (i32)stride;
+}
+i64 nvn_CommandBufferGetCopyRowStride(CPU* c, u64 cb) {
+    (void)c;
+    return CB(cb)->row_stride;
+}
+i64 nvn_CommandBufferGetCopyImageStride(CPU* c, u64 cb) {
+    (void)c;
+    return CB(cb)->image_stride;
+}
 /* the clear color's words as the game gives them: floats, or an integer target's integers, as the 3D engine's clear
    registers hold them (the renderer reads them by the target's format) */
 static void clear_color(CPU* c, u64 cb, i32 index, u64 rgba, i32 mask) {
@@ -602,9 +624,12 @@ void nvn_CommandBufferSetRasterizerDiscard(CPU* c, u64 cb, int on) {
     REC(c, cb, OP_RAST_DISCARD, NvnPRastDiscard)->on = on != 0;
 }
 void nvn_CommandBufferSetLineWidth(CPU* c, u64 cb, f32 width) {
-    (void)c;
-    (void)cb;
-    if (width != 1.0f) LOG_LIMIT(1, "nvn: line width %.2f isn't recorded\n", (double)width);
+    memcpy(GP(rec(c, cb, OP_LINE_WIDTH, 4)), &width, 4);
+}
+/* the vertex whose outputs a flat input takes: the mode is the 3D engine's (1 the last vertex), which the game's
+   driver writes as it is (PROVOKING_VERTEX, 0x5A1) */
+void nvn_CommandBufferSetProvokingVertexMode(CPU* c, u64 cb, i32 mode) {
+    REC(c, cb, OP_PROVOKING, NvnPProvoking)->mode = mode;
 }
 void nvn_CommandBufferSetSampleMask(CPU* c, u64 cb, i32 mask) {
     REC(c, cb, OP_SAMPLE_MASK, NvnPSampleMask)->mask = mask;
@@ -678,17 +703,112 @@ void nvn_CommandBufferWaitEvent(CPU* c, u64 cb, u64 e, i32 mode, u32 value) {
     (void)mode;
     (void)value;
 }
-/* hints the replay has no use for, as nxnative: an alpha reference without an alpha test, conservative
-   rasterization, discards (the contents are undefined after, so keeping them is right), ZCull */
+/* hints the replay has no use for, as nxnative: an alpha reference without an alpha test, discards (the contents are
+   undefined after, so keeping them is right), ZCull */
 void nvn_CommandBufferSetAlphaRef(CPU* c, u64 cb, f32 ref) {
     (void)c;
     (void)cb;
     (void)ref;
 }
+/* Conservative rasterization (CONSERVATIVE_RASTER, 0x452) and its dilation: the game's driver rounds the dilation up
+   to quarter pixels, at most 3 (0.75 pixels), and gives it to the hardware through a macro, with the raster bounding
+   box's pad set while it is above 0 */
 void nvn_CommandBufferSetConservativeRasterEnable(CPU* c, u64 cb, int on) {
+    NvnPConservative* r = REC(c, cb, OP_CONSERVATIVE, NvnPConservative);
+    r->which = 0;
+    r->on = on != 0;
+}
+void nvn_CommandBufferSetConservativeRasterDilate(CPU* c, u64 cb, f32 dilate) {
+    NvnPConservative* r = REC(c, cb, OP_CONSERVATIVE, NvnPConservative);
+    f32 q = dilate * 4.0f;
+    r->which = 1;
+    r->dilate = q > 2.0f ? 3 : q > 1.0f ? 2 : q > 0.0f ? 1 : 0; /* ceil, clamped to 0..3; a NaN takes 0 */
+}
+/* The hardware's hints and optimizations, with nothing the renderer can show:
+   - color reduction (SET_REDUCE_COLOR_THRESHOLDS_ENABLE, 0x367, and the thresholds of each format class): the ROP's
+     shortcut that skips blending where the source alpha is past a threshold, which may change a pixel by little. The
+     renderer blends exactly, as with it off;
+   - the subpixel precision bias (NV_conservative_raster's), the rasterizer's extra bits of subpixel precision, which
+     Vulkan has no counterpart of;
+   - ZCull's compression of 32-bit float depth, and the tiled cache's subtile size: the renderer has neither;
+   - ResolveDepthBuffer, the game's driver's DECOMPRESS_ZETA_SURFACE (0x47F): it writes a compressed depth buffer's
+     plane equations out as values, which a depth texture read then sees. The renderer's depth images hold their
+     values, so they read the same without it;
+   - the coverage modulation table (NV_framebuffer_mixed_samples): the renderer rasterizes at the targets' samples
+     (gpu/nvn/nvn_draw.c), so its coverage needs no modulation;
+   - the default tessellation levels (TESSELLATION_OUTER 0xC9, INNER 0xCD), which apply only to a program without a
+     tessellation control stage. The renderer's tessellation takes the levels from that stage, which Vulkan requires;
+   - checkpoints, which only NVIDIA's tools read (the release driver answers 1 and records nothing) */
+void nvn_CommandBufferSetColorReductionEnable(CPU* c, u64 cb, int on) {
     (void)c;
     (void)cb;
-    if (on) LOG_LIMIT(1, "nvn: conservative rasterization isn't recorded\n");
+    (void)on;
+}
+void nvn_CommandBufferSetColorReductionThresholds(CPU* c, u64 cb, i32 format_class, i32 conservative,
+                                                  i32 aggressive) {
+    (void)c;
+    (void)cb;
+    (void)format_class;
+    (void)conservative;
+    (void)aggressive;
+}
+void nvn_CommandBufferSetSubpixelPrecisionBias(CPU* c, u64 cb, i32 x, i32 y) {
+    (void)c;
+    (void)cb;
+    (void)x;
+    (void)y;
+}
+void nvn_CommandBufferSetZCullZF32CompressionEnable(CPU* c, u64 cb, int on) {
+    (void)c;
+    (void)cb;
+    (void)on;
+}
+void nvn_CommandBufferOverrideSubtileSize(CPU* c, u64 cb, int on, i32 size) {
+    (void)c;
+    (void)cb;
+    (void)on;
+    (void)size;
+}
+void nvn_CommandBufferResolveDepthBuffer(CPU* c, u64 cb) {
+    (void)c;
+    (void)cb;
+}
+void nvn_CommandBufferBindCoverageModulationTable(CPU* c, u64 cb, u64 entries) {
+    (void)c;
+    (void)cb;
+    (void)entries;
+}
+void nvn_CommandBufferSetInnerTessellationLevels(CPU* c, u64 cb, u64 levels) {
+    (void)c;
+    (void)cb;
+    (void)levels;
+}
+void nvn_CommandBufferSetOuterTessellationLevels(CPU* c, u64 cb, u64 levels) {
+    (void)c;
+    (void)cb;
+    (void)levels;
+}
+int nvn_CommandBufferInsertCheckpointStatic(CPU* c, u64 cb, u64 label) {
+    (void)c;
+    (void)cb;
+    (void)label;
+    return 1;
+}
+int nvn_CommandBufferInsertCheckpointDynamic(CPU* c, u64 cb, u64 label) {
+    (void)c;
+    (void)cb;
+    (void)label;
+    return 1;
+}
+/* a program's subroutine uniforms: the translator runs no subroutines (nvn_ProgramSetSubroutineLinkage) */
+void nvn_CommandBufferSetProgramSubroutines(CPU* c, u64 cb, u64 program, i32 stage, i32 first, i32 n, u64 values) {
+    (void)c;
+    (void)cb;
+    (void)stage;
+    (void)first;
+    (void)values;
+    LOG_LIMIT(1, "nvn: %d subroutine uniforms of program %llx: the runtime's programs have no subroutines\n", n,
+              (unsigned long long)program);
 }
 void nvn_CommandBufferDiscardColor(CPU* c, u64 cb, i32 index) {
     (void)c;
@@ -785,6 +905,7 @@ void nvn_CommandBufferBindProgram(CPU* c, u64 cb, u64 program, i32 stages) {
         memcpy(r->st, p->st, sizeof r->st);
         r->serial = p->serial;
         memcpy(r->block, p->block, sizeof r->block);
+        r->sample_shading = p->sample_shading;
     } else if (program)
         LOG_LIMIT(4, "nvn: program %llx isn't initialized as it is bound\n", (unsigned long long)program);
 }
@@ -915,6 +1036,40 @@ void nvn_CommandBufferBindSeparateSamplers(CPU* c, u64 cb, i32 stage, i32 first,
 }
 void nvn_CommandBufferBindImages(CPU* c, u64 cb, i32 stage, i32 first, i32 n, u64 handles) {
     bind_handles(c, cb, OP_BIND_IMG, stage, first, n, handles);
+}
+/* deferred binds of the other kinds, as BindTexturesDeferred: the handles where they are as the GPU runs it */
+static void bind_deferred(CPU* c, u64 cb, u32 op, i32 stage, i32 first, i32 n, u64 handles) {
+    NvnPBindHandles* r = bind_handles(c, cb, op, stage, first, n, handles);
+    if (r && handles) {
+        r->defer = 1;
+        r->src = handles;
+    }
+}
+void nvn_CommandBufferBindImagesDeferred(CPU* c, u64 cb, i32 stage, i32 first, i32 n, u64 handles) {
+    bind_deferred(c, cb, OP_BIND_IMG, stage, first, n, handles);
+}
+void nvn_CommandBufferBindSeparateTexturesDeferred(CPU* c, u64 cb, i32 stage, i32 first, i32 n, u64 handles) {
+    bind_deferred(c, cb, OP_BIND_TEX, stage, NVN_SEPTEX_SLOT0 + first, n, handles);
+}
+void nvn_CommandBufferBindSeparateSamplersDeferred(CPU* c, u64 cb, i32 stage, i32 first, i32 n, u64 handles) {
+    bind_deferred(c, cb, OP_BIND_SAMP, stage, first, n, handles);
+}
+/* uniform and storage buffers whose NVNbufferRanges the GPU reads where they are as it runs the command */
+static void bind_bufs_deferred(CPU* c, u64 cb, u32 op, i32 stage, i32 first, i32 n, u64 ranges) {
+    NvnPBindBufs* r;
+    if (n <= 0 || !ranges) return;
+    r = REC(c, cb, OP_BIND_BUFS, NvnPBindBufs);
+    r->op = (i32)op;
+    r->stage = stage;
+    r->first = first;
+    r->count = n;
+    r->src = ranges;
+}
+void nvn_CommandBufferBindUniformBuffersDeferred(CPU* c, u64 cb, i32 stage, i32 first, i32 n, u64 ranges) {
+    bind_bufs_deferred(c, cb, OP_BIND_UBO, stage, first, n, ranges);
+}
+void nvn_CommandBufferBindStorageBuffersDeferred(CPU* c, u64 cb, i32 stage, i32 first, i32 n, u64 ranges) {
+    bind_bufs_deferred(c, cb, OP_BIND_SSBO, stage, first, n, ranges);
 }
 static void bind_one(CPU* c, u64 cb, u32 op, i32 stage, i32 slot, u64 handle) {
     NvnPBindHandles* r = RECN(c, cb, op, NvnPBindHandles, h, 1);
@@ -1064,6 +1219,17 @@ void nvn_CommandBufferDispatchComputeIndirect(CPU* c, u64 cb, u64 ind) {
     LOG_LIMIT(1, "nvn: the game records indirect dispatches (DispatchComputeIndirect)\n");
     r->caller = caller;
     r->ind = ind;
+}
+/* a texture's rectangle drawn onto color target 0 (the 3D engine's DRAW_TEXTURE, which the game's driver writes with
+   the state around it): the handle's texture and sampler, the destination in pixels and the source in texels, each
+   x0 y0 x1 y1. An empty destination draws nothing */
+void nvn_CommandBufferDrawTexture(CPU* c, u64 cb, u64 handle, u64 dst, u64 src) {
+    NvnPDrawTexture r;
+    memset(&r, 0, sizeof r); /* every byte: the record is guest memory */
+    r.handle = handle;
+    memcpy(r.dst, GP(dst), sizeof r.dst);
+    memcpy(r.src, GP(src), sizeof r.src);
+    memcpy(GP(rec(c, cb, OP_DRAW_TEXTURE, sizeof r)), &r, sizeof r);
 }
 /* drawing the vertex count transform feedback captured: nxnative records nothing, and neither does this */
 void nvn_CommandBufferDrawTransformFeedback(CPU* c, u64 cb, i32 prim, u64 control) {

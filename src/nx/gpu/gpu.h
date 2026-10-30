@@ -87,7 +87,7 @@ enum {
     R3D_PIPEMISC = 1u << 5, /* the rest of the pipeline key and the programs' keys: polygon mode 0x36B, patch size
                                0x373, tessellation parameters 0xC8, user clip enable 0x544, the geometry passthrough
                                mask 0x490-0x497, the provoking vertex 0x5A1, the clip mode 0x64F, alpha to coverage
-                               0x54F */
+                               0x54F, conservative rasterization 0x452 */
     R3D_XFB = 1u << 6,      /* transform feedback: enable 0x1D1, buffer controls 0x1C0-0x1CF, layouts 0xA00-0xA7F */
     /* the rest of what the draw state (maxwell/draw_state.c) reads */
     R3D_TARGETS = 1u << 7,   /* RT_CONTROL 0x487, the color targets' first 8 words (0x200 + 0x10 * i), the depth
@@ -280,6 +280,13 @@ void gmem_before_write(u64 gva, u64 size);
 void gmem_write_raw(u64 gva, const void* src, u64 size);
 /* a shader program: up to size bytes, stopping at the first page with no guest memory behind it, zeros after */
 void gmem_read_code(u64 gva, void* dst, u64 size);
+/* the same with nothing landed (memory/own.c): from the first byte the GPU holds on, zeros. How many bytes are the
+   CPU's (size when the GPU holds none) */
+u64 gmem_read_code_cpu(u64 gva, void* dst, u64 size);
+/* whether a program shader_hash measured len bytes long in a buffer whose bytes from cpu on gmem_read_code_cpu made
+   zero may go on into them (size: the buffer's): the scan ends at a zero word, which a control word can precede, so
+   one starting within two words of the end may be a zero of ours. Then gmem_read_code reads it with them landed */
+int gmem_code_cut(u64 len, u64 cpu, u64 size);
 /* the host address of [gva, gva + size) when it is contiguous in guest memory, after landing pending results over
    it; NULL otherwise */
 u8* gmem_ptr(u64 gva, u64 size);

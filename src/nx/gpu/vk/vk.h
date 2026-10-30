@@ -115,6 +115,10 @@ typedef struct {
     /* VK_EXT_provoking_vertex's provokingVertexLast: flat inputs take a primitive's last vertex, as the 3D engine's
        PROVOKING_VERTEX (0x5A1) can ask */
     int has_provoking_last;
+    /* VK_EXT_conservative_rasterization: conservative rasterization (CONSERVATIVE_RASTER, 0x452), dilated by at most
+       conservative_extra pixels (maxExtraPrimitiveOverestimationSize) */
+    int has_conservative;
+    float conservative_extra;
     /* VK_KHR_index_type_uint8 (or the EXT before it): 8-bit index buffers bound as they are */
     int has_index8;
     /* VK_KHR_present_id and VK_KHR_present_wait: presents carry ids, and display.c learns when each is displayed */
@@ -199,6 +203,11 @@ u8* vk_stage_upload(u64 size, u64 align, VkBuffer* buf, u64* off);
 u8* vk_stage_output(u64 size, u64 align, VkBuffer* buf, u64* off, VmaAllocation* mem);
 /* Host-cached memory for the current frame's GPU -> host copies, read after its fence once invalidated. */
 u8* vk_stage_back(u64 size, VkBuffer* buf, u64* off, VmaAllocation* mem);
+/* Device memory for the current frame's data that the GPU writes and reads itself, with the same lifetime as vk_stage:
+   0 when none could be made */
+int vk_stage_device(u64 size, u64 align, VkBuffer* buf, u64* off);
+/* logs what each ring handed out since the last report, by where its memory is (vk_buffer_stats) */
+void vk_stage_report(void);
 /* ends and submits the commands recorded since the last submit, waiting for wait (at wait_stage) and signaling signal.
    The frame goes on: its staging, pools and deferred resources live until vk_frame_next and its slot's next use.
    Either semaphore may be VK_NULL_HANDLE */
@@ -589,6 +598,8 @@ u32 vk_surf_gen(void);       /* a write generation no image has held yet */
    memory instead (g_vk_rt_readbacks counts those). How many were recorded: the caller orders their writes (a barrier)
    before what reads buf */
 int vk_rt_overlay(u64 gva, u64 size, VkBuffer buf, u64 at);
+/* whether vk_rt_overlay has a render target to record over [gva, gva + size) */
+int vk_rt_over(u64 gva, u64 size);
 extern u64 g_vk_rt_readbacks;
 u64 vk_surf_flush_size(const Surf* s);
 void vk_surf_flush_record(Surf* s, VkBuffer buf, u64 at);
@@ -685,6 +696,11 @@ void vk_own_publish(u64 cpu, u64 size, VkOwnRes* r, u64 off);
    vk_lock */
 void vk_guest_read(u64 gva, u64 size, u8* host, VkBuffer buf, u64 at);
 void vk_cpu_read(u64 cpu, u64 size, u8* host, VkBuffer buf, u64 at);
+/* the same into device memory (buf, which the CPU doesn't map): 0 when staging has no room */
+int vk_guest_read_device(u64 gva, u64 size, VkBuffer buf, u64 at);
+/* guest bytes [gva, gva + size) into device memory as the GPU sees them: vk_guest_read_device, with the render targets
+   drawn over them (vk_rt_overlay). 0 when there is no room */
+int vk_guest_read_seen(u64 gva, u64 size, VkBuffer buf, u64 at);
 /* guest bytes [gva, gva + size) into dst for change detection, as gmem_read reads them, except that bytes the GPU
    holds come back as a pattern of their owner (which a new owner changes, and the CPU's own bytes replace once it
    touches them): nothing lands */
@@ -940,6 +956,9 @@ void vk_write_changed_runs(u64 addr, const u8* res, const u8* org, u32 size, VkC
 /* 1 if [host, host+len) was written since the write-tracking clock read `since`, 0 if not, -1 when write tracking
    can't tell (no host pointer, or not available): then check the contents */
 int vk_written_since(const u8* host, u64 len, u32 since);
+/* fn(user, at, n) for each run of [host, host + len) on pages written after since, at the range's byte offset at: for
+   a range vk_written_since(host, len, since) has just found written, so its pages are marked */
+void vk_written_runs(const u8* host, u64 len, u32 since, void (*fn)(void*, u64, u64), void* user);
 u32 vk_ww_now(void);
 void vk_ww_new_epoch(void); /* the CPU may have written what a GPU stream reads next: write tracking scans again */
 u32 vk_ww_epoch(void);
@@ -1052,6 +1071,8 @@ typedef struct {
     u32 samples;  /* the targets' VkSampleCountFlagBits (0 taken as 1) */
     /* with several samples, DsRasterKey's: the samples the sample mask leaves out, alpha to coverage and to one */
     u32 sample_off, alpha_to_coverage, alpha_to_one;
+    u32 sample_shading; /* every sample is shaded (sampleRateShading), with several samples */
+    u32 conservative;   /* DsRasterKey's (has_conservative): 0 off, else 1 plus the dilation in quarter pixels */
 } PipeKey;
 /* the pipeline for k, made when new and waited for while a worker makes it: NULL only when it can't be made */
 VkPipeline vk_pipeline_get(const PipeKey* k);

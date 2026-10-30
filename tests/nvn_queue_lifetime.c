@@ -24,13 +24,13 @@ static u8 memory[4096];
 u8* g_mem = memory;
 Settings g_settings;
 int g_renderer_up;
-struct NvnDraw { u32 owner, draws; };
 static struct {
     u32 used[32], current[32], promised[32], pending[32], npending;
     struct { void (*fn)(void*); void* arg; } jobs[64];
     u32 head, count, allocated, freed, draws, in_gpu, zero_strides;
 } fixture;
 
+void pm_init(PMutex* m) { (void)m; }
 void pm_lock(PMutex* m) { (void)m; }
 void pm_unlock(PMutex* m) { (void)m; }
 void logf_(int level, const char* fmt, ...) { (void)level; (void)fmt; }
@@ -89,23 +89,18 @@ static void stream_end(void) {
 }
 static const Renderer renderer = {.stream_incr = stream_incr, .stream_end = stream_end};
 const Renderer* g_renderer = &renderer;
-NvnDraw* nvn_draw_new(u32 owner) {
-    NvnDraw* d = calloc(1, sizeof *d);
-    assert(d);
-    d->owner = owner;
+void nvn_draw_init(NvnDraw* d, u32 owner) {
+    d->ds.owner = owner;
     fixture.allocated++;
-    return d;
 }
 void nvn_draw_free(NvnDraw* d) {
     assert(fixture.in_gpu && d);
     fixture.freed++;
-    free(d);
 }
 int nvn_draw_record(NvnDraw* d, u32 op, u64 payload, u32 size) {
     (void)payload; (void)size;
     assert(fixture.in_gpu && d);
     if (op != OP_DRAW) return 0;
-    d->draws++;
     fixture.draws++;
     return 1;
 }
