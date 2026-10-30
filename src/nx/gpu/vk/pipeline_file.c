@@ -12,7 +12,7 @@
 #if !defined(_WIN32)
 #include <unistd.h> /* getpid */
 #endif
-#if defined(__linux__)
+#if defined(__linux__) && !defined(__ANDROID__)
 #include <sys/mman.h> /* posix_madvise */
 #endif
 
@@ -452,7 +452,7 @@ void pf_open(PFile* pf, const char* path, const char* key, size_t guest, PfLoad*
             size = (size_t)view.size;
             length = (long)size;
             buf = view.data;
-#if defined(__linux__)
+#if defined(__linux__) && !defined(__ANDROID__)
             if (!view.heap && !view.borrowed && size >= (1u << 20))
                 (void)posix_madvise((void*)view.data, size, POSIX_MADV_SEQUENTIAL);
 #endif
