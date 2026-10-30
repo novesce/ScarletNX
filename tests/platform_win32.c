@@ -49,7 +49,9 @@ static void on_written(u8* p, u64 size) {
 }
 static u64 scan(void) {
     g_written = 0;
-    return plat_ww_scan(g_base, 64 * 4096, on_written) ? ~0ull : g_written;
+    int status = plat_ww_scan(g_base, 64 * 4096, on_written);
+    printf("write-watch scan: status=%d pages=%016llx\n", status, (unsigned long long)g_written);
+    return status ? ~0ull : g_written;
 }
 
 int main(int argc, char** argv) {
