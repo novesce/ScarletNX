@@ -31,7 +31,7 @@ PROTO = re.compile(r'NVNAPI\s+(\w+(?:\s*\*)?)\s+NVNAPIENTRY\s+(nvn\w+)\s*\(([^;{
 DEF = re.compile(r'(?m)^[ \t]*((?:(?:static|inline|extern|const|unsigned|signed|struct)\s+)*'
                  r'[A-Za-z_]\w*\s*\*?)\s+([A-Za-z_]\w*)\s*\(([^;{}]*)\)\s*\{')
 CALL = re.compile(r'\b([A-Za-z_]\w*)\s*\(')
-HOOK = re.compile(r'hook (nvn\w+)\(([^()]*)\)(?:\s*->\s*(\w+))?\s*=\s*(\w+)$')
+HOOK = re.compile(r'hook (nvn\w+)\(([^()]*)\)(?:\s*->\s*([^=]+?))?(?:\s*=\s*(\w+))?$')
 SKIP = {'if', 'for', 'while', 'switch', 'sizeof', 'return'}
 
 
@@ -41,6 +41,15 @@ def masked(text):
 
 def parameters(text):
     return [] if text.strip() in ('', 'void') else [p.strip() for p in text.split(',')]
+
+
+def registered_bindings(path):
+    bindings = {}
+    for line in path.read_text().splitlines():
+        m = HOOK.fullmatch(line.strip())
+        if m:
+            bindings[m[1]] = m[4] or 'nvn_' + m[1][3:]
+    return bindings
 
 
 def scan_file(task):
@@ -115,9 +124,12 @@ def abi_type(declaration, argument=False):
 
 def checked_binding(line, apis, functions):
     m = HOOK.fullmatch(line)
-    if not m or m[1] not in apis or m[4] not in functions:
+    if not m or m[1] not in apis:
         raise ValueError('binding needs a known API and an implemented handler: ' + line)
     name, args, ret, handler = m.groups()
+    handler = handler or 'nvn_' + name[3:]
+    if handler not in functions:
+        raise ValueError('binding needs a known API and an implemented handler: ' + line)
     args = parameters(args)
     if any(not re.fullmatch(r'(addr|bool|i32|u32|i64|u64|f32|f64) [A-Za-z_]\w*', a) for a in args):
         raise ValueError('invalid hook arguments: ' + line)
@@ -188,11 +200,7 @@ def main():
             functions.setdefault(fn['name'], []).append(fn)
     if not apis:
         p.error('no NVN API declarations found in --reference')
-    bindings = {}
-    for line in (a.runtime / 'src/nx/gpu/nvn/nvn.hook').read_text().splitlines():
-        m = HOOK.fullmatch(line.strip())
-        if m:
-            bindings[m[1]] = m[4]
+    bindings = registered_bindings(a.runtime / 'src/nx/gpu/nvn/nvn.hook')
     called, resolved, differences = set(), set(), []
     for log in a.log:
         for line in log.read_text(errors='replace').splitlines():

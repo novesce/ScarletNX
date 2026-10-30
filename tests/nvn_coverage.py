@@ -50,6 +50,23 @@ int nvn_DeviceIsExternalDebuggerAttached(CPU* c, u64 d) { return 0; }
                    'nvn_DeviceIsExternalDebuggerAttached')
         self.assertEqual(coverage.checked_binding(boolean, self.apis, self.functions), boolean)
 
+    def test_typed_hooks_and_implicit_handlers(self):
+        hook = Path(self.temp.name) / 'nvn.hook'
+        hook.write_text('''family device
+hook nvnDeviceGetTextureHandle(const NVNdevice* d, i32 texture, i32 sampler) -> u64
+hook nvnMemoryPoolGetMemory(const NVNmemoryPool* p) -> void*
+hook nvnDeviceFinalize(NVNdevice* d)
+hook nvnDeviceGetInteger(addr d, i32 item, addr out) = custom_get_integer
+''')
+        self.assertEqual(coverage.registered_bindings(hook), {
+            'nvnDeviceGetTextureHandle': 'nvn_DeviceGetTextureHandle',
+            'nvnMemoryPoolGetMemory': 'nvn_MemoryPoolGetMemory',
+            'nvnDeviceFinalize': 'nvn_DeviceFinalize',
+            'nvnDeviceGetInteger': 'custom_get_integer',
+        })
+        implicit = self.binding.split(' = ')[0]
+        self.assertEqual(coverage.checked_binding(implicit, self.apis, self.functions), implicit)
+
     def test_reject_width_sign_and_absent_handler(self):
         for bad in (self.binding.replace('-> u64', '-> i64'),
                     self.binding.replace('addr cb', 'u32 cb'),
