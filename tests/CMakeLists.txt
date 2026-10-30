@@ -1286,6 +1286,10 @@ snx_test_target(snx-test-jit-service 11)
 target_link_libraries(snx-test-jit-service PRIVATE snx_llvm Threads::Threads)
 add_test(NAME jit_service COMMAND snx-test-jit-service)
 set_tests_properties(jit_service PROPERTIES TIMEOUT 120)
+# Offline replay of captured executable images. It compiles code but never executes guest instructions.
+add_executable(snx-bench-jit-latency jit_latency.c)
+snx_test_target(snx-bench-jit-latency 11)
+target_link_libraries(snx-bench-jit-latency PRIVATE snx_llvm Threads::Threads)
 # longjmp across the loader's code, which on Windows unwinds through its registered function table
 add_executable(snx-test-code-loader-unwind code_loader_unwind.c)
 snx_test_target(snx-test-code-loader-unwind 11)
