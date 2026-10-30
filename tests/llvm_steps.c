@@ -162,7 +162,20 @@ int llvm_steps_load(LlvmSteps* s, char* error, size_t error_size) {
 #else
         path = snx_path_join(s->dir, "steps.so");
 #endif
-        if (snx_link(inputs, 2, exports, 1, "steps", &linked, error, error_size)) {
+        /* The embedded object belongs to the JIT loader: on Apple it is ELF with Darwin's calling convention.
+           A native module instead needs the helper bitcode compiled to its own object format, as AOT does. */
+        unsigned char* rtlib;
+        size_t rtlib_size;
+        if (snx_ir_rtlib_object(s->opt, &rtlib, &rtlib_size, error, error_size)) {
+            free(object);
+            free(path);
+            return -1;
+        }
+        inputs[0].data = rtlib;
+        inputs[0].size = rtlib_size;
+        int rc = snx_link(inputs, 2, exports, 1, "steps", &linked, error, error_size);
+        free(rtlib);
+        if (rc) {
             free(object);
             free(path);
             return -1;
