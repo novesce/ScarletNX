@@ -106,7 +106,7 @@ typedef struct {
     /* optional features that were enabled */
     VkPhysicalDeviceFeatures feat;
     int has_divisor;    /* VK_EXT_vertex_attribute_divisor: instance divisors above 1 */
-    int astc_bc7_could; /* the GPU samples BCn but not ASTC: astc_bc=1 would hold its ASTC textures as BC7 */
+    int astc_bc7_could; /* the GPU samples BCn but not ASTC: astc_mode=0 holds its ASTC textures as BC7 */
     /* VK_EXT_vertex_input_dynamic_state in effect (vertex_input.h's choice): each draw sets its vertex layout, which
        pipelines leave out of their keys */
     int vertex_input_dynamic;
@@ -1019,7 +1019,7 @@ int vk_astc_upload(VkCommandBuffer cb, Surf* t, u32 x, u32 y, u32 w, u32 h, u32 
 /* the image levels (or regions of them) uploaded as BC7 so far, their bytes, and the bytes they would have taken as
    RGBA8 */
 void vk_astc_stats(u64* levels, u64* bytes, u64* rgba8_bytes);
-/* the bytes of the ASTC textures decoded to RGBA8 so far (astc_bc off, or a GPU without BCn) */
+/* the bytes of the ASTC textures decoded to RGBA8 so far (astc_mode=1, or a GPU without BCn) */
 u64 vk_astc_rgba8_bytes(void);
 
 /* vic.c: the VIC composition as a compute shader, recorded in the frame's command buffer, its output planes
@@ -1313,6 +1313,17 @@ typedef int (*VkCbReader)(u32 idx, u32 off, u32* out);
 void vk_shader_read_code(u64 gva, u8* code, u32* len, VkCbReader read);
 u32* vk_translate_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, size_t* words, VkCbReader read,
                         VkCbReads* reads);
+/* A compute pipeline kept across runs in the pipeline file (pipeline_file.h's PF_CSPIPE). vk_pf_cspipe (pipeline.c):
+   one made this run, of key, launch (the block's threads x y z, its shared memory bytes, then the program's address
+   less 80, which a program of absolute branches is translated at: CsPipe's flow_base), the reads cbr its
+   translation made, nkey bytes of compute.c's variant key and ncode bytes of its program window. vk_cs_pipe_load
+   (compute.c), on the file's reading thread: one of an earlier run translated again with its reads and made, then put
+   where the dispatches find it; with record, kept in the file again too (a file of another build being rebuilt). 1
+   when it was made */
+void vk_pf_cspipe(u64 key, const u32 launch[5], const VkCbReads* cbr, const void* vkey, u32 nkey, const u8* code,
+                  u32 ncode);
+int vk_cs_pipe_load(const u32 launch[5], const u32* cbr, u32 ncbr, const u8* vkey, u32 nkey, const u8* code, u32 ncode,
+                    int record);
 /* why the device can't take the module: a capability it declares (Float64, Int64) whose feature is off, or NULL */
 const char* vk_spirv_unavailable(const u32* spv, size_t words);
 u64 vk_shader_hash(const u8* code, u32 max_bytes, u32* out_len, VkCbReader read); /* BRX tables through read */

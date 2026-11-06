@@ -1079,7 +1079,7 @@ static int tex_patch_pitch(Upload* u, const TexPieces* p) {
 /* the ASTC blocks of one level of one layer (lsz bytes at gva) that its bytes [a, b) lie in, decoded again a run of
    blocks of one row of blocks at a time, as level_patch_bl loads them: the layout of a surface that row high and that
    run wide, which astc_rows deswizzles. A run starts on a GOB, 4 ASTC blocks across, and is 8 << lbh block rows high
-   (or ends at the level's edge), so it holds whole the 4x4 blocks a texture held as BC7 (astc_bc) encodes from its
+   (or ends at the level's edge), so it holds whole the 4x4 blocks a texture held as BC7 (astc_mode=0) encodes from its
    texels, whatever the footprint: 4 and 8 blocks are whole multiples of lcm(4, bw) / bw and lcm(4, bh) / bh, which
    are 1, 2 or 4. Each BC7 block then takes the texels it takes in the whole level's upload, its neighbours' too */
 static int level_patch_astc(Upload* u, const UpLevel* lv, u64 gva, u64 lsz, u32 lbh, u32 lbd, u64 a, u64 b) {
