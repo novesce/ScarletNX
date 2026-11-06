@@ -21,7 +21,8 @@ static Definitions definitions(const u32* code, size_t words) {
         u32 op = code[at] & 0xffff, n = code[at] >> 16;
         if (!n || n > words - at) { free(d.defs); d.defs = NULL; return d; }
         if (op == 43 || op == 44 || op == 61 || op == 65 || op == 80 || op == 112 || op == 124 ||
-            op == 133 || op == 194 || op == 199 || op == 202 || op == 12)
+            op == 133 || op == 169 || op == 170 || op == 194 || op == 199 || op == 202 || op == 12 ||
+            (op >= 87 && op <= 90))
             if (n > 2 && code[at + 2] < d.bound) d.defs[code[at + 2]] = code + at;
     }
     return d;
@@ -33,6 +34,9 @@ static int scalar(const Definitions* d, u32 id, u32* value, u32 depth) {
     u32 a, b;
     if ((*op & 0xffff) == 43) { *value = op[3]; return 1; }
     if ((*op & 0xffff) == 124) return scalar(d, op[3], value, depth + 1);
+    if ((*op & 0xffff) == 170 && scalar(d, op[3], &a, depth + 1) && scalar(d, op[4], &b, depth + 1)) {
+        *value = a == b; return 1;
+    }
     if ((*op & 0xffff) == 112 && scalar(d, op[3], &a, depth + 1)) { *value = bits((float)a); return 1; }
     if ((*op & 0xffff) == 194 && scalar(d, op[3], &a, depth + 1) && scalar(d, op[4], &b, depth + 1)) {
         *value = a >> (b & 31); return 1;
@@ -86,10 +90,11 @@ static int module_ids(const u32* code, size_t words) {
         if (op == 55 || op == 57 || op == 61 || op == 62 || op == 65 || op == 245)
             for (u32 k = 1; k < width; k++)
                 if (!code[at + k] || code[at + k] >= code[3]) ok = 0;
-        if (op == 87 || op == 88) {
-            if (width < 5 || (op == 88 && width < 7)) ok = 0;
+        if (op >= 87 && op <= 90) {
+            u32 mask = op >= 89 ? 6 : 5;
+            if (width < mask || ((op == 88 || op == 90) && width < mask + 2)) ok = 0;
             for (u32 k = 1; k < width; k++)
-                if (k != 5 && (!code[at + k] || code[at + k] >= code[3])) ok = 0;
+                if (k != mask && (!code[at + k] || code[at + k] >= code[3])) ok = 0;
         }
         if (!ok) fprintf(stderr, "texture fixture invalid resource/math ID at word%zu opcode%u\n", at, op);
         at += width;
@@ -183,7 +188,7 @@ static int clamp_register_case(u32 type, u32 bindless, int stage, const char* di
    constant offset and unchanged coordinate/gradient operands, then follow every Phi through its real predecessor.
    This catches incorrect nested-merge labels as well as selector/offset bit-order mistakes. */
 static int dispatch_routes(const u32* code, size_t words, const Definitions* d, u32 count,
-                            u32 unknown, u32 fixed) {
+                            u32 unknown, u32 fixed, int regular) {
     size_t* labels = calloc(d->bound, sizeof *labels);
     if (!labels) return 0;
     size_t first = 0;
@@ -211,10 +216,12 @@ static int dispatch_routes(const u32* code, size_t words, const Definitions* d, 
                 if (!definition || (definition[0] & 0xffff) != 199 ||
                     !scalar(d, definition[4], &mask, 0)) { ok = 0; break; }
                 if (!raw) raw = definition[3];
-                if (raw != definition[3] || raw >= d->bound || !d->defs[raw] ||
-                    (d->defs[raw][0] & 0xffff) != 194) { ok = 0; break; }
-                u32 shift;
-                if (!scalar(d, d->defs[raw][4], &shift, 0) || shift != 16) { ok = 0; break; }
+                if (raw != definition[3] || raw >= d->bound || !d->defs[raw]) { ok = 0; break; }
+                if (!regular) {
+                    u32 shift;
+                    if ((d->defs[raw][0] & 0xffff) != 194 ||
+                        !scalar(d, d->defs[raw][4], &shift, 0) || shift != 16) { ok = 0; break; }
+                }
                 u32 label = instruction[2];
                 for (u32 k = 3; k < width; k += 2)
                     if (instruction[k] == (bits & mask)) label = instruction[k + 1];
@@ -224,19 +231,23 @@ static int dispatch_routes(const u32* code, size_t words, const Definitions* d, 
                 at = labels[label];
                 continue;
             }
-            if (op == 88) {
+            if (op == 88 || (regular && op == 90)) {
                 u32 expected[3] = {0};
                 for (u32 axis = 0; axis < count; axis++) {
                     u32 nibble = bits >> (4 * axis) & 15;
                     expected[axis] = nibble >= 8 ? nibble - 16 : nibble;
                 }
-                if (width != 9 || instruction[5] != 12 ||
-                    !vector(d, instruction[8], expected, count == 3 ? 3 : 2)) { ok = 0; break; }
+                u32 mask_at = op == 90 ? 6 : 5;
+                if (width != (regular ? mask_at + 3 : 9) || instruction[mask_at] != (regular ? 10u : 12u) ||
+                    !vector(d, instruction[regular ? mask_at + 2 : 8], expected, count == 3 ? 3 : 2)) {
+                    ok = 0; break;
+                }
                 /* Each leaf loads its own sampled-image SSA ID. Identity is the unchanged descriptor pointer,
                    not that new load's result ID. Coordinates and explicit gradients are shared SSA values. */
                 const u32* image = instruction[3] < d->bound ? d->defs[instruction[3]] : NULL;
                 if (!image || (image[0] & 0xffff) != 61 || image[0] >> 16 != 4) { ok = 0; break; }
-                const u32 sample_operands[5] = {instruction[1], image[3], instruction[4], instruction[6], instruction[7]};
+                const u32 sample_operands[5] = {instruction[1], image[3], instruction[4],
+                    instruction[regular ? mask_at + 1 : 6], regular ? (op == 90 ? instruction[5] : 0) : instruction[7]};
                 if (!operands[0]) memcpy(operands, sample_operands, sizeof operands);
                 if (memcmp(operands, sample_operands, sizeof operands)) { ok = 0; break; }
                 samples++;
@@ -308,7 +319,7 @@ static int varying_case(u32 ty, u32 bindless, const char* dir, u32 test) {
     u32 nodes = count == 3 ? 273 : count == 2 ? 17 : 1;
     ok = ok && switches == nodes && phis == nodes && samples == cases && !queries && !divisions &&
          functions == 1 && !calls && !dynamic_capability &&
-         words < 40u * cases + 4096 && dispatch_routes(code, words, &d, count, cases - 1, 0) &&
+         words < 40u * cases + 4096 && dispatch_routes(code, words, &d, count, cases - 1, 0, 0) &&
          save(dir, "txd-varying-offset", test, code, words);
     if (!ok) fprintf(stderr, "TXD varying test%u ty%u bindless%u samples%u/%u switches%u\n", test, ty, bindless,
                      samples, cases, switches);
@@ -367,7 +378,7 @@ static int partial_case(u32 test, const char* dir) {
     }
     ok = ok && samples == cases[test].cases && switches == nodes && phis == nodes &&
          (samples == 1 || dispatch_routes(code, words, &d, type == 4 ? 3 : type < 2 ? 1 : 2,
-                                         unknown, cases[test].fixed >> 16)) &&
+                                         unknown, cases[test].fixed >> 16, 0)) &&
          save(dir, "txd-partial-offset", test, code, words);
     if (!ok) fprintf(stderr, "TXD partial test%u samples%u expected%u switches%u\n", test, samples, cases[test].cases, switches);
     printf("TXD partial test%u samples%u bytes%zu\n", test, samples, words * 4);
@@ -459,6 +470,175 @@ static int native_case(u32 type, u32 bindless, int stage, u32 uniform, const cha
     free(code);
     return ok;
 }
+static u32 selected_sample(const Definitions* d, u32 id, u32 depth) {
+    if (depth > 128 || id >= d->bound || !d->defs[id]) return 0;
+    const u32* op = d->defs[id];
+    if ((op[0] & 0xffff) >= 87 && (op[0] & 0xffff) <= 90) return id;
+    u32 condition;
+    if ((op[0] & 0xffff) != 169 || !scalar(d, op[3], &condition, 0)) return 0;
+    return selected_sample(d, op[condition ? 4 : 5], depth + 1);
+}
+static struct { u32 packed, reads; int wrong; } g_ordinary_uniform;
+static int ordinary_offset_read(u32 bank, u32 offset, u32* value) {
+    g_ordinary_uniform.reads++;
+    if (bank != 3 || offset != 0x200) { g_ordinary_uniform.wrong = 1; return 0; }
+    *value = g_ordinary_uniform.packed;
+    return 1;
+}
+static int ordinary_uniform_case(const char* directory, u32 test) {
+    static const u32 values[] = {0x1f, 0x81, 0xf7};
+    const u64 operations[] = {mov(4, bits(.375f)), mov(5, bits(.375f)), mov(16, bits(1.5f)),
+        0x4c98078000070011ull | 3ull << 34 | 0x80ull << 20,
+        0xc038000000070008ull | 74ull << 36 | 3ull << 55 | 1ull << 54 | 1ull << 31 | 2ull << 28 | 16ull << 20 | 4ull << 8,
+        0xe30000000007000full};
+    g_shader_dynamic_texture_offsets = 0;
+    g_ordinary_uniform.packed = values[test];
+    g_ordinary_uniform.reads = 0; g_ordinary_uniform.wrong = 0;
+    g_shader_cb_read = ordinary_offset_read;
+    ShaderInfo info = {0}; size_t words = 0;
+    u32* code = translate(operations, sizeof operations / sizeof *operations, ST_CS, &info, &words);
+    g_shader_cb_read = NULL;
+    int ok = code && !info.unsupported && g_ordinary_uniform.reads == 1 && !g_ordinary_uniform.wrong;
+    Definitions d = code ? definitions(code, words) : (Definitions){0};
+    u32 samples = 0;
+    for (size_t at = 5; ok && d.defs && at < words; at += code[at] >> 16) {
+        u32 op = code[at] & 0xffff;
+        if (op == 251 || op == 103 || op == 136) ok = 0;
+        if (op == 88) {
+            u32 expected[2];
+            for (u32 axis = 0; axis < 2; axis++) {
+                u32 nibble = values[test] >> (4 * axis) & 15;
+                expected[axis] = nibble >= 8 ? nibble - 16 : nibble;
+            }
+            ok = code[at + 5] == 10 && vector(&d, code[at + 7], expected, 2);
+            samples++;
+        }
+    }
+    ok = ok && d.defs && samples == 1 && save(directory, "tex-uniform-offset", test, code, words);
+    if (!ok) fprintf(stderr, "ordinary uniform offset test%u reads%u wrong%d samples%u: %s\n",
+                     test, g_ordinary_uniform.reads, g_ordinary_uniform.wrong, samples, info.first_unsupported);
+    free(d.defs); free(code);
+    return ok;
+}
+/* Ordinary TEX packs offsets in the low nibbles of Rb after its optional LOD/bias and bindless handle.
+   This oracle separately checks every signed offset, the coordinate prefix, LOD/bias, depth reference and LC. */
+static int ordinary_case(u32 type, u32 bindless, u32 mode, int stage, int native, int shadow, int partial,
+                          int clamp, const char* directory, u32 test) {
+    u32 count = type < 2 ? 1 : type < 4 ? 2 : 3, dimensions = count == 1 ? 2 : count, array = type & 1;
+    u32 has_level = mode == 2 || mode == 3 || mode == 6 || mode == 7;
+    u32 source = 16 + bindless, offset_reg = source + has_level, coordinate = 4 + (array || clamp);
+    const float coordinates[3] = {.25f, .625f, .875f};
+    u64 operations[24];
+    u32 n = 0;
+    if (array || clamp) operations[n++] = mov(4, clamp ? 0x01800001 : 1);
+    for (u32 axis = 0; axis < count; axis++) operations[n++] = mov(coordinate + axis, bits(coordinates[axis]));
+    if (bindless) operations[n++] = 0x4c98078000070010ull | 2ull << 34 | 74ull << 20;
+    if (has_level) operations[n++] = mov(source, bits(1.25f));
+    operations[n++] = 0x4c98078000070000ull | 3ull << 34 | 0x80ull << 20 | offset_reg;
+    if (partial) {
+        operations[n++] = 0x0400000000070000ull | 15ull << 20 | (u64)offset_reg << 8 | offset_reg;
+        operations[n++] = 0x0420000000070000ull | 0x120ull << 20 | (u64)offset_reg << 8 | offset_reg;
+    }
+    if (shadow) operations[n++] = mov(offset_reg + 1, bits(.5f));
+    operations[n++] = (bindless ? 0xdeb8000000070008ull : 0xc038000000070008ull | 74ull << 36) |
+        (u64)mode << (bindless ? 37 : 55) | 1ull << (bindless ? 36 : 54) |
+        (u64)clamp << (bindless ? 40 : 58) | (u64)shadow << 50 | 1ull << 31 |
+        (u64)type << 28 | 16ull << 20 | 4ull << 8;
+    operations[n++] = 0xe30000000007000full;
+    ShaderInfo info = {0};
+    size_t words = 0;
+    g_shader_dynamic_texture_offsets = native;
+    g_native.reads = 0;
+    g_shader_cb_read = native ? native_offset_read : NULL;
+    u32* code = translate(operations, n, stage, &info, &words);
+    g_shader_cb_read = NULL;
+    if (!code || info.unsupported) {
+        fprintf(stderr, "ordinary TEX test%u type%u mode%u native%d: %s\n", test, type, mode, native, info.first_unsupported);
+        free(code); return 0;
+    }
+    Definitions d = definitions(code, words);
+    int explicit_lod = mode == 1 || mode == 3 || mode == 7 || stage != ST_FS;
+    u32 domain = (1u << (4 * count)) - 1, unknown = partial ? 15 : domain, fixed = partial ? 0x120 : 0;
+    u32 expected_samples = native ? 1 : partial ? 16 : domain + 1;
+    u32 samples = 0, switches = 0, selections = 0, queries = 0, divisions = 0, capability = 0, last_select = 0;
+    const u32* first_sample = NULL;
+    int ok = d.defs && !g_native.reads;
+    for (size_t at = 5; ok && at < words; at += code[at] >> 16) {
+        u32 op = code[at] & 0xffff;
+        if (op == 103) queries++;
+        if (op == 136) divisions++;
+        if (op == 251) switches++;
+        if (op == 169) { selections++; last_select = code[at + 2]; }
+        if (op == 17 && code[at + 1] == 25) capability++;
+        if (op < 87 || op > 90) continue;
+        const u32* sample = code + at;
+        u32 mask_at = shadow ? 6 : 5, offset_at = mask_at + 1 + (explicit_lod || has_level);
+        u32 expected_mask = (explicit_lod ? 2 : has_level ? 1 : 0) | (native ? 16 : 8) |
+            (clamp && !explicit_lod ? 128 : 0);
+        u32 expected_coordinates[4] = {bits(coordinates[0]), bits(count == 1 ? .5f : coordinates[1]), bits(coordinates[2]), 0};
+        if (array) expected_coordinates[dimensions] = bits(1);
+        ok = op == (explicit_lod ? 88u : 87u) + (shadow ? 2 : 0) && sample[mask_at] == expected_mask &&
+            vector(&d, sample[4], expected_coordinates, dimensions + array);
+        u32 value;
+        if (shadow) ok = ok && scalar(&d, sample[5], &value, 0) && value == bits(.5f);
+        if (explicit_lod || has_level)
+            ok = ok && scalar(&d, sample[mask_at + 1], &value, 0) && value == bits(clamp && explicit_lod ? 1.5f : has_level ? 1.25f : 0);
+        if (clamp && !explicit_lod)
+            ok = ok && scalar(&d, sample[offset_at + 1], &value, 0) && value == bits(1.5f);
+        if (!first_sample) first_sample = sample;
+        if (native) {
+            const u32* offset = sample[offset_at] < d.bound ? d.defs[sample[offset_at]] : NULL;
+            const u32* x = offset && offset[3] < d.bound ? d.defs[offset[3]] : NULL;
+            const u32* cast = x && x[3] < d.bound ? d.defs[x[3]] : NULL;
+            ok = ok && x && (x[0] & 0xffff) == 202 && cast && (cast[0] & 0xffff) == 124;
+            if (ok) d.input_id = cast[3];
+        } else {
+            u32 expected[3] = {0}, packed = fixed | samples;
+            for (u32 axis = 0; axis < count; axis++) {
+                u32 nibble = packed >> (4 * axis) & 15;
+                expected[axis] = nibble >= 8 ? nibble - 16 : nibble;
+            }
+            ok = ok && vector(&d, sample[offset_at], expected, dimensions);
+        }
+        samples++;
+    }
+    ok = ok && samples == expected_samples && !queries && !divisions && capability == (u32)native;
+    if (native && first_sample)
+        for (u32 packed = 0; ok && packed <= domain; packed++) {
+            d.input_value = 0xabc00000u | packed;
+            u32 expected[3] = {0}, offset_at = (shadow ? 6 : 5) + 1 + (explicit_lod || has_level);
+            for (u32 axis = 0; axis < count; axis++) {
+                u32 nibble = packed >> (4 * axis) & 15;
+                expected[axis] = nibble >= 8 ? nibble - 16 : nibble;
+            }
+            ok = vector(&d, first_sample[offset_at], expected, dimensions);
+        }
+    if (!native && explicit_lod)
+        ok = ok && !selections && dispatch_routes(code, words, &d, count, unknown, fixed, 1);
+    if (!native && !explicit_lod) {
+        ok = ok && !switches && selections == samples - 1;
+        /* All samples must precede the final branch-free selection; choose every leaf through the actual SSA. */
+        for (u32 id = 1; ok && id < d.bound; id++)
+            if (d.defs[id] && (d.defs[id][0] & 0xffff) == 199) d.input_id = d.defs[id][3];
+        for (u32 packed = 0; ok && packed <= unknown; packed++) {
+            d.input_value = packed | fixed;
+            u32 chosen = selected_sample(&d, last_select, 0);
+            const u32* sample = chosen < d.bound ? d.defs[chosen] : NULL;
+            u32 expected[3] = {0}, offset_at = (shadow ? 6 : 5) + 1 + has_level;
+            for (u32 axis = 0; axis < count; axis++) {
+                u32 nibble = (packed | fixed) >> (4 * axis) & 15;
+                expected[axis] = nibble >= 8 ? nibble - 16 : nibble;
+            }
+            ok = sample && vector(&d, sample[offset_at], expected, dimensions);
+        }
+    }
+    ok = ok && save(directory, native ? "tex-native-offset" : "tex-portable-offset", test, code, words);
+    if (!ok) fprintf(stderr, "ordinary TEX test%u type%u mode%u stage%d native%d shadow%d partial%d: samples%u/%u switches%u selects%u failed\n",
+                     test, type, mode, stage, native, shadow, partial, samples, expected_samples, switches, selections);
+    printf("TEX offset test%u native%d samples%u bytes%zu\n", test, native, samples, words * 4);
+    free(d.defs); free(code);
+    return ok;
+}
 int main(int argc, char** argv) {
     g_shader_dynamic_texture_offsets = 0;
     const char* dir = argc == 2 ? argv[1] : NULL;
@@ -516,8 +696,25 @@ int main(int argc, char** argv) {
                 if (!native_case(type, b, stage ? ST_CS : ST_FS, 0, dir, native_tests++)) return 1;
     for (u32 stage = 0; stage < 2; stage++)
         if (!native_case(2, 0, stage ? ST_CS : ST_FS, 1, dir, native_tests++)) return 1;
+    u32 ordinary_tests = 0;
+    const u32 ordinary_modes[] = {0, 1, 2, 3, 6, 7};
+    for (u32 native = 0; native < 2; native++)
+        for (u32 bindless = 0; bindless < 2; bindless++)
+            for (u32 type = 0; type <= 4; type++)
+                for (u32 stage = 0; stage < 2; stage++)
+                    if (!ordinary_case(type, bindless, stage ? 3 : 0, stage ? ST_CS : ST_FS, native, 0, 0, 0,
+                                       dir, ordinary_tests++)) return 1;
+    for (u32 native = 0; native < 2; native++)
+        for (u32 mode = 0; mode < sizeof ordinary_modes / sizeof *ordinary_modes; mode++)
+            if (!ordinary_case(3, 1, ordinary_modes[mode], ST_FS, native, 1, 0, 0, dir, ordinary_tests++)) return 1;
+    for (u32 native = 0; native < 2; native++) {
+        if (!ordinary_case(4, 0, 2, ST_FS, native, 0, 1, 0, dir, ordinary_tests++)) return 1;
+        if (!ordinary_case(3, 1, 2, ST_FS, native, 1, 0, 1, dir, ordinary_tests++)) return 1;
+    }
+    for (u32 test = 0; test < 3; test++)
+        if (!ordinary_uniform_case(dir, test)) return 1;
     g_shader_dynamic_texture_offsets = 0;
-    printf("PASS texture operand limits: %u LC modules,10 full/8 reduced fallback domains,%u native offset modules exact=1\n",
-           tests, native_tests);
+    printf("PASS texture operand limits: %u LC modules,10 full/8 reduced fallback domains,%u native TXD/%u ordinary TEX modules exact=1\n",
+           tests, native_tests, ordinary_tests);
     return 0;
 }

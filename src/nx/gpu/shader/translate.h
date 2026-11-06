@@ -239,8 +239,6 @@ int shader_direct_add_typed_slot(ShTex* textures, int* count, u32 off, u32 type,
 void shader_direct_swap_element(DirectCtx* c, int slot);
 u32 shader_texture_float_component(DirectCtx* c, u32 value, u32 scalar, u32 i32_type);
 u32 shader_pack_texture_halves(DirectCtx* c, u32 vec2, u32 first, u32 second);
-u32 shader_direct_offset_coords(DirectCtx* c, u32 coords, u32 offset, u32 coord_count, u32 offset_count, int slot,
-                                u32 level, u32 vec2, u32 vec3, u32 vec2_i32, u32 vec3_i32, u32 i32_type);
 u32 shader_direct_gather_offset(DirectCtx* c, u32 raw, u32 shift, int zero_y, u32 i32_type, u32 vec2_i32);
 void shader_texs_store(DirectCtx* c, u64 w, u32 sample, u32 scalar, int shadow, u32 i32_type, u32 vec2, u32 zero_f);
 /* emit_io.c */

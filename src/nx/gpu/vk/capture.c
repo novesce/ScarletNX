@@ -15,12 +15,24 @@ typedef struct {
     VkPipeline pipeline;
 } CapturePipeline;
 typedef struct {
+    VkCoverage coverage;
+    VkFormat format;
+    VkPipelineColorBlendAttachmentState blend;
+    u32 logic;
+} MixedKey;
+typedef struct { MixedKey key; VkPipeline pipeline; } MixedPipeline;
+typedef struct {
     VkCapture active;
     VkDescriptorSetLayout descriptors;
     VkPipelineLayout layout;
     VkPipeline finalize;
     CapturePipeline* pipelines;
     u32 count, capacity;
+    VkDescriptorSetLayout mixed_descriptors;
+    VkPipelineLayout mixed_layout;
+    VkShaderModule mixed_vertex;
+    MixedPipeline* mixed;
+    u32 mixed_count, mixed_capacity;
 } CaptureState;
 static CaptureState g_capture;
 
@@ -152,22 +164,24 @@ static int capture_image_make(Surf* image, const Surf* target, VkFormat format, 
     return 1;
 }
 
-VkCapture* vk_capture_get(Surf* target) {
-    if (!target || !target->img || target->f.depth || !target->storage_capable || target->depth3d > 1 ||
+static VkCapture* capture_get(Surf* target, u32 msaa, int mixed) {
+    if (!target || !target->img || target->f.depth || (!mixed && !target->storage_capable) || target->depth3d > 1 ||
         !target->layers || !target->sw || !target->sh || !g_vk.feat.shaderStorageImageReadWithoutFormat ||
         !g_vk.feat.shaderStorageImageWriteWithoutFormat ||
-        (target->msaa && !g_vk.feat.shaderStorageImageMultisample))
+        (msaa && !g_vk.feat.shaderStorageImageMultisample))
         return NULL;
+    Surf shape = *target;
+    shape.msaa = (u8)msaa;
     VkCapture* capture = &g_capture.active;
     Surf* source = &capture->source;
     if (!source->img || source->w != target->w || source->h != target->h || source->sw != target->sw ||
-        source->sh != target->sh || source->layers != target->layers || source->msaa != target->msaa) {
+        source->sh != target->sh || source->layers != target->layers || source->msaa != msaa) {
         vk_render_end();
         capture_image_drop(&capture->source, 1);
         capture_image_drop(&capture->valid, 1);
         capture_tiles_drop(capture, 1);
-        if (!capture_image_make(&capture->source, target, VK_FORMAT_R32G32B32A32_SFLOAT, 16) ||
-            !capture_image_make(&capture->valid, target, VK_FORMAT_R8G8B8A8_UNORM, 4)) {
+        if (!capture_image_make(&capture->source, &shape, VK_FORMAT_R32G32B32A32_SFLOAT, 16) ||
+            !capture_image_make(&capture->valid, &shape, VK_FORMAT_R8G8B8A8_UNORM, 4)) {
             capture_image_drop(&capture->source, 1);
             capture_image_drop(&capture->valid, 1);
             capture->target = NULL;
@@ -176,9 +190,17 @@ VkCapture* vk_capture_get(Surf* target) {
     }
     capture->target = target;
     capture->flags = target->layers > 1 ? SH_BLEND_ARRAY : 0;
-    if (target->msaa) capture->flags |= SH_BLEND_MULTISAMPLE | (u32)vk_surf_samples(target) << 8;
-    if (capture_tiles_make(capture, target)) capture->flags |= SH_CAPTURE_TILED;
+    if (msaa) capture->flags |= SH_BLEND_MULTISAMPLE | (u32)vk_surf_samples(&shape) << 8;
+    if (!mixed && capture_tiles_make(capture, target)) capture->flags |= SH_CAPTURE_TILED;
     return capture;
+}
+VkCapture* vk_capture_get(Surf* target) { return capture_get(target, target ? target->msaa : 0, 0); }
+VkCapture* vk_capture_get_mixed(Surf* target, u32 raster_samples) {
+    if (!target || target->msaa || target->layers != 1 || target->f.is_int || !g_vk_preserve_infnan ||
+        raster_samples < 2 || raster_samples > 16 || (raster_samples & (raster_samples - 1))) return NULL;
+    u32 msaa = raster_samples == 2 ? DS_MSAA_2X1 : raster_samples == 4 ? DS_MSAA_2X2
+                                                 : raster_samples == 8 ? DS_MSAA_4X2 : DS_MSAA_4X4;
+    return capture_get(target, msaa, 1);
 }
 int vk_capture_clear(VkCapture* capture) {
     if (!capture || !capture->valid.img) return 0;
@@ -365,10 +387,168 @@ int vk_capture_resolve(VkCapture* capture, u64 blend, u32 flags, int coverage) {
     vk_rt_drawn(target);
     return 1;
 }
+static int mixed_layout(void) {
+    if (g_capture.mixed_layout) return 1;
+    if (!g_capture.mixed_descriptors) {
+        VkDescriptorSetLayoutBinding bindings[2];
+        for (u32 i = 0; i < 2; i++)
+            bindings[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
+                                                         VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
+        VkDescriptorSetLayoutCreateInfo info = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .bindingCount = 2, .pBindings = bindings};
+        if (!VK_OK(vkCreateDescriptorSetLayout(g_vk.dev, &info, NULL, &g_capture.mixed_descriptors))) return 0;
+    }
+    VkPipelineLayoutCreateInfo info = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 1, .pSetLayouts = &g_capture.mixed_descriptors};
+    return VK_OK(vkCreatePipelineLayout(g_vk.dev, &info, NULL, &g_capture.mixed_layout));
+}
+static VkPipeline mixed_pipeline(const MixedKey* key) {
+    for (u32 i = 0; i < g_capture.mixed_count; i++)
+        if (!memcmp(&g_capture.mixed[i].key, key, sizeof *key)) return g_capture.mixed[i].pipeline;
+    if (!mixed_layout()) return VK_NULL_HANDLE;
+    if (g_capture.mixed_count == g_capture.mixed_capacity) {
+        u32 capacity = g_capture.mixed_capacity ? g_capture.mixed_capacity * 2 : 16;
+        size_t bytes = (size_t)capacity * sizeof *g_capture.mixed;
+        if (capacity < g_capture.mixed_capacity || bytes / sizeof *g_capture.mixed != capacity) return VK_NULL_HANDLE;
+        MixedPipeline* pipelines = realloc(g_capture.mixed, bytes);
+        if (!pipelines) return VK_NULL_HANDLE;
+        g_capture.mixed = pipelines;
+        g_capture.mixed_capacity = capacity;
+    }
+    size_t words;
+    if (!g_capture.mixed_vertex) {
+        u32* code = shader_coverage_vertex_spirv(&words);
+        if (!code) return VK_NULL_HANDLE;
+        g_capture.mixed_vertex = vk_module_spv(code, words);
+        free(code);
+        if (!g_capture.mixed_vertex) return VK_NULL_HANDLE;
+    }
+    u8 factors[16];
+    for (u32 covered = 1; covered <= key->coverage.raster_samples; covered++) {
+        int factor = vk_coverage_factor16(&key->coverage, 1, covered);
+        if (factor < 0) return VK_NULL_HANDLE;
+        factors[covered - 1] = (u8)factor;
+    }
+    u32* code = shader_coverage_fragment_spirv(key->coverage.raster_samples,
+        vk_coverage_components(key->coverage.mode), key->coverage.table_enable ? factors : NULL, &words);
+    if (!code) return VK_NULL_HANDLE;
+    VkShaderModule fragment = vk_module_spv(code, words);
+    free(code);
+    if (!fragment) return VK_NULL_HANDLE;
+    VkPipelineShaderStageCreateInfo stages[2] = {
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = g_capture.mixed_vertex, .pName = "main"},
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = fragment, .pName = "main"}};
+    VkPipelineVertexInputStateCreateInfo vertex = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo assembly = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
+    VkPipelineViewportStateCreateInfo viewport = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    VkPipelineRasterizationStateCreateInfo raster = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE, .lineWidth = 1};
+    VkPipelineMultisampleStateCreateInfo multisample = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
+    VkPipelineDepthStencilStateCreateInfo depth = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    VkPipelineColorBlendStateCreateInfo blend = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .logicOpEnable = key->logic != 0, .logicOp = key->logic ? (VkLogicOp)(key->logic - 1) : VK_LOGIC_OP_COPY,
+        .attachmentCount = 1, .pAttachments = &key->blend};
+    const VkDynamicState states[] = {VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT, VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT,
+                                    VK_DYNAMIC_STATE_BLEND_CONSTANTS};
+    VkPipelineDynamicStateCreateInfo dynamic = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .dynamicStateCount = 3, .pDynamicStates = states};
+    VkPipelineRenderingCreateInfo rendering = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .colorAttachmentCount = 1, .pColorAttachmentFormats = &key->format};
+    VkGraphicsPipelineCreateInfo info = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext = &rendering, .stageCount = 2, .pStages = stages, .pVertexInputState = &vertex,
+        .pInputAssemblyState = &assembly, .pViewportState = &viewport, .pRasterizationState = &raster,
+        .pMultisampleState = &multisample, .pDepthStencilState = &depth, .pColorBlendState = &blend,
+        .pDynamicState = &dynamic, .layout = g_capture.mixed_layout};
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkResult result = vkCreateGraphicsPipelines(g_vk.dev, VK_NULL_HANDLE, 1, &info, NULL, &pipeline);
+    vkDestroyShaderModule(g_vk.dev, fragment, NULL);
+    if (!VK_OK(result)) return VK_NULL_HANDLE;
+    g_capture.mixed[g_capture.mixed_count++] = (MixedPipeline){*key, pipeline};
+    return pipeline;
+}
+int vk_capture_mixed_resolve(VkCapture* capture, const VkCoverage* coverage, const DsState* state) {
+    if (!capture || !capture->target || !coverage || !state || !capture->source.img || !capture->valid.img) return 0;
+    Surf* target = capture->target;
+    if (target->msaa || target->f.depth || target->f.is_int || target->layers != 1 || target->depth3d > 1 ||
+        vk_coverage_ratio(coverage->raster_samples, 1) <= 1 || coverage->mode > 3 ||
+        (u32)vk_surf_samples(&capture->source) != coverage->raster_samples ||
+        (u32)vk_surf_samples(&capture->valid) != coverage->raster_samples ||
+        (state->blend.logic_op && !g_vk.feat.logicOp)) return 0;
+    const DsBlend* color = &state->blend;
+    if (color->en[0] && !color->logic_op &&
+        (color->sc[0] >= DS_FACTOR_SRC1_COLOR || color->dc[0] >= DS_FACTOR_SRC1_COLOR ||
+         color->sa[0] >= DS_FACTOR_SRC1_COLOR || color->da[0] >= DS_FACTOR_SRC1_COLOR)) return 0;
+    MixedKey key;
+    memset(&key, 0, sizeof key); /* includes native struct padding in the pipeline key */
+    key.coverage = *coverage;
+    key.format = state->tgt.srgb_write ? target->f.vk : vk_srgb_as(target->f.vk, 0);
+    key.blend = (VkPipelineColorBlendAttachmentState){.blendEnable = color->en[0],
+        .srcColorBlendFactor = (VkBlendFactor)color->sc[0], .dstColorBlendFactor = (VkBlendFactor)color->dc[0],
+        .colorBlendOp = (VkBlendOp)color->cop[0], .srcAlphaBlendFactor = (VkBlendFactor)color->sa[0],
+        .dstAlphaBlendFactor = (VkBlendFactor)color->da[0], .alphaBlendOp = (VkBlendOp)color->aop[0],
+        .colorWriteMask = color->mask[0] & 15};
+    key.logic = color->logic_op;
+    VkPipeline pipeline = mixed_pipeline(&key);
+    VkImageView attachment = vk_rt_attachment(target, state->tgt.srgb_write);
+    if (!pipeline || !attachment) return 0;
+    Surf* images[2] = {&capture->source, &capture->valid};
+    VkDescriptorImageInfo image_info[2];
+    for (u32 i = 0; i < 2; i++) {
+        VkImageView view = vk_tex_storage_view(images[i], VK_IMAGE_VIEW_TYPE_2D);
+        if (!view) return 0;
+        image_info[i] = (VkDescriptorImageInfo){VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL};
+    }
+    VkDescriptorSet set = vk_desc_alloc(g_capture.mixed_descriptors);
+    if (!set) return 0;
+    VkWriteDescriptorSet writes[2];
+    for (u32 i = 0; i < 2; i++)
+        writes[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set,
+            .dstBinding = i, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            .pImageInfo = &image_info[i]};
+    vkUpdateDescriptorSets(g_vk.dev, 2, writes, 0, NULL);
+    vk_render_end();
+    VkCommandBuffer command = vk_cmd();
+    for (u32 i = 0; i < 2; i++)
+        vk_surf_use(command, images[i], VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                    VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+    vk_surf_use(command, target, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+                                                        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+    VkRenderingAttachmentInfo color_attachment = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView = attachment, .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+    VkRenderingInfo rendering = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+        .renderArea = {{0, 0}, {target->sw, target->sh}}, .layerCount = 1,
+        .colorAttachmentCount = 1, .pColorAttachments = &color_attachment};
+    vk_render_forget_state();
+    rec_CmdBeginRendering(command, &rendering);
+    rec_CmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    rec_CmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, g_capture.mixed_layout, 0, 1, &set, 0, NULL);
+    VkViewport viewport = {0, 0, (float)target->sw, (float)target->sh, 0, 1};
+    VkRect2D scissor = {{0, 0}, {target->sw, target->sh}};
+    rec_CmdSetViewportWithCount(command, 1, &viewport);
+    rec_CmdSetScissorWithCount(command, 1, &scissor);
+    rec_CmdSetBlendConstants(command, state->dyn.blend_const);
+    rec_CmdDraw(command, 3, 1, 0, 0);
+    rec_CmdEndRendering(command);
+    vk_surf_wrote(target);
+    vk_rt_drawn(target);
+    return 1;
+}
 void vk_capture_destroy(void) {
     capture_image_drop(&g_capture.active.source, 0);
     capture_image_drop(&g_capture.active.valid, 0);
     capture_tiles_drop(&g_capture.active, 0);
+    for (u32 i = 0; i < g_capture.mixed_count; i++) vkDestroyPipeline(g_vk.dev, g_capture.mixed[i].pipeline, NULL);
+    free(g_capture.mixed);
+    if (g_capture.mixed_vertex) vkDestroyShaderModule(g_vk.dev, g_capture.mixed_vertex, NULL);
+    if (g_capture.mixed_layout) vkDestroyPipelineLayout(g_vk.dev, g_capture.mixed_layout, NULL);
+    if (g_capture.mixed_descriptors) vkDestroyDescriptorSetLayout(g_vk.dev, g_capture.mixed_descriptors, NULL);
     for (u32 i = 0; i < g_capture.count; i++) vkDestroyPipeline(g_vk.dev, g_capture.pipelines[i].pipeline, NULL);
     free(g_capture.pipelines);
     if (g_capture.finalize) vkDestroyPipeline(g_vk.dev, g_capture.finalize, NULL);

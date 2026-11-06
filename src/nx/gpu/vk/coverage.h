@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
    Copyright 2026 the ScarletNX contributors */
-/* NVN target-independent rasterization mapped to the native mixed-sample coverage path. The initial path has
-   color attachments only: the shared target ABI does not describe separate depth and color sample counts. */
+/* Color-only target-independent rasterization. The native path supports multiple color sample counts; a portable
+   path can reduce an ordered primitive's raster samples to one color sample when its source is sample invariant. */
 #ifndef SNX_VK_COVERAGE_H
 #define SNX_VK_COVERAGE_H
 #include "nx/gpu/draw_state.h"
@@ -61,5 +61,13 @@ static inline u32 vk_coverage_table(const VkCoverage* key, u32 color, float outp
         output[covered - 1] = (float)factor / 16.0f;
     }
     return (u32)ratio;
+}
+/* The first portable path captures one primitive into raster-sample attachments, then applies its reduced source
+   once with native color blending. The caller proves source invariance and rejects unsupported draw/stage state. */
+static inline int vk_coverage_portable_key(VkCoverage* key, const DrawCall* call, u32 color, u32 attachments,
+                                           int depth, int source_invariant, u32 raster_counts) {
+    memset(key, 0, sizeof *key);
+    if (color != 1 || attachments != 1 || depth || !source_invariant || call->raster_samples <= color) return 0;
+    return vk_coverage_key(key, call, color, attachments, depth, 1, raster_counts);
 }
 #endif

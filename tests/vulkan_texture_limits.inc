@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
    Copyright 2026 the ScarletNX contributors */
-/* Each mip, layer and spatial texel has an independent value. TXD's varying offset comes from a TID-addressed
-   constant-buffer table, so literal and fixed-uniform specialization cannot hide the runtime dispatch path. */
+/* Each mip, layer and spatial texel has an independent value. TEX/TXD varying offsets come from a TID-addressed
+   constant-buffer table, so literal and fixed-uniform specialization cannot hide the runtime path. */
 static u32 texture_limit_bits(float value) { u32 bits; memcpy(&bits, &value, 4); return bits; }
 static float texture_limit_value(u32 level, u32 layer, u32 x, u32 y, u32 z) {
     return (float)(100000 * layer + 10000 * level + 1024 * z + 32 * y + x);
@@ -98,22 +98,38 @@ static int check_txd_varying_offsets(void) {
         for (u32 k = 0; k < invocations; k++) packed[k] = (count == 3 ? volume_offsets[k] : k) << 16 | (array ? k & 1 : 0);
         CHECK(!storage_write_words(offsets + 0x200, packed, invocations));
         qmd[QMD_BLOCK_DIM_X] = invocations << 16;
-        for (u32 bindless = 0; bindless < 2; bindless++)
+        for (u32 ordinary = 0; ordinary < 2; ordinary++)
+          for (u32 bindless = 0; bindless < 2; bindless++)
             for (u32 level = 0; level < 3; level++) {
                 u64 ops[32];
                 u32 n = 0;
+                CHECK(!storage_write_words(samplers + 4,
+                    (const u32[1]){1u | 1u << 4 | (ordinary ? 3u : 2u) << 6}, 1));
                 ops[n++] = 0xf0c8000002170000ull; /* TID.X supplies the per-invocation table address and output X. */
                 ops[n++] = 0x3848000000270002ull; /* SHL R2,R0,2 */
                 ops[n++] = storage_mov(1, 0);
-                if (bindless) ops[n++] = 0x4c98078000070003ull | 2ull << 34 | 74ull << 20;
-                for (u32 axis = 0; axis < count; axis++) ops[n++] = storage_mov(4 + axis, 0x3ec00000);
-                ops[n++] = 0xef94000000070000ull | 3ull << 36 | 0x200ull << 20 | 2ull << 8 | (4 + count);
-                for (u32 k = 0; k < 2 * count; k++)
-                    ops[n++] = storage_mov(8 + k, k ? 0 : texture_limit_bits((float)(1u << level) / 16));
                 u32 type = kind == 0 ? 0 : kind == 3 ? 4 : array ? 3 : 2;
-                ops[n++] = (bindless ? 0xde40000000000000ull : 0xde00000000000000ull | 74ull << 36) |
-                           7ull << 51 | 1ull << 35 | 1ull << 31 | (u64)type << 28 | 8ull << 20 |
-                           7ull << 16 | (u64)(bindless ? 3 : 4) << 8 | 20;
+                if (ordinary) {
+                    if (bindless) ops[n++] = 0x4c98078000070010ull | 2ull << 34 | 74ull << 20;
+                    ops[n++] = 0xef94000000070012ull | 3ull << 36 | 0x200ull << 20 | 2ull << 8;
+                    if (array) ops[n++] = 0x0400000000070004ull | 1ull << 20 | 18ull << 8;
+                    for (u32 axis = 0; axis < count; axis++) ops[n++] = storage_mov(4 + array + axis, 0x3ec00000);
+                    ops[n++] = storage_mov(16 + bindless, texture_limit_bits((float)level + .5f));
+                    /* TEX offsets use the low nibbles after the explicit LOD, unlike TXD's high-half packing. */
+                    ops[n++] = 0x3828000000070000ull | 16ull << 20 | 18ull << 8 | (17 + bindless);
+                    ops[n++] = (bindless ? 0xdeb8000000000000ull : 0xc038000000000000ull | 74ull << 36) |
+                        3ull << (bindless ? 37 : 55) | 1ull << (bindless ? 36 : 54) | 1ull << 31 |
+                        (u64)type << 28 | 16ull << 20 | 7ull << 16 | 4ull << 8 | 20;
+                } else {
+                    if (bindless) ops[n++] = 0x4c98078000070003ull | 2ull << 34 | 74ull << 20;
+                    for (u32 axis = 0; axis < count; axis++) ops[n++] = storage_mov(4 + axis, 0x3ec00000);
+                    ops[n++] = 0xef94000000070000ull | 3ull << 36 | 0x200ull << 20 | 2ull << 8 | (4 + count);
+                    for (u32 k = 0; k < 2 * count; k++)
+                        ops[n++] = storage_mov(8 + k, k ? 0 : texture_limit_bits((float)(1u << level) / 16));
+                    ops[n++] = (bindless ? 0xde40000000000000ull : 0xde00000000000000ull | 74ull << 36) |
+                               7ull << 51 | 1ull << 35 | 1ull << 31 | (u64)type << 28 | 8ull << 20 |
+                               7ull << 16 | (u64)(bindless ? 3 : 4) << 8 | 20;
+                }
                 ops[n++] = 0xeb20000000070014ull | 3ull << 33 | 1ull << 20 | 1ull << 51 | 75ull << 36;
                 ops[n++] = 0xe30000000007000full;
                 u8 code[512] = {0};
@@ -122,9 +138,12 @@ static int check_txd_varying_offsets(void) {
                     if (!(k % 3)) snx_st_le64(code + 8 * at++, 0x001f8000fc0007e0ull);
                     snx_st_le64(code + 8 * at++, ops[k]);
                 }
-                u64 address = gpu + 0x180000 + (kind * 6 + bindless * 3 + level) * 0x200;
+                u64 address = gpu + 0x180000 + (ordinary * 24 + kind * 6 + bindless * 3 + level) * 0x200;
                 CHECK(!gmem_write(address, code, sizeof code));
                 g_renderer->method_barrier(5);
+                u32 untouched[256];
+                for (u32 k = 0; k < 256; k++) untouched[k] = 0xdeadbeef;
+                CHECK(!storage_write_words(output, untouched, 256));
                 u64 before = g_vk_dispatches;
                 vk_lock();
                 DispatchState dispatch;
@@ -134,23 +153,31 @@ static int check_txd_varying_offsets(void) {
                 vk_unlock();
                 CHECK(g_vk_dispatches == before + 1);
                 u8 actual[1024];
-                CHECK(!gmem_read(output, actual, invocations * 4));
-                for (u32 k = 0; k < invocations; k++) {
+                CHECK(!gmem_read(output, actual, sizeof actual));
+                for (u32 k = 0; k < 256; k++) {
+                    if (k >= invocations) { CHECK(snx_ld_le32(actual + k * 4) == untouched[k]); continue; }
                     u32 offset = packed[k] >> 16;
                     u32 x = (u32)texture_limit_axis(level, offset & 15);
                     u32 y = count >= 2 ? (u32)texture_limit_axis(level, offset >> 4 & 15) : 0;
                     u32 z = count == 3 ? (u32)texture_limit_axis(level, offset >> 8 & 15) : 0;
-                    u32 expected = texture_limit_bits(texture_limit_value(level, array ? k & 1 : 0, x, y, z));
+                    float value = texture_limit_value(level, array ? k & 1 : 0, x, y, z);
+                    if (ordinary) {
+                        x = (u32)texture_limit_axis(level + 1, offset & 15);
+                        y = count >= 2 ? (u32)texture_limit_axis(level + 1, offset >> 4 & 15) : 0;
+                        z = count == 3 ? (u32)texture_limit_axis(level + 1, offset >> 8 & 15) : 0;
+                        value = .5f * (value + texture_limit_value(level + 1, array ? k & 1 : 0, x, y, z));
+                    }
+                    u32 expected = texture_limit_bits(value);
                     if (snx_ld_le32(actual + k * 4) != expected)
-                        fprintf(stderr, "TXD varying kind%u bindless%u mip%u word%08x: %08x expected%08x\n", kind,
-                                bindless, level, packed[k], snx_ld_le32(actual + k * 4), expected);
+                        fprintf(stderr, "%s varying kind%u bindless%u mip%u word%08x: %08x expected%08x\n",
+                                ordinary ? "TEX" : "TXD", kind, bindless, level, packed[k], snx_ld_le32(actual + k * 4), expected);
                     CHECK(snx_ld_le32(actual + k * 4) == expected);
                     checks++;
                 }
             }
     }
     free(channel);
-    printf("PASS TXD varying offsets: %u bound/bindless1D/2D/array/3D samples, signed domains and selected mips exact=1\n", checks);
+    printf("PASS TEX/TXD varying offsets: %u bound/bindless1D/2D/array/3D samples, signed domains and fractional mips exact=1\n", checks);
     return 0;
 }
 
@@ -202,7 +229,8 @@ static int check_texture_min_lod(void) {
         u32 tic[8];
         CHECK(nvn_tic_encode(&texture, NULL, 0, 0, tic));
         CHECK(!storage_write_words(pool, tic, 8));
-        for (u32 bindless = 0; bindless < 2; bindless++)
+        for (u32 with_offset = 0; with_offset < 2; with_offset++)
+          for (u32 bindless = 0; bindless < 2; bindless++)
             for (u32 bias = 0; bias < 2; bias++) {
                 u64 ops[16];
                 u32 count = 0;
@@ -214,17 +242,23 @@ static int check_texture_min_lod(void) {
                 ops[count++] = storage_mov(6, 0x3ec00000);
                 if (bindless) ops[count++] = 0x4c98078000070010ull | 2ull << 34 | 74ull << 20;
                 if (bias) ops[count++] = storage_mov(16 + bindless, 0x3fa00000);
+                if (with_offset) ops[count++] = 0x4c98078000070000ull | 3ull << 34 | 0x84ull << 20 |
+                    (16 + bindless + bias);
                 ops[count++] = (bindless ? 0xdeb8000000000000ull : 0xc038000000000000ull | 74ull << 36) |
                                7ull << 51 | 1ull << (bindless ? 40 : 58) | (bias ? 2ull << (bindless ? 37 : 55) : 0) |
+                               (u64)with_offset << (bindless ? 36 : 54) |
                                1ull << 31 | (u64)(array ? 3 : 2) << 28 | 16ull << 20 | 7ull << 16 | 4ull << 8;
                 ops[count++] = 0xe30000000007000full;
-                u32 program = 0x1000 + (array * 4 + bindless * 2 + bias) * 0x200;
+                u32 program = 0x1000 + (array * 8 + with_offset * 4 + bindless * 2 + bias) * 0x200;
                 CHECK(mesh_program(gpu + program, ops, count, 1));
                 g_renderer->method_barrier(5);
                 r[0x851] = program;
                 for (u32 test = 0; test < sizeof clamp_values / sizeof *clamp_values; test++) {
                     u32 packed = clamp_values[test] << 16 | (array ? 1u : 0x4321u);
+                    const u32 offset_values[] = {0, 0x1f, 0x81, 0xf7, 0x78};
+                    u32 offset = with_offset ? offset_values[test] : 0;
                     CHECK(!storage_write_words(clamp_buffer + 0x200, &packed, 1));
+                    CHECK(!storage_write_words(clamp_buffer + 0x210, &offset, 1));
                     vk_lock();
                     rt_clear_format(channel, target, 4, 4, 0, 0, 0xc0);
                     channel->r3d_dirty = ~0u;
@@ -251,17 +285,20 @@ static int check_texture_min_lod(void) {
                     vk_readback_ready();
                     u32 low = clamp_values[test] >> 8, high = low < 4 ? low + 1 : 4;
                     float fraction = (float)(clamp_values[test] & 255) / 256;
-                    u32 lo_coord = (16u >> low) * 3 / 8, hi_coord = (16u >> high) * 3 / 8;
-                    float lo = texture_limit_value(low, array, lo_coord, lo_coord, 0);
-                    float hi = texture_limit_value(high, array, hi_coord, hi_coord, 0);
+                    u32 lo_x = (u32)texture_limit_axis(low, offset & 15);
+                    u32 lo_y = (u32)texture_limit_axis(low, offset >> 4 & 15);
+                    u32 hi_x = (u32)texture_limit_axis(high, offset & 15);
+                    u32 hi_y = (u32)texture_limit_axis(high, offset >> 4 & 15);
+                    float lo = texture_limit_value(low, array, lo_x, lo_y, 0);
+                    float hi = texture_limit_value(high, array, hi_x, hi_y, 0);
                     float expected[4] = {lo + (hi - lo) * fraction, 0, 0, 1};
                     for (u32 pixel = 0; pixel < 16; pixel++)
                         for (u32 component = 0; component < 4; component++) {
                             float value;
                             memcpy(&value, actual + pixel * 16 + component * 4, 4);
                             if (fabsf(value - expected[component]) > 0.01f)
-                                fprintf(stderr, "TEX LC array%u bindless%u bias%u clamp%u pixel%u component%u: %g expected%g\n",
-                                        array, bindless, bias, clamp_values[test], pixel, component, value, expected[component]);
+                                fprintf(stderr, "TEX LC array%u bindless%u bias%u clamp%u offset%#x pixel%u component%u: %g expected%g\n",
+                                        array, bindless, bias, clamp_values[test], offset, pixel, component, value, expected[component]);
                             CHECK(fabsf(value - expected[component]) <= 0.01f);
                         }
                     vk_unlock();
@@ -270,6 +307,6 @@ static int check_texture_min_lod(void) {
             }
     }
     free(channel);
-    printf("PASS TEX minimum LOD: %u native fragment2D/array bound/bindless fractional/bias draws exact=1\n", checks);
+    printf("PASS TEX minimum LOD: %u fragment2D/array bound/bindless fractional/bias/offset draws exact=1\n", checks);
     return 0;
 }

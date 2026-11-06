@@ -233,35 +233,6 @@ u32 shader_pack_texture_halves(DirectCtx* c, u32 vec2, u32 first, u32 second) {
     return shader_pack_half_rte(c, spv_emit_vec2_construct(&c->emit, vec2, first, second));
 }
 
-/* Sampling with a register offset uses normalized coordinates because SPIR-V requires a constant sample Offset. */
-u32 shader_direct_offset_coords(DirectCtx* c, u32 coords, u32 offset, u32 coord_count, u32 offset_count, int slot,
-                                u32 level, u32 vec2, u32 vec3, u32 vec2_i32, u32 vec3_i32, u32 i32_type) {
-    u32 size = spv_emit_image_query_size_lod(&c->emit, coord_count == 3 ? vec3_i32 : vec2_i32, c->sampled_type[slot],
-                                             c->sampler[slot], level);
-    if (c->depth_sampler && c->swapped == (u32)slot + 1) {
-        u32 depth_size = spv_emit_image_query_size_lod(&c->emit, coord_count == 3 ? vec3_i32 : vec2_i32, c->depth_type,
-                                                       c->depth_sampler, level);
-        size = spv_emit_select(&c->emit, coord_count == 3 ? vec3_i32 : vec2_i32, shader_indexed_is_depth(c, slot),
-                               depth_size, size);
-    }
-    u32 moved[4];
-    for (u32 k = 0; k < coord_count; k++) {
-        u32 coord = spv_emit_vec4_extract(&c->emit, c->f32_type, coords, k);
-        if (k >= offset_count) {
-            moved[k] = coord;
-            continue;
-        }
-        u32 delta = spv_emit_vec4_extract(&c->emit, i32_type, offset, k);
-        u32 extent = spv_emit_vec4_extract(&c->emit, i32_type, size, k);
-        moved[k] =
-            spv_emit_fadd(&c->emit, c->f32_type, coord,
-                          spv_emit_fdiv(&c->emit, c->f32_type, spv_emit_convert_s_to_f(&c->emit, c->f32_type, delta),
-                                        spv_emit_convert_s_to_f(&c->emit, c->f32_type, extent)));
-    }
-    return coord_count == 3 ? spv_emit_vec3_construct(&c->emit, vec3, moved[0], moved[1], moved[2])
-                            : spv_emit_vec2_construct(&c->emit, vec2, moved[0], moved[1]);
-}
-
 /* Gather AOFFI stores signed six-bit x/y offsets in the low bits of two consecutive bytes. */
 u32 shader_direct_gather_offset(DirectCtx* c, u32 raw, u32 shift, int zero_y, u32 i32_type, u32 vec2_i32) {
     u32 bits = spv_emit_bitcast(&c->emit, i32_type, raw);
@@ -309,16 +280,36 @@ typedef struct {
     DirectCtx* c;
     u32 result_type, i32_type, offset_type, sampled_type, sampler;
     u32 coords, dx, dy, count, levels, mask[3], selector[3];
-} GradientOffsetTree;
-/* At most16 successors and16 Phi inputs per selection. A flat4096-input merge makes some drivers spend
+    u32 regular, mode, level, depth_reference, min_lod;
+} TextureOffsetTree;
+static u32 texture_offset_sample(const TextureOffsetTree* tree, u32 offset, int dynamic) {
+    DirectCtx* c = tree->c;
+    return tree->regular
+        ? spv_emit_sample_image_min_lod(&c->emit, tree->result_type, tree->sampled_type, tree->sampler,
+            tree->coords, tree->depth_reference, tree->mode, tree->level, offset, dynamic, tree->min_lod)
+        : spv_emit_sample_grad_offset(&c->emit, tree->result_type, tree->sampled_type, tree->sampler,
+            tree->coords, tree->dx, tree->dy, offset, dynamic, tree->min_lod);
+}
+static u32 texture_offset_leaf(const TextureOffsetTree* tree, u32 value) {
+    DirectCtx* c = tree->c;
+    u32 o[3];
+    for (u32 axis = 0; axis < 3; axis++) {
+        u32 nibble = axis < tree->count ? value >> (4 * axis) & 15 : 0;
+        o[axis] = spv_emit_constant_u32(&c->emit, tree->i32_type, nibble >= 8 ? nibble - 16 : nibble);
+    }
+    u32 offset = tree->count == 3 ? spv_emit_constant_vec3(&c->emit, tree->offset_type, o[0], o[1], o[2])
+                                  : spv_emit_constant_vec2(&c->emit, tree->offset_type, o[0], o[1]);
+    return texture_offset_sample(tree, offset, 0);
+}
+/* Explicit samples have at most16 successors and16 Phi inputs per selection. A flat4096-input merge makes some drivers spend
    gigabytes constructing liveness/SSA state. The high-bit selections contain lower-bit selections, so the leaf
-   enumeration and its exact ConstOffset samples stay unchanged. Only one leaf executes for each invocation. */
-static u32 texture_gradient_offset_select(const GradientOffsetTree* tree, u32 level, u32 value, u32* last_label) {
+   enumeration and its exact ConstOffset samples stay unchanged. Only one explicit leaf executes per invocation. */
+static u32 texture_offset_select(const TextureOffsetTree* tree, u32 level, u32 value, u32* last_label) {
     DirectCtx* c = tree->c;
     u32 mask = tree->mask[level], cases = 1u << snx_popcount64(mask);
     u32 labels[16], literals[15], incoming[32];
     for (u32 k = 0; k < cases; k++) {
-        labels[k] = spv_emit_id(&c->emit);
+        if (!tree->regular || tree->mode == 1) labels[k] = spv_emit_id(&c->emit);
         if (k) {
             /* Retain sparse selector positions: no per-invocation bit compression is needed. */
             u32 number = k, subset = 0;
@@ -328,6 +319,21 @@ static u32 texture_gradient_offset_select(const GradientOffsetTree* tree, u32 le
         }
     }
     u32 result_type = tree->result_type;
+    if (tree->regular && tree->mode != 1) {
+        /* Implicit derivatives must not enter offset-dependent control flow. Evaluate the finite constant-offset
+           domain in the original block, then select its result. Bias, filtering and minimum LOD stay native. */
+        u32 result = 0;
+        for (u32 k = 0; k < cases; k++) {
+            u32 subset = k ? literals[k - 1] : 0;
+            u32 sample = level + 1 < tree->levels
+                ? texture_offset_select(tree, level + 1, value | subset, last_label)
+                : texture_offset_leaf(tree, value | subset);
+            result = k ? spv_emit_select(&c->emit, result_type,
+                spv_emit_i_equal(&c->emit, c->bool_type, tree->selector[level],
+                    spv_emit_constant_u32(&c->emit, c->u32_type, subset)), sample, result) : sample;
+        }
+        return result;
+    }
     u32 merge = spv_emit_id(&c->emit);
     /* DontFlatten is a hint: keep the exact offset selection as control flow instead of speculating thousands
        of native samples. Correctness is unchanged on implementations which ignore it. */
@@ -338,18 +344,8 @@ static u32 texture_gradient_offset_select(const GradientOffsetTree* tree, u32 le
         spv_emit_label(&c->emit, labels[k]);
         u32 offset_bits = value | (k ? literals[k - 1] : 0), predecessor = labels[k], sample;
         if (level + 1 < tree->levels)
-            sample = texture_gradient_offset_select(tree, level + 1, offset_bits, &predecessor);
-        else {
-            u32 o[3];
-            for (u32 axis = 0; axis < 3; axis++) {
-                u32 nibble = axis < tree->count ? offset_bits >> (4 * axis) & 15 : 0;
-                o[axis] = spv_emit_constant_u32(&c->emit, tree->i32_type, nibble >= 8 ? nibble - 16 : nibble);
-            }
-            u32 offset = tree->count == 3 ? spv_emit_constant_vec3(&c->emit, tree->offset_type, o[0], o[1], o[2])
-                                          : spv_emit_constant_vec2(&c->emit, tree->offset_type, o[0], o[1]);
-            sample = spv_emit_sample_grad(&c->emit, result_type, tree->sampled_type,
-                tree->sampler, tree->coords, tree->dx, tree->dy, offset);
-        }
+            sample = texture_offset_select(tree, level + 1, offset_bits, &predecessor);
+        else sample = texture_offset_leaf(tree, offset_bits);
         incoming[2 * k] = sample;
         incoming[2 * k + 1] = predecessor;
         spv_emit_branch(&c->emit, merge);
@@ -358,31 +354,35 @@ static u32 texture_gradient_offset_select(const GradientOffsetTree* tree, u32 le
     *last_label = merge;
     return spv_emit_op(&c->emit, SPV_OP_PHI, result_type, incoming, 2 * cases);
 }
-/* Maxwell TXD packs signed4-bit texel offsets. Native Grad samples preserve filtering, wrap and anisotropy;
+/* Maxwell packs signed4-bit texel offsets. Native samples preserve filtering, wrap and anisotropy;
    moving normalized coordinates by a base-level texel cannot replace an offset at the sampled mip level. */
-static u32 texture_gradient_offset(const Tr* t, int slot, u32 coords, u32 dx, u32 dy, u32 packed, u32 count,
-                                    u32 known, u32 value) {
-    DirectCtx* c = t->c;
-    GradientOffsetTree tree = {.c = c, .coords = coords, .dx = dx, .dy = dy, .count = count,
-        .result_type = t->texture_vec4[slot], .i32_type = t->i32_type,
-        .offset_type = count == 3 ? t->vec3_i32 : t->vec2_i32,
-        .sampled_type = c->sampled_type[slot], .sampler = c->sampler[slot]};
-    u32 unknown = ((1u << (4 * count)) - 1) & ~known, groups[3] = {0};
-    for (u32 bit = 0, used = 0; bit < 4 * count; bit++) {
+static u32 texture_offset_dispatch(TextureOffsetTree tree, u32 packed, u32 shift, u32 known, u32 value) {
+    DirectCtx* c = tree.c;
+    u32 unknown = ((1u << (4 * tree.count)) - 1) & ~known, groups[3] = {0};
+    if (!unknown) return texture_offset_leaf(&tree, value);
+    for (u32 bit = 0, used = 0; bit < 4 * tree.count; bit++) {
         if (!(unknown & (1u << bit))) continue;
         groups[used / 4] |= 1u << bit;
         used++;
         tree.levels = (used + 3) / 4;
     }
-    u32 raw = spv_emit_shift_right_u32(&c->emit, c->u32_type, packed,
-                                        spv_emit_constant_u32(&c->emit, c->u32_type, 16));
+    u32 raw = shift ? spv_emit_shift_right_u32(&c->emit, c->u32_type, packed,
+                                        spv_emit_constant_u32(&c->emit, c->u32_type, shift)) : packed;
     for (u32 level = 0; level < tree.levels; level++) {
         tree.mask[level] = groups[tree.levels - level - 1];
         tree.selector[level] = spv_emit_bitwise_and_u32(&c->emit, c->u32_type, raw,
             spv_emit_constant_u32(&c->emit, c->u32_type, tree.mask[level]));
     }
-    u32 last_label;
-    return texture_gradient_offset_select(&tree, 0, value, &last_label);
+    u32 last_label = 0;
+    return texture_offset_select(&tree, 0, value, &last_label);
+}
+static u32 texture_gradient_offset(const Tr* t, int slot, u32 coords, u32 dx, u32 dy, u32 packed, u32 count,
+                                    u32 known, u32 value) {
+    TextureOffsetTree tree = {.c = t->c, .coords = coords, .dx = dx, .dy = dy, .count = count,
+        .result_type = t->texture_vec4[slot], .i32_type = t->i32_type,
+        .offset_type = count == 3 ? t->vec3_i32 : t->vec2_i32,
+        .sampled_type = t->c->sampled_type[slot], .sampler = t->c->sampler[slot]};
+    return texture_offset_dispatch(tree, packed, 16, known, value);
 }
 /* the texture and surface instructions */
 void emit_texture(const Tr* t, u32 i, u64 w, int op, u32 d, u32 a, u32 b) {
@@ -690,50 +690,43 @@ void emit_texture(const Tr* t, u32 i, u64 w, int op, u32 d, u32 a, u32 b) {
                         : spv_emit_vec2_construct(&c->emit, vec2, x, y);
         u32 level = mode == 1 ? zero_f : has_level ? reg_read_as(c, source, c->f32_type) : 0;
         u32 dref = shadow ? reg_read_as(c, offset_source + offset_enabled, c->f32_type) : 0;
-        u32 offset = 0;
+        u32 offset = 0, varying_offset = 0, offset_known = 0, offset_value = 0;
+        u32 offset_count = type == 0 ? 1 : type == 2 ? 3 : 2;
         int dynamic_offset = 0;
         if (offset_enabled) {
-            u32 packed = 0;
+            u32 packed = 0, domain = (1u << (4 * offset_count)) - 1;
             int known = shader_direct_track_const(insn, n, i, offset_source, &packed, 0);
-            u32 bits;
-            dynamic_offset = !known;
-            bits = known ? 0 : reg_read(c, offset_source);
-            if (!known) bits = spv_emit_bitcast(&c->emit, i32_type, bits);
-            u32 ox = known ? spv_emit_constant_u32(&c->emit, i32_type, (u32)((i32)(packed << 28) >> 28))
-                           : spv_emit_bitfield_sextract(&c->emit, i32_type, bits,
-                                                        spv_emit_constant_u32(&c->emit, c->u32_type, 0),
-                                                        spv_emit_constant_u32(&c->emit, c->u32_type, 4));
-            u32 oy = known ? spv_emit_constant_u32(&c->emit, i32_type, (u32)((i32)(packed << 24) >> 28))
-                           : spv_emit_bitfield_sextract(&c->emit, i32_type, bits,
-                                                        spv_emit_constant_u32(&c->emit, c->u32_type, 4),
-                                                        spv_emit_constant_u32(&c->emit, c->u32_type, 4));
-            if (type == 2) {
-                u32 oz = known ? spv_emit_constant_u32(&c->emit, i32_type, (u32)((i32)(packed << 20) >> 28))
-                               : spv_emit_bitfield_sextract(&c->emit, i32_type, bits,
-                                                            spv_emit_constant_u32(&c->emit, c->u32_type, 8),
-                                                            spv_emit_constant_u32(&c->emit, c->u32_type, 4));
-                offset = known ? spv_emit_constant_vec3(&c->emit, vec3_i32, ox, oy, oz)
-                               : spv_emit_vec3_construct(&c->emit, vec3_i32, ox, oy, oz);
-            } else {
-                if (type == 0) oy = spv_emit_constant_u32(&c->emit, i32_type, 0);
-                offset = known ? spv_emit_constant_vec2(&c->emit, vec2_i32, ox, oy)
-                               : spv_emit_vec2_construct(&c->emit, vec2_i32, ox, oy);
+            if (!known && !g_shader_dynamic_texture_offsets && g_shader_cb_read) {
+                u32 offset_bank, offset_word;
+                if (shader_direct_track_cbuf_word(insn, n, i, offset_source, &offset_bank, &offset_word, 0))
+                    known = g_shader_cb_read(offset_bank, offset_word * 4, &packed);
             }
-        }
-        /* Vulkan takes a non-constant Offset on gathers only: a sample moves its coordinates instead, by the
-           offset over the level's size (1D textures are 2D images one texel high, their y offset 0) */
-        if (dynamic_offset) {
-            u32 moved = type == 2 ? 3 : 2, components = moved + (u32)array;
-            /* Bias is not a mip level. Explicit negative levels query the base level. */
-            u32 size_level = mode == 3 || mode == 7 ? level : zero_f;
-            size_level =
-                spv_emit_select(&c->emit, c->f32_type, spv_emit_fcompare(&c->emit, c->bool_type, 6, size_level, zero_f),
-                                size_level, zero_f);
-            u32 lod_index = spv_emit_convert_f_to_s(&c->emit, i32_type, size_level);
-            coords = shader_direct_offset_coords(c, coords, offset, components, moved, slot, lod_index, vec2, vec3,
-                                                 vec2_i32, vec3_i32, i32_type);
-            offset = 0;
-            dynamic_offset = 0;
+            if (!known) {
+                shader_direct_track_known_bits(insn, n, i, offset_source, &offset_known, &offset_value, 0);
+                offset_known &= domain;
+                offset_value &= offset_known;
+                known = offset_known == domain;
+                if (known) packed = offset_value;
+            }
+            if (!known) varying_offset = reg_read(c, offset_source);
+            if (known || g_shader_dynamic_texture_offsets) {
+                u32 o[3], signed_bits = known ? 0 : spv_emit_bitcast(&c->emit, i32_type, varying_offset);
+                for (u32 axis = 0; axis < 3; axis++) {
+                    u32 nibble = packed >> (4 * axis) & 15;
+                    o[axis] = axis >= offset_count ? spv_emit_constant_u32(&c->emit, i32_type, 0)
+                        : known ? spv_emit_constant_u32(&c->emit, i32_type, nibble >= 8 ? nibble - 16 : nibble)
+                        : spv_emit_bitfield_sextract(&c->emit, i32_type, signed_bits,
+                            spv_emit_constant_u32(&c->emit, c->u32_type, 4 * axis),
+                            spv_emit_constant_u32(&c->emit, c->u32_type, 4));
+                }
+                offset = offset_count == 3
+                    ? known ? spv_emit_constant_vec3(&c->emit, vec3_i32, o[0], o[1], o[2])
+                            : spv_emit_vec3_construct(&c->emit, vec3_i32, o[0], o[1], o[2])
+                    : known ? spv_emit_constant_vec2(&c->emit, vec2_i32, o[0], o[1])
+                            : spv_emit_vec2_construct(&c->emit, vec2_i32, o[0], o[1]);
+                dynamic_offset = !known;
+                varying_offset = 0;
+            }
         }
         /* outside the fragment stage there are no derivatives: LOD 0, or the bias as the level */
         u32 sample_mode = mode == 1 || mode == 3 || mode == 7 || stage != ST_FS ? 1 : mode == 2 || mode == 6 ? 2 : 0;
@@ -745,21 +738,23 @@ void emit_texture(const Tr* t, u32 i, u64 w, int op, u32 d, u32 a, u32 b) {
         /* a depth compare of a color texture samples it plainly and compares its first component here */
         int indexed_dc = dref && shadow && (textures[slot].flags & SNX_TEX_INDEXED);
         int dc_func = indexed_dc ? 3 : dref ? shader_dc_color_func(si, slot) : -1;
-        u32 sample =
-            dc_func < 0
-                ? spv_emit_sample_image_min_lod(&c->emit, shadow ? c->f32_type : texture_vec4[slot], c->sampled_type[slot],
-                                                c->sampler[slot], coords, dref, sample_mode, level, offset,
-                                                dynamic_offset, min_lod)
-                : (indexed_dc ? shader_dc_compare_indexed : shader_dc_compare)(
-                      c, indexed_dc ? slot : dc_func, dref,
-                      spv_emit_vec4_extract(&c->emit, c->f32_type,
-                                            spv_emit_sample_image_min_lod(&c->emit, texture_vec4[slot], c->sampled_type[slot],
-                                                                          c->sampler[slot], coords, 0, sample_mode,
-                                                                          level, offset, dynamic_offset, min_lod),
-                                            0));
+        TextureOffsetTree sampling = {.c = c, .regular = 1, .mode = sample_mode, .level = level,
+            .result_type = dc_func < 0 && shadow ? c->f32_type : texture_vec4[slot],
+            .i32_type = i32_type, .offset_type = offset_count == 3 ? vec3_i32 : vec2_i32,
+            .sampled_type = c->sampled_type[slot], .sampler = c->sampler[slot], .coords = coords,
+            .depth_reference = dc_func < 0 ? dref : 0, .min_lod = min_lod, .count = offset_count};
+        u32 sample = varying_offset ? texture_offset_dispatch(sampling, varying_offset, 0, offset_known, offset_value)
+                                    : texture_offset_sample(&sampling, offset, dynamic_offset);
+        if (dc_func >= 0)
+            sample = (indexed_dc ? shader_dc_compare_indexed : shader_dc_compare)(c, indexed_dc ? slot : dc_func,
+                        dref, spv_emit_vec4_extract(&c->emit, c->f32_type, sample, 0));
         if (indexed_dc) {
-            u32 depth = spv_emit_sample_image_min_lod(&c->emit, c->f32_type, c->depth_type, c->depth_sampler, coords,
-                                                      dref, sample_mode, level, offset, dynamic_offset, min_lod);
+            sampling.result_type = c->f32_type;
+            sampling.sampled_type = c->depth_type;
+            sampling.sampler = c->depth_sampler;
+            sampling.depth_reference = dref;
+            u32 depth = varying_offset ? texture_offset_dispatch(sampling, varying_offset, 0, offset_known, offset_value)
+                                       : texture_offset_sample(&sampling, offset, dynamic_offset);
             sample = spv_emit_select(&c->emit, c->f32_type, shader_indexed_is_depth(c, slot), depth, sample);
         }
         u32 mask = B(w, 31, 4), dst = d;

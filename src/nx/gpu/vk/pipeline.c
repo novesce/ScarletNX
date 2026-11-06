@@ -976,7 +976,7 @@ static VkPipeline pipe_create(const Pipe* e) {
         .pNext = k->coverage_to_color ? (void*)&to_color : k->sample_locations.samples ? (void*)&locations
                                                                                  : k->coverage.raster_samples ? (void*)&coverage : NULL,
         .rasterizationSamples = raster_samples ? (VkSampleCountFlagBits)raster_samples : VK_SAMPLE_COUNT_1_BIT,
-        .pSampleMask = raster_samples > 1 ? &sample_mask : NULL,
+        .pSampleMask = &sample_mask,
         .sampleShadingEnable = k->sample_shading != 0,
         .minSampleShading = k->sample_shading ? 1.0f : 0.0f,
         .alphaToCoverageEnable = k->alpha_to_coverage != 0,
@@ -1763,6 +1763,7 @@ static void pf_key(char* out, size_t n, size_t* guest) {
                   (u32)g_vk.has_descriptor_heap_support,
                   (u32)g_vk.has_descriptor_buffers,
                   (u32)g_shader_dynamic_texture_offsets,
+                  g_vk.feat13.maintenance4,
                   (u32)g_vk.vertex_input_dynamic};
     /* the last word, dynamic vertex input, only where it is on: its keys hold no vertex layout (PipeKey.vi), and the
        files of every device without it keep the key they have */

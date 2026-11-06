@@ -180,6 +180,30 @@ static const u8 op_family[O__COUNT] = {
     [O_TMML] = FAM_TEXTURE,     [O_TMML_B] = FAM_TEXTURE, [O_TXD] = FAM_TEXTURE,     [O_TXD_B] = FAM_TEXTURE,
     [O_SULD] = FAM_TEXTURE,     [O_SUST] = FAM_TEXTURE,   [O_SURED] = FAM_TEXTURE,   [O_SUATOM] = FAM_TEXTURE};
 
+/* A conservative source-invariance proof for portable coverage reduction. Only these pure register, uniform
+   constant and control operations may contribute to the source color. In particular, FSWZADD, PIXLD, input loads,
+   clocks, subgroup operations, derivatives, texture reads and memory accesses do not inherit this property from
+   their instruction family. New instructions remain unproven until explicitly reviewed here. */
+static const u8 mixed_invariant_ops[O__COUNT] = {
+    [O_NOP] = 1, [O_EXIT] = 1, [O_MOV_R] = 1, [O_MOV_C] = 1, [O_MOV_I] = 1, [O_MOV32I] = 1,
+    [O_FADD_R] = 1, [O_FADD_C] = 1, [O_FADD_I] = 1, [O_FADD32I] = 1,
+    [O_FMUL_R] = 1, [O_FMUL_C] = 1, [O_FMUL_I] = 1, [O_FMUL32I] = 1,
+    [O_FFMA_R] = 1, [O_FFMA_RC] = 1, [O_FFMA_CR] = 1, [O_FFMA_I] = 1, [O_FFMA32I] = 1,
+    [O_FMNMX_R] = 1, [O_FMNMX_C] = 1, [O_FMNMX_I] = 1,
+    [O_FSET_R] = 1, [O_FSET_C] = 1, [O_FSET_I] = 1,
+    [O_FSETP_R] = 1, [O_FSETP_C] = 1, [O_FSETP_I] = 1,
+    [O_F2F_R] = 1, [O_F2F_C] = 1, [O_F2F_I] = 1,
+    [O_F2I_R] = 1, [O_F2I_C] = 1, [O_F2I_I] = 1,
+    [O_I2F_R] = 1, [O_I2F_C] = 1, [O_I2F_I] = 1,
+    [O_I2I_R] = 1, [O_I2I_C] = 1, [O_I2I_I] = 1,
+    [O_IADD_R] = 1, [O_IADD_C] = 1, [O_IADD_I] = 1, [O_IADD32I] = 1,
+    [O_IMUL_R] = 1, [O_IMUL_C] = 1, [O_IMUL_I] = 1, [O_IMUL32I] = 1,
+    [O_LOP_R] = 1, [O_LOP_C] = 1, [O_LOP_I] = 1, [O_LOP32I] = 1,
+    [O_LOP3_R] = 1, [O_LOP3_C] = 1, [O_LOP3_I] = 1,
+    [O_LDC] = 1, [O_BRA] = 1, [O_SSY] = 1, [O_SYNC] = 1, [O_PBK] = 1, [O_BRK] = 1,
+    [O_PCNT] = 1, [O_CONT] = 1, [O_CAL] = 1, [O_RET] = 1, [O_PRET] = 1, [O_PEXIT] = 1, [O_KIL] = 1,
+};
+
 static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, ShaderInfo* si, size_t* word_count,
                      int can_flush, int can_preserve, int can_preserve_f64, int can_subgroup, u32 legacy_fs) {
     u32 clip;
@@ -267,10 +291,11 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
         if (sph[19] & 1u) used[out_reg] = 1;
         if (sph[19] & 2u) used[out_reg + 1] = 1;
     }
-    int has_exit = 0;
+    int has_exit = 0, mixed_sample_invariant = stage == ST_FS;
     for (u32 i = 11; i < n; i++) {
         if (!IDX_OK(i)) continue;
         const Op* op = decode(insn[i]);
+        if (!op || !mixed_invariant_ops[op->id]) mixed_sample_invariant = 0;
         if (!op || !shader_supported(insn[i], op->id) || !shader_stage_has(insn[i], op->id, stage)) {
             if (op && op->id == O_TEXS)
                 snprintf(si->first_unsupported, sizeof si->first_unsupported, "TEXS encoding %u, fp32 %u",
@@ -1097,11 +1122,6 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
             u32 offset_source = source + has_level;
             u32 off, bank, bank2, off2, indexed = 0, ldc = 0;
             int handle_count;
-            if (offset_enabled) {
-                u32 packed;
-                int known = shader_direct_track_const(insn, n, i, offset_source, &packed, 0);
-                if (!known) needs_image_query = 1; /* the offset moves the coordinates by the texture's size */
-            }
             off = B(insn[i], 36, 13);
             bank = 0;
             bank2 = 0;
@@ -2705,6 +2725,9 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
         if (inputs_used[i]) next.in_mask |= 1u << i;
         if (outputs_used[i]) next.out_mask |= 1u << i;
     }
+    next.mixed_sample_invariant = mixed_sample_invariant && !next.in_mask && !needs_fragcoord && !needs_sample_id &&
+                                  !texture_count && !ngbuf && !image_info.nimg && !(sph[19] & 3u) &&
+                                  !si->advanced_blend && !si->advanced_blend_mask && !si->coverage_to_color;
     if (indexed_store) next.out_mask = ~0u;
     memcpy(next.sph, sph, sizeof sph);
     if (si->coverage_to_color) next.sph[18] |= 15u << ((si->coverage_to_color - 1) * 4);
@@ -2716,6 +2739,7 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
     u64* copy;
     const u64* insn;
     u32* r;
+    if (si) si->mixed_sample_invariant = 0;
     if (!code) return NULL;
     insn = shader_words(code, max_bytes, &copy);
     if (!insn) return NULL;

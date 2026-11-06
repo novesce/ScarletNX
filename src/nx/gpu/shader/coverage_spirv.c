@@ -114,3 +114,102 @@ uint32_t* shader_coverage_resolve_spirv(uint32_t flags, int signed_target, size_
     spv_emit_destroy(&e);
     return code;
 }
+
+uint32_t* shader_coverage_vertex_spirv(size_t* words) {
+    SpvEmitter e;
+    spv_emit_init(&e, 512);
+    spv_emit_shader_capability(&e);
+    uint32_t f = spv_emit_type_f32(&e), u = spv_emit_type_u32(&e), vec4 = spv_emit_type_vec4(&e, f);
+    uint32_t vertex = spv_emit_builtin_input_u32(&e, u, 42), position = spv_emit_position_output(&e, vec4);
+    uint32_t interfaces[] = {vertex, position};
+    uint32_t function = spv_emit_function(&e, 0, spv_emit_type_void(&e), NULL, 0, NULL);
+    uint32_t index = spv_emit_load(&e, u, vertex), one = spv_emit_constant_u32(&e, u, 1);
+    uint32_t x = spv_emit_bitwise_and_u32(&e, u, index, one);
+    uint32_t y = spv_emit_shift_right_u32(&e, u, index, one);
+    uint32_t output[4];
+    for (uint32_t axis = 0; axis < 2; axis++) {
+        uint32_t value = spv_emit_convert_u_to_f(&e, f, axis ? y : x);
+        output[axis] = spv_emit_fadd(&e, f,
+            spv_emit_fmul(&e, f, value, spv_emit_constant_f32(&e, f, 4)), spv_emit_constant_f32(&e, f, -1));
+    }
+    output[2] = spv_emit_constant_f32(&e, f, 0);
+    output[3] = spv_emit_constant_f32(&e, f, 1);
+    spv_emit_store(&e, position, spv_emit_vec4_construct(&e, vec4, output));
+    spv_emit_return(&e);
+    spv_emit_function_end(&e);
+    spv_emit_entry_str(&e, SPV_STAGE_VERTEX, function, "main", interfaces, 2);
+    uint32_t* code = spv_emit_finish(&e, words);
+    spv_emit_destroy(&e);
+    return code;
+}
+uint32_t* shader_coverage_fragment_spirv(uint32_t samples, uint32_t components, const uint8_t* factor16,
+                                        size_t* words) {
+    *words = 0;
+    if (samples < 2 || samples > 16 || (samples & (samples - 1)) || components > 15) return NULL;
+    if (factor16)
+        for (uint32_t i = 0; i < samples; i++) if (factor16[i] > 16) return NULL;
+    SpvEmitter e;
+    spv_emit_init(&e, 4096);
+    spv_emit_shader_capability(&e);
+    spv_emit_capability(&e, 27); /* StorageImageMultisample */
+    spv_emit_capability(&e, 55); /* StorageImageReadWithoutFormat */
+    uint32_t f = spv_emit_type_f32(&e), u = spv_emit_type_u32(&e), b = spv_emit_type_bool(&e);
+    uint32_t vec4 = spv_emit_type_vec4(&e, f), coord_type = spv_emit_type_vec2(&e, u);
+    uint32_t image_type = spv_emit_type_image(&e, f, SPV_DIM_2D, 0, 0, 1, 2, 0);
+    uint32_t source_variable = spv_emit_resource(&e, SPV_STORAGE_UNIFORM_CONSTANT, image_type, 0, 0);
+    uint32_t valid_variable = spv_emit_resource(&e, SPV_STORAGE_UNIFORM_CONSTANT, image_type, 0, 1);
+    spv_emit_decorate(&e, source_variable, SPV_DECORATION_NON_WRITABLE, NULL, 0);
+    spv_emit_decorate(&e, valid_variable, SPV_DECORATION_NON_WRITABLE, NULL, 0);
+    uint32_t fragcoord = spv_emit_fragcoord_input(&e, vec4), output = spv_emit_output_vec4(&e, vec4, 0);
+    uint32_t interfaces[] = {source_variable, valid_variable, fragcoord, output};
+    uint32_t function = spv_emit_function(&e, 0, spv_emit_type_void(&e), NULL, 0, NULL);
+    uint32_t xyzw = spv_emit_load(&e, vec4, fragcoord), xy[2];
+    for (uint32_t axis = 0; axis < 2; axis++)
+        xy[axis] = spv_emit_convert_f_to_u(&e, u, spv_emit_vec4_extract(&e, f, xyzw, axis));
+    uint32_t coordinate = SPV(&e, SPV_OP_COMPOSITE_CONSTRUCT, coord_type, xy[0], xy[1]);
+    uint32_t source = spv_emit_load(&e, image_type, source_variable), valid = spv_emit_load(&e, image_type, valid_variable);
+    uint32_t zero = spv_emit_constant_u32(&e, u, 0), one = spv_emit_constant_u32(&e, u, 1);
+    uint32_t zero_f = spv_emit_constant_f32(&e, f, 0), count = zero, chosen[4] = {zero_f, zero_f, zero_f, zero_f};
+    for (uint32_t sample = 0; sample < samples; sample++) {
+        uint32_t index = spv_emit_constant_u32(&e, u, sample);
+        uint32_t validity = SPV(&e, SPV_OP_IMAGE_READ, vec4, valid, coordinate, 64, index);
+        uint32_t red = spv_emit_vec4_extract(&e, f, validity, 0);
+        uint32_t covered = spv_emit_bool_not(&e, b, SPV(&e, SPV_OP_F_ORD_EQUAL, b, red, zero_f));
+        uint32_t first = SPV(&e, SPV_OP_LOGICAL_AND, b, covered, spv_emit_i_equal(&e, b, count, zero));
+        uint32_t color = SPV(&e, SPV_OP_IMAGE_READ, vec4, source, coordinate, 64, index);
+        for (uint32_t component = 0; component < 4; component++)
+            chosen[component] = spv_emit_select(&e, f, first, spv_emit_vec4_extract(&e, f, color, component), chosen[component]);
+        count = spv_emit_iadd_u32(&e, u, count, spv_emit_select(&e, u, covered, one, zero));
+    }
+    uint32_t discard = spv_emit_id(&e), apply = spv_emit_id(&e);
+    uint32_t empty = spv_emit_i_equal(&e, b, count, zero);
+    spv_emit_selection_merge(&e, apply);
+    spv_emit_branch_conditional(&e, empty, discard, apply);
+    spv_emit_label(&e, discard);
+    spv_emit_kill(&e);
+    spv_emit_label(&e, apply);
+    if (components) {
+        uint32_t factor;
+        if (factor16) {
+            factor = zero_f;
+            for (uint32_t covered = 1; covered <= samples; covered++) {
+                uint32_t match = spv_emit_i_equal(&e, b, count, spv_emit_constant_u32(&e, u, covered));
+                factor = spv_emit_select(&e, f, match,
+                    spv_emit_constant_f32(&e, f, (float)factor16[covered - 1] / 16.0f), factor);
+            }
+        } else
+            factor = spv_emit_fmul(&e, f, spv_emit_convert_u_to_f(&e, f, count),
+                                      spv_emit_constant_f32(&e, f, 1.0f / (float)samples));
+        for (uint32_t component = 0; component < 4; component++)
+            if (components & (1u << component)) chosen[component] = spv_emit_fmul(&e, f, chosen[component], factor);
+    }
+    spv_emit_store(&e, output, spv_emit_vec4_construct(&e, vec4, chosen));
+    spv_emit_return(&e);
+    spv_emit_function_end(&e);
+    spv_emit_entry_str(&e, SPV_STAGE_FRAGMENT, function, "main", interfaces, 4);
+    spv_emit_fragment_origin_upper_left(&e, function);
+    spv_emit_float_controls(&e, function, 0, 1, 0);
+    uint32_t* code = spv_emit_finish(&e, words);
+    spv_emit_destroy(&e);
+    return code;
+}

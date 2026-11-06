@@ -58,8 +58,12 @@ class DescriptorPatternTest(unittest.TestCase):
                        image_hits=max(0, 4096 * elements - 1), arena_allocated_bytes=4 << 20,
                        cache_allocated_bytes=4096, peak_used_bytes=1024, workload_buffer_bytes=8192)
         if backend == 2:
+            lookups = 4096 * (images + (2 if indexed == 1 else 512 if indexed else 0))
+            replicas = 4096 * elements - lookups
+            row.update(image_hits=max(0, lookups - 1), image_replicas=replicas, heap_image_lookups=lookups)
             row.update(heap_sampler_requests=4096 * elements, heap_sampler_driver_calls=int(bool(elements)),
-                       heap_sampler_hits=max(0, 4096 * elements - 1), heap_table_bytes=144 * 4096,
+                       heap_sampler_lookups=lookups, heap_sampler_replicas=replicas,
+                       heap_sampler_hits=max(0, lookups - 1), heap_table_bytes=144 * 4096,
                        heap_resource_range_bytes=2 << 20, heap_sampler_range_bytes=131072, heap_reserved_bytes=97280)
         row.update(changes)
         return row
@@ -96,6 +100,8 @@ class DescriptorPatternTest(unittest.TestCase):
     def test_counter_types_counts_and_memory_are_checked(self):
         for changes in ({'buffer_hits': -1}, {'arena_bytes': True}, {'heap_table_bytes': 1.5},
                         {'buffer_requests': 32767}, {'buffer_driver_calls': 32769}, {'image_requests': 1},
+                        {'buffer_hits': 32759}, {'image_hits': 1}, {'heap_image_lookups': 1},
+                        {'heap_sampler_lookups': True}, {'heap_sampler_replicas': 1},
                         {'heap_sampler_requests': 1}, {'arena_allocated_bytes': 1}, {'cache_allocated_bytes': 0},
                         {'heap_sampler_range_bytes': 0}, {'heap_reserved_bytes': 1 << 30}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
@@ -107,6 +113,42 @@ class DescriptorPatternTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             pattern_measurements(self.text(self.pair(images=8, indexed=16, image_requests=4096 * 24)),
                                  4096, 8, 2, 1, 8, 16)
+
+    def test_identical_indexed_runs_keep_all_requests_but_resolve_once_per_run(self):
+        rows = pattern_measurements(self.text(self.pair(indexed=1)), 4096, 8, 2, 1, 0, 1)
+        self.assertEqual(rows[0]['image_requests'], 4096 * 512)
+        self.assertEqual(rows[0]['heap_sampler_requests'], 4096 * 512)
+        self.assertEqual(rows[0]['heap_image_lookups'], 4096 * 2)
+        self.assertEqual(rows[0]['heap_sampler_lookups'], 4096 * 2)
+        self.assertEqual(rows[0]['image_replicas'], 4096 * 510)
+        self.assertEqual(rows[0]['heap_sampler_replicas'], 4096 * 510)
+        for changes in ({'image_replicas': 4096 * 510 - 1}, {'heap_image_lookups': 4096 * 2 + 1},
+                        {'heap_sampler_lookups': 4096 * 2 - 1}, {'heap_sampler_replicas': 4096 * 510 - 1},
+                        {'heap_sampler_driver_calls': 4096 * 2 + 1}, {'heap_sampler_hits': 4096 * 2 + 1}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                pattern_measurements(self.text(self.pair(indexed=1, **changes)), 4096, 8, 2, 1, 0, 1)
+
+    def test_heap_buffer_api_calls_count_bounded_batches_without_relabeling_elements(self):
+        for calls in (1, 2, 8):
+            rows = pattern_measurements(self.text(self.pair(heap_buffer_native_calls=calls)), 4096, 8, 2, 1)
+            self.assertEqual(rows[0]['buffer_driver_calls'], 8)
+            self.assertEqual(rows[0]['heap_buffer_native_calls'], calls)
+        for calls in (0, -1, 9, True, 1.5):
+            with self.subTest(calls=calls), self.assertRaises(ValueError):
+                pattern_measurements(self.text(self.pair(heap_buffer_native_calls=calls)), 4096, 8, 2, 1)
+        with self.assertRaises(ValueError):
+            pattern_measurements(self.text(self.pair(buffer_driver_calls=9, buffer_hits=32759,
+                                                      heap_buffer_native_calls=1)), 4096, 8, 2, 1)
+        with self.assertRaises(ValueError):
+            pattern_measurements(self.text(self.pair(backend=1, heap_buffer_native_calls=1)), 4096, 8, 1, 1)
+        old = pattern_measurements(self.text(self.pair()), 4096, 8, 2, 1)
+        self.assertNotIn('heap_buffer_native_calls', old[0])
+
+    def test_sampler_driver_calls_and_byte_interning_hits_can_overlap(self):
+        rows = self.pair(images=8, heap_sampler_driver_calls=3, heap_sampler_hits=4096 * 8)
+        measured = pattern_measurements(self.text(rows), 4096, 8, 2, 1, 8)
+        self.assertGreater(measured[0]['heap_sampler_driver_calls'] + measured[0]['heap_sampler_hits'],
+                           measured[0]['heap_sampler_lookups'])
 
     def test_renderer_gate_requires_pass_and_actual_backend(self):
         text = 'vulkan: graphics descriptors use heaps with buffer fallback\nPASS headless Vulkan: all fixtures\n'

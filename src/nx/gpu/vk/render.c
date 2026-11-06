@@ -2804,8 +2804,8 @@ static int draw_key(const DsState* ds, const DrawShaders* sh, const VkSh* fs, Su
         return 0;
     }
     k->samples = tf.samples;
+    k->sample_off = ~rk->sample_mask & ((1u << k->samples) - 1);
     if (k->samples > 1) {
-        k->sample_off = ~rk->sample_mask & ((1u << k->samples) - 1);
         k->alpha_to_coverage = rk->alpha_to_coverage && n && rt[0];
         k->alpha_to_one = rk->alpha_to_one && n && rt[0] && g_vk.feat.alphaToOne;
         if (rk->alpha_to_one && !g_vk.feat.alphaToOne) LOG_LIMIT(1, "vulkan: this GPU has no alpha to one\n");
@@ -3102,13 +3102,20 @@ static void draw_indirect(VkCommandBuffer cb, int indexed, VkBuffer abuf, u64 ao
             rec_CmdDrawIndirect(cb, indexed, abuf, aoff + (u64)i * stride, VK_NULL_HANDLE, 0, 1, 0);
 }
 static void render_draw(const DsState* ds, const DrawCall* dc, DrawOwner* o, const DrawTexture* texture);
-static int capture_draw(const DsState* ds, const DrawCall* dc, DrawOwner* owner, Surf* target, u64 blend, int coverage);
+static int capture_draw(const DsState* ds, const DrawCall* dc, DrawOwner* owner, Surf* target, u64 blend,
+                         int coverage, const VkCoverage* mixed);
 static int capture_supported(const DrawShaders* shaders, const DsState* ds, const DrawCall* dc) {
-    return !dc->indirect && !dc->xfb_control && dc->instances == 1 &&
-           (dc->topology == 0 || dc->topology == 1 || dc->topology == 4) &&
-           !(dc->indexed && ds->index.restart) && !shaders->tcs && !shaders->tes && !shaders->gs &&
-           !shaders->xfb_on && !shaders->vs->si.gbuf_wmask && !shaders->vs->si.nimg &&
-           shaders->fs0 && !(shaders->fs0->si.sph[18] & ~15u);
+    if (dc->indirect || dc->xfb_control || !dc->instances ||
+        (u64)dc->base_instance + dc->instances - 1 > UINT32_MAX ||
+        (u64)dc->first + dc->count > (u64)UINT32_MAX + 1 ||
+        (dc->topology != 0 && dc->topology != 1 && dc->topology != 4) ||
+        (dc->indexed && ds->index.restart) || shaders->tcs || shaders->tes || shaders->gs ||
+        !shaders->fs0 || (shaders->fs0->si.sph[18] & ~15u)) return 0;
+    u32 vertices = dc->topology == 0 ? 1 : dc->topology == 1 ? 2 : 3;
+    /* A complete non-indexed list presents each vertex once per instance. Shared indices can repeat vertex
+       shader stores when split into primitives, and incomplete primitives need not invoke their vertices. */
+    int unique_vertices = !dc->indexed && !(dc->count % vertices);
+    return unique_vertices || (!shaders->xfb_on && !shaders->vs->si.gbuf_wmask && !shaders->vs->si.nimg);
 }
 
 /* a draw as a profiler zone (SNX_TRACY builds), around its many ways out */
@@ -3213,21 +3220,27 @@ retry:
                      rt[location]->f.vk == VK_FORMAT_R32_UINT || rt[location]->f.vk == VK_FORMAT_R32_SINT);
         /* Other formats leave coverage-to-color disabled. */
         if (valid && (ds->blend.mask[location] & 1)) {
-            if (!g_vk.has_coverage_to_color && !capture) {
+            /* SampleMask is per invocation. With one raster sample its nonzero value is the whole pixel mask,
+               even if the host splits invocations. Multiple samples still need the ordered capture union. */
+            int single_sample = dc->raster_samples <= 1 && (!zt || !zt->msaa);
+            for (u32 i = 0; i < n; i++)
+                if (rt[i] && rt[i]->msaa) single_sample = 0;
+            int post_depth_safe = single_sample && g_vk.has_post_depth_coverage && sh.fs0 &&
+                                  !ds->rkey.alpha_to_coverage && !(sh.fs0->si.sph[19] & 3) &&
+                                  ((!texture && ds->prog.early_z) ||
+                                   (!sh.fs0->si.has_discard && !ds->dyn.alpha_test &&
+                                    !sh.fs0->si.gbuf_wmask && !sh.fs0->si.nimg));
+            if (g_vk.has_coverage_to_color)
+                to_color = location + 1;
+            else if (post_depth_safe)
+                shader_to_color = SH_COVERAGE_TO_COLOR | location << SH_COVERAGE_OUTPUT_SHIFT | SH_BLEND_EARLY_TESTS;
+            else if (!capture) {
                 if (!texture && location == 0 && n == 1 && !ds->blend.logic_op &&
-                    capture_supported(&sh, ds, dc) && capture_draw(ds, dc, o, rt[0], 0, 1)) return;
+                    capture_supported(&sh, ds, dc) && capture_draw(ds, dc, o, rt[0], 0, 1, NULL)) return;
                 LOG_LIMIT(4, "vulkan: coverage-to-color requires a native or ordered capture path for this draw\n");
                 g_vk_skipped++;
                 return;
-            }
-            if (g_vk.has_coverage_to_color)
-                to_color = location + 1;
-            else if (g_vk.has_post_depth_coverage && sh.fs0 && !ds->rkey.alpha_to_coverage &&
-                     !(sh.fs0->si.sph[19] & 3) &&
-                     (ds->prog.early_z || (!sh.fs0->si.has_discard && !ds->dyn.alpha_test &&
-                                          !sh.fs0->si.gbuf_wmask && !sh.fs0->si.nimg)))
-                shader_to_color = SH_COVERAGE_TO_COLOR | location << SH_COVERAGE_OUTPUT_SHIFT | SH_BLEND_EARLY_TESTS;
-            else {
+            } else {
                 LOG_LIMIT(4, "vulkan: coverage-to-color needs native support or safe post-depth shader coverage\n");
                 g_vk_skipped++;
                 return;
@@ -3266,7 +3279,7 @@ retry:
     }
     if (any_advanced && only_first && !native_blend.operation && !fixed_reduction && !programmable_blend) {
         if (!texture && n == 1 && capture_supported(&sh, ds, dc) &&
-            capture_draw(ds, dc, o, rt[0], dc->advanced_blend[0], 0)) return;
+            capture_draw(ds, dc, o, rt[0], dc->advanced_blend[0], 0, NULL)) return;
         LOG_LIMIT(4, "vulkan: advanced blending needs a native, interlock or ordered capture path for this draw\n");
         g_vk_skipped++;
         return;
@@ -3398,6 +3411,25 @@ retry:
     if (!vk_coverage_key(&coverage, dc, tf.samples ? tf.samples : 1, n, zt != NULL, g_vk.has_mixed_samples,
                          g_vk.props.limits.framebufferNoAttachmentsSampleCounts) ||
         (coverage.raster_samples && (ds->rkey.sample_shading || (fs && fs->si.uses_sample_id)))) {
+        /* Capture at N samples, then reduce to one native color sample. A strict translator proof excludes
+           invocation-dependent sources; keep the resource/input checks here as an additional interface gate. */
+        const ShaderInfo* info = sh.fs0 ? &sh.fs0->si : NULL;
+        int advanced = 0;
+        for (u32 i = 0; i < DS_TARGETS_MAX; i++)
+            if (dc->advanced_blend[i]) advanced = 1;
+        int dual_source = ds->blend.en[0] && !ds->blend.logic_op &&
+                          (ds->blend.sc[0] >= DS_FACTOR_SRC1_COLOR || ds->blend.dc[0] >= DS_FACTOR_SRC1_COLOR ||
+                           ds->blend.sa[0] >= DS_FACTOR_SRC1_COLOR || ds->blend.da[0] >= DS_FACTOR_SRC1_COLOR);
+        VkCoverage portable;
+        if (!capture && !texture && dc->topology == 4 && ds->rkey.polygon == DS_POLYGON_FILL &&
+            n == 1 && rt[0] && !rt[0]->msaa && !rt[0]->f.is_int &&
+            rt[0]->layers == 1 && rt[0]->depth3d <= 1 && !zt && !advanced && !dual_source &&
+            (!ds->blend.logic_op || g_vk.feat.logicOp) && !last->si.writes_layer && info &&
+            info->mixed_sample_invariant && !info->in_mask && !info->ntex && !info->nimg &&
+            !info->ngbuf && !info->cbuf_mask && !info->uses_sample_id && !(info->sph[19] & 3u) &&
+            vk_coverage_key(&portable, dc, 1, 1, 0, 1, g_vk.props.limits.framebufferNoAttachmentsSampleCounts) &&
+            portable.raster_samples && capture_supported(&sh, ds, dc) &&
+            capture_draw(ds, dc, o, rt[0], 0, 0, &portable)) return;
         LOG_LIMIT(4, "vulkan: requested mixed-sample coverage is unsupported for these attachments or shaders\n");
         g_vk_skipped++;
         return;
@@ -4118,29 +4150,38 @@ retry:
 
 /* Late tests stay native. Resolve each primitive before the next so noncommutative blend equations and
    coverage masks preserve overlap order. The normal native/interlock paths do not pay this fallback's cost. */
-static int capture_draw(const DsState* ds, const DrawCall* dc, DrawOwner* owner, Surf* target, u64 blend, int coverage) {
-    VkCapture* images = vk_capture_get(target);
+static int capture_draw(const DsState* ds, const DrawCall* dc, DrawOwner* owner, Surf* target, u64 blend,
+                         int coverage, const VkCoverage* mixed) {
+    VkCapture* images = mixed ? vk_capture_get_mixed(target, mixed->raster_samples) : vk_capture_get(target);
     if (!images) return 0;
     DrawCall slice = *dc;
     slice.multisample_flags &= ~DS_MS_COVERAGE_TO_COLOR;
     memset(slice.advanced_blend, 0, sizeof slice.advanced_blend);
     u32 vertices = dc->topology == 0 ? 1 : dc->topology == 1 ? 2 : 3;
     slice.count = vertices;
+    slice.instances = 1;
     u64 before = g_vk_drawn;
     g_capture_draw.images = images;
     g_capture_draw.snapshot = NULL;
     int complete = 1;
-    for (u32 primitive = 0; primitive < dc->count / vertices; primitive++) {
-        u64 first = (u64)dc->first + (u64)primitive * vertices;
-        if (first > UINT32_MAX || !vk_capture_clear(images)) { complete = 0; break; }
-        slice.first = (u32)first;
-        g_capture_draw.primitive = primitive;
-        u64 drawn = g_vk_drawn;
-        render_draw(ds, &slice, owner, NULL);
-        if (g_vk_drawn != drawn + 1) { complete = 0; break; }
-        u32 flags = images->flags | (ds->blend.mask[0] & 15);
-        if (ds->tgt.srgb_write && target->f.vk != vk_srgb_as(target->f.vk, 0)) flags |= SH_BLEND_SRGB;
-        if (!vk_capture_resolve(images, blend, flags, coverage)) { complete = 0; break; }
+    /* Vulkan primitive order places every primitive of the earlier instance before the next instance. Keep
+       firstInstance on each slice so attributes and guest instance IDs retain their original indices. */
+    for (u32 instance = 0; instance < dc->instances && complete; instance++) {
+        slice.base_instance = dc->base_instance + instance;
+        for (u32 primitive = 0; primitive < dc->count / vertices; primitive++) {
+            u64 first = (u64)dc->first + (u64)primitive * vertices;
+            if (first > UINT32_MAX || !vk_capture_clear(images)) { complete = 0; break; }
+            slice.first = (u32)first;
+            g_capture_draw.primitive = primitive;
+            u64 drawn = g_vk_drawn;
+            render_draw(ds, &slice, owner, NULL);
+            if (g_vk_drawn != drawn + 1) { complete = 0; break; }
+            u32 flags = images->flags | (ds->blend.mask[0] & 15);
+            if (ds->tgt.srgb_write && target->f.vk != vk_srgb_as(target->f.vk, 0)) flags |= SH_BLEND_SRGB;
+            int resolved = mixed ? vk_capture_mixed_resolve(images, mixed, ds)
+                                  : vk_capture_resolve(images, blend, flags, coverage);
+            if (!resolved) { complete = 0; break; }
+        }
     }
     g_capture_draw.images = NULL;
     g_capture_draw.snapshot = NULL;

@@ -13,6 +13,79 @@ static void check(int pass, const char* message) {
     if (!pass && failures++ < 12) fprintf(stderr, "FAIL descriptor heap: %s\n", message);
 }
 static uint32_t random_word(uint32_t* state) { *state = *state * 1664525u + 1013904223u; return *state; }
+/* Mock indices are ordinary CPU values, not Vulkan descriptor encodings. Compare production run detection and
+   write-only index filling with an independent per-element, byte-by-byte table oracle. */
+static void image_runs(void) {
+    VkDescriptorImageInfo images[257];
+    for (uint32_t i = 0; i < 257; i++) {
+        memset(&images[i], (int)(i & 255), sizeof images[i]);
+        images[i].imageView = (VkImageView)(uintptr_t)0x1357;
+        images[i].sampler = (VkSampler)(uintptr_t)0x2468;
+        images[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+    check(!vk_descriptor_heap_image_run(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, 256) && !vk_descriptor_heap_image_run(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, images, 0),
+          "empty or missing image ranges contain no reusable entry");
+    check(vk_descriptor_heap_image_run(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, images, 256) == 256,
+          "all equal descriptor fields form one run regardless of object padding");
+    images[7].sampler = (VkSampler)(uintptr_t)0x2469;
+    check(vk_descriptor_heap_image_run(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, images, 256) == 7, "a changed sampler ends the run");
+    check(vk_descriptor_heap_image_run(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, images, 256) == 256 &&
+              vk_descriptor_heap_image_run(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, images, 256) == 256,
+          "separate images ignore differing sampler fields and reuse the complete run");
+    check(!vk_descriptor_heap_image_run(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, images, 256),
+          "a non-image descriptor cannot reuse image metadata");
+    images[7].sampler = images[0].sampler;
+    images[7].imageView = (VkImageView)(uintptr_t)0x1358;
+    check(vk_descriptor_heap_image_run(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, images, 256) == 7, "a changed image view ends the run");
+    images[7].imageView = images[0].imageView;
+    images[7].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    check(vk_descriptor_heap_image_run(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, images, 256) == 7, "a changed image layout ends the run");
+    images[7].imageLayout = images[0].imageLayout;
+    images[256].imageView = VK_NULL_HANDLE;
+    check(vk_descriptor_heap_image_run(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, images, 256) == 256 && vk_descriptor_heap_image_run(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, images, 17) == 17 &&
+              vk_descriptor_heap_image_run(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, images + 249, 7) == 7,
+          "run detection respects the remaining array range and cannot inspect the next element");
+    vk_descriptor_heap_write_index_run(NULL, 0, 0);
+    enum { BYTES = 2 * (256 + 16) * 4 + 38, RESOURCE = 19 + 3 * 4, SAMPLER = 19 + (256 + 11) * 4 };
+    uint8_t actual[BYTES], expected[BYTES];
+    for (uint32_t pattern = 0; pattern < 4; pattern++)
+        for (uint32_t count = 1; count <= 256; count++) {
+            for (uint32_t i = 0; i < count; i++) {
+                images[i].imageView = (VkImageView)(uintptr_t)(0x1357 + (pattern == 1 ? i & 1 : pattern == 3 ? i / 13 : 0));
+                images[i].sampler = (VkSampler)(uintptr_t)(0x2468 + (pattern == 2 ? i / 7 : 0));
+                images[i].imageLayout = pattern == 3 && i >= count / 2
+                    ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            }
+            memset(actual, 0xa5, sizeof actual);
+            memset(expected, 0xa5, sizeof expected);
+            uint32_t lookups = 0, replicas = 0;
+            for (uint32_t i = 0; i < count;) {
+                uint32_t run = vk_descriptor_heap_image_run(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, images + i, count - i);
+                uint32_t resource = (uint32_t)(uintptr_t)images[i].imageView ^ (uint32_t)images[i].imageLayout << 24;
+                uint32_t sampler = (uint32_t)(uintptr_t)images[i].sampler;
+                check(run && run <= count - i, "run length remains within the validated binding");
+                vk_descriptor_heap_write_index_run(actual + RESOURCE + 4 * i, run, resource);
+                vk_descriptor_heap_write_index_run(actual + SAMPLER + 4 * i, run, sampler);
+                lookups++;
+                replicas += run - 1;
+                i += run;
+            }
+            for (uint32_t i = 0; i < count; i++) {
+                uint32_t resource = (uint32_t)(uintptr_t)images[i].imageView ^ (uint32_t)images[i].imageLayout << 24;
+                uint32_t sampler = (uint32_t)(uintptr_t)images[i].sampler;
+                for (uint32_t byte = 0; byte < 4; byte++) {
+                    expected[RESOURCE + 4 * i + byte] = (uint8_t)(resource >> (8 * byte));
+                    expected[SAMPLER + 4 * i + byte] = (uint8_t)(sampler >> (8 * byte));
+                }
+            }
+            check(!memcmp(actual, expected, sizeof actual),
+                  "resource/sampler runs match every independent little-endian index and preserve gaps/guards");
+            check(lookups + replicas == count, "logical requests count every element while lookups count actual runs");
+            if (!pattern) check(lookups == 1 && replicas == count - 1, "one repeated array resolves just one descriptor pair");
+            if (pattern == 1) check(lookups == count && !replicas, "alternating fields retain independent lookups");
+            if (pattern == 2) check(lookups == (count + 6) / 7, "sampler changes split shared-image runs exactly");
+        }
+}
 static void descriptor_alignment(void) {
     static const VkDescriptorType images[] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
@@ -261,7 +334,7 @@ static void current_frame_cache(void) {
     check(vk_descriptor_heap_cache_frame(&tag, 0), "explicit invalidity also handles the first frame ID after reset");
 }
 int main(void) {
-    descriptor_alignment(); plans(); constrained_heaps(); table_runs(); mappings(); current_frame_cache();
+    image_runs(); descriptor_alignment(); plans(); constrained_heaps(); table_runs(); mappings(); current_frame_cache();
     printf("descriptor heap geometry: %u checks, %u failures\n", checks, failures);
     return failures != 0;
 }

@@ -3705,6 +3705,7 @@ static int check_uma_page_changes(void) {
 #include "vulkan_draw_texture.inc"
 #include "vulkan_descriptor_heaps.inc"
 #include "vulkan_sample_raster.inc"
+#include "vulkan_mixed_coverage.inc"
 #include "vulkan_alpha_coverage.inc"
 #include "vulkan_indexed_feedback.inc"
 #include "vulkan_targetless_stores.inc"
@@ -3929,6 +3930,8 @@ int main(int argc, char** argv) {
             result = bench_capture_tiles();
         else if (!strcmp(name, "coverage_color"))
             result = check_coverage_to_color();
+        else if (!strcmp(name, "mixed_coverage"))
+            result = check_mixed_coverage_portable();
         else if (!strcmp(name, "texture_min_lod"))
             result = check_texture_min_lod();
         else if (!strcmp(name, "txd_varying"))
@@ -4123,6 +4126,7 @@ int main(int argc, char** argv) {
     CHECK(!check_shader_stage_images());
     CHECK(!check_custom_sample_locations());
     CHECK(!check_coverage_to_color());
+    CHECK(!check_mixed_coverage_portable());
     CHECK(!check_alpha_coverage());
     CHECK(!check_shader_integer_half_rounding());
     CHECK(!check_draw_texture());

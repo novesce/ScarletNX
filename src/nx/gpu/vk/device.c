@@ -542,6 +542,7 @@ static int create_device(void) {
                                                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
     VkPhysicalDeviceVulkan12Features q12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
     VkPhysicalDeviceVulkan11Features q11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+    VkPhysicalDeviceVulkan13Features q13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
     VkPhysicalDeviceFeatures2 f2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
     VkPhysicalDeviceDescriptorBufferFeaturesEXT qdesc = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT};
@@ -589,6 +590,7 @@ static int create_device(void) {
                            has_maintenance8 ? &qmaintenance8 : NULL,
                            &q11,
                            &q12,
+                           &q13,
                            g_vk.has_divisor ? &fdiv : NULL,
                            g_vk.has_border_color ? &fbc : NULL,
                            g_vk.has_xfb ? &fxfb : NULL,
@@ -767,6 +769,7 @@ static int create_device(void) {
                                             .pNext = &f12,
                                             .synchronization2 = VK_TRUE,
                                             .dynamicRendering = VK_TRUE,
+                                            .maintenance4 = q13.maintenance4,
                                             /* KIL demotes the lane; S2R queries its helper status */
                                             .shaderDemoteToHelperInvocation = VK_TRUE};
     void* chain = &f13;

@@ -138,6 +138,7 @@ typedef struct {
        ShTex type (0 1D, 1 2D, 2 3D, 3 cube), + 4 for an array; 0 when nothing is known yet */
     u8 tex_query_hint[SH_MAXTEX];
     u64 tex_query_mask;
+    int mixed_sample_invariant; /* proof: guest FS values and discard decisions do not depend on an invocation */
 } ShaderInfo;
 /* ShaderInfo.tex_query_hint in a graphics key's words (vk_shader_get's mask words 14 to 19: 3 bits a slot, the 64
    slots in 6 words), and back. A 1D header's hint (1) goes as none: its query is the 2D slot's, a texel high, as the

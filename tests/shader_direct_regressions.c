@@ -1687,7 +1687,7 @@ static void issue126_shader_modes(void) {
     };
     /* TXQ.B: the handle in R4, the level in R5 */
     const u64 bindless_query[] = {HANDLE_CBUF_R4, 0x5c9807800ff70005ull, 0xdf50000180470400ull};
-    /* a 2D texture offset from a register the translator can't resolve: the coordinates move instead */
+    /* A 2D texture offset from an unresolved register uses exact selected-mip sample offsets. */
     const u64 dynamic_2d_offset[] = {0x4c98078800070004ull,
                                      0xdeb8000000070008ull | (2ull << 28) | (1ull << 36) | (4ull << 20)};
     /* the lane ID after a branch: lanes reconverge on the subgroup's lowest pc */
@@ -1725,13 +1725,13 @@ static void issue126_shader_modes(void) {
                  {cube_array_bias, 2, ST_FS, 0, 87},
                  {tex1d_array, 2, ST_FS, 0, 88},
                  {split_handle, 4, ST_FS, 0, 88},
-                 {dynamic_3d_offset, 2, ST_FS, 0, 103},
+                 {dynamic_3d_offset, 2, ST_FS, 0, 87},
                  {split_cbuf_handle, 3, ST_FS, 0, 88},
                  {handle_past_writers, 5, ST_FS, 0, 88},
                  {buffer_surfaces, 4, ST_CS, 0, 98},
                  {bindless_query, 3, ST_FS, 0, 103},
                  {clip_flow, 2, ST_VS, 1, 65},
-                 {dynamic_2d_offset, 2, ST_FS, 0, 103},
+                 {dynamic_2d_offset, 2, ST_FS, 0, 87},
                  {lane_after_branch, 3, ST_FS, 0, 354},
                  {indexed_table, 7, ST_FS, 0, 95}};
     for (int i = 0; i < 17; i++) {
@@ -1744,6 +1744,10 @@ static void issue126_shader_modes(void) {
         if (code) {
             check(count_opcode(code, words, cases[i].opcode, 0xffffffffu) > 0,
                   "issue 126 emits the expected SPIR-V instruction");
+            if (i == 8 || i == 14)
+                check(!count_opcode(code, words, 103, 0xffffffffu) &&
+                          !count_opcode(code, words, 136, 0xffffffffu) && has_image_operands(code, words, 87, 8),
+                      "ordinary varying TEX keeps exact ConstOffset without base-level query/division");
             if (i == 15)
                 check(switch_selects_current_pc(code, words),
                       "reconverged flow dispatches the lane's own pc or the sentinel");
@@ -3464,12 +3468,13 @@ static void audit_shader_regressions(void) {
     free(code);
     u64 variant[7];
     memcpy(variant, indexed, sizeof variant);
-    variant[6] |= 1ull << 36; /* register offset: dimensions must come from the selected array */
+    variant[6] |= 1ull << 36; /* Register offsets retain the selected array's own mip semantics. */
     code = translate(variant, 7, ST_FS, &info, &words, 1);
     check_translated(code, &info, "indexed shadow dynamic offset translates");
     if (code) {
-        check(count_opcode(code, words, 103, 0xffffffffu) == 2,
-              "indexed shadow queries dimensions of both descriptor arrays");
+        check(!count_opcode(code, words, 103, 0xffffffffu) &&
+                  has_image_operands(code, words, 88, 10) && has_image_operands(code, words, 90, 10),
+              "indexed shadow keeps exact Lod|ConstOffset for both descriptor arrays");
         save_fixture(audit_paths[4], code, words);
     }
     free(code);

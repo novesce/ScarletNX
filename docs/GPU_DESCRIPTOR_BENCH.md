@@ -19,6 +19,25 @@ arrays, including repeated handles. Counters report encoding calls and hits, cop
 frame retirement. Retirement waits participate in submission timing. The report ranks each workload separately;
 neither the CPU submission interval nor a cache hit rate establishes an FPS gain.
 
+Within one image-array write, a consecutive run with the same image view and layout resolves one immutable resource
+index. Combined image/sampler runs also require the same sampler and resolve its index once. Separate image
+descriptors ignore their unused sampler field. Every element still receives its complete little-endian index;
+replication stores the CPU index value and never reads mapped GPU memory. Different views, layouts or consumed
+samplers end the run. Scalar writes and alternating array entries retain their separate lookups.
+
+Logical request and payload counters still include every element. For complete successful writes, each image or
+sampler request is accounted for by one resolver lookup or one replica. Image driver calls plus encoding hits equal
+image lookups. Sampler driver calls and hits can overlap: native encoding can be followed by a byte-interning hit,
+so their sum is not a lookup count. For example, two complete 256-entry arrays containing one repeated descriptor
+still report 512 image requests and 512 sampler requests, while using two lookups of each kind. Index-table bytes
+still include every stored element. `payload_bytes` describes the logical descriptor payload, including replicas;
+it is not a measurement of physical memory traffic. The separate cursor, index-byte and allocation counters retain
+their own meanings. Reuse counts alone do not establish a timing improvement.
+
+Measure scalar buffer controls with indexed arrays: compiler layout and the writer's register budget can change
+their cost even when native encoding calls and allocated bytes stay equal. Prefer the backend measured for the
+workload. An indexed-array gain does not establish a gain for every buffer-heavy draw.
+
 For driver validation, set `vk_validation=1` on rendering checks, outside timed batches. Keep the complete log.
 Validation layers add CPU work and should remain disabled for performance measurements. The standalone
 `SNX_TEST_NVN_CASE=descriptor_heaps` fixture also checks heap/legacy transitions, custom border colors and view

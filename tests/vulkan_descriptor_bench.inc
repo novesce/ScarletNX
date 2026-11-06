@@ -138,9 +138,10 @@ static int bench_descriptor_pattern(u32 sets, u32 count, u32 images, u32 indexed
            "\"arena_bytes\":%llu,\"payload_bytes\":%llu,\"frame_advances\":%llu,\"arena_allocated_bytes\":%llu,"
            "\"cache_allocated_bytes\":%llu,\"backend\":%u,\"counters_available\":%u,\"fallbacks\":0,"
            "\"address_queries\":%llu,\"peak_used_bytes\":%llu,\"workload_buffer_bytes\":%llu,"
-           "\"heap_table_bytes\":%llu,\"heap_sampler_requests\":%llu,\"heap_sampler_driver_calls\":%llu,"
+           "\"heap_table_bytes\":%llu,\"heap_image_lookups\":%llu,\"heap_sampler_requests\":%llu,"
+           "\"heap_sampler_lookups\":%llu,\"heap_sampler_replicas\":%llu,\"heap_sampler_driver_calls\":%llu,"
            "\"heap_sampler_hits\":%llu,\"heap_reserved_bytes\":%llu,\"heap_resource_range_bytes\":%llu,"
-           "\"heap_sampler_range_bytes\":%llu,\"indexed\":%u}\n",
+           "\"heap_sampler_range_bytes\":%llu,\"heap_buffer_native_calls\":%llu,\"indexed\":%u}\n",
            unique ? "unique" : "repeated", sets, count, images, (unsigned long long)elapsed[median],
            (u32)g_vk.has_descriptor_buffers, (u32)g_vk.has_descriptor_heaps, (u32)g_settings.vulkan_recording_thread,
            (unsigned long long)(last->buffer_requests - first->buffer_requests),
@@ -161,11 +162,15 @@ static int bench_descriptor_pattern(u32 sets, u32 count, u32 images, u32 indexed
            (unsigned long long)(last->address_queries - first->address_queries),
            (unsigned long long)last->peak_used_bytes, (unsigned long long)allocation.size,
            (unsigned long long)(heap_last->table_bytes - heap_first->table_bytes),
+           (unsigned long long)(heap_last->image_lookups - heap_first->image_lookups),
            (unsigned long long)(heap_last->sampler_requests - heap_first->sampler_requests),
+           (unsigned long long)(heap_last->sampler_lookups - heap_first->sampler_lookups),
+           (unsigned long long)(heap_last->sampler_replicas - heap_first->sampler_replicas),
            (unsigned long long)(heap_last->sampler_driver_calls - heap_first->sampler_driver_calls),
            (unsigned long long)(heap_last->sampler_hits - heap_first->sampler_hits),
            (unsigned long long)heap_last->reserved_bytes, (unsigned long long)heap_last->resource_range_bytes,
-           (unsigned long long)heap_last->sampler_range_bytes, indexed);
+           (unsigned long long)heap_last->sampler_range_bytes,
+           (unsigned long long)(heap_last->buffer_native_calls - heap_first->buffer_native_calls), indexed);
     return 0;
 }
 static int bench_descriptors(u32 sets, u32 count, u32 images, u32 indexed) {

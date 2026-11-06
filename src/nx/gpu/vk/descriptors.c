@@ -372,7 +372,8 @@ void vk_descriptors_get_stats(VkDescriptorStats* stats) {
             .buffer_driver_calls = heap.buffer_driver_calls, .buffer_hits = heap.buffer_hits,
             .buffer_evictions = heap.buffer_evictions, .image_requests = heap.image_requests,
             .image_driver_calls = heap.image_driver_calls, .image_hits = heap.image_hits,
-            .image_evictions = heap.image_evictions, .address_queries = heap.address_queries,
+            .image_evictions = heap.image_evictions, .image_replicas = heap.image_replicas,
+            .address_queries = heap.address_queries,
             .peak_used_bytes = heap.peak_used_bytes, .arena_allocated_bytes = heap.arena_allocated_bytes,
             .cache_allocated_bytes = heap.cache_allocated_bytes};
         return;

@@ -16,7 +16,8 @@ NATIVE = ('nvn-descriptors', 'nvn-tex-storage', 'nvn-commands', 'nvn-draw-banks'
           'nvn-advanced-blend', 'vk-coverage', 'vk-tess-passthrough', 'vk-sample-locations', 'nvn-queue-lifetime', 'vk-advanced-blend')
 SHADER_NATIVE = ('shader-direct-regressions', 'shader-float-rounding', 'shader-indexed-ms',
                  'shader-integer-half', 'shader-tcs-dead-outputs', 'shader-blend-images',
-                 'shader-half-native', 'shader-txd-uniform', 'shader-half-packing')
+                 'shader-half-native', 'shader-txd-uniform', 'shader-half-packing',
+                 'shader-texture-limits', 'shader-mixed-sample-safe', 'shader-mixed-coverage')
 GPU_MARKER = 'PASS NVN array copies: image texels, mirrored layers, view offsets and output padding exact=1'
 GPU_FEATURES = (
     ('array_copies', 'PASS NVN array copies:', None),
@@ -31,6 +32,7 @@ GPU_FEATURES = (
     ('evaluation_only_tessellation', 'PASS NVN evaluation-only tessellation:', 'SKIP NVN evaluation-only tessellation:'),
     ('advanced_blend_subset', 'PASS NVN advanced blend:', None),
     ('mixed_sample_coverage', 'PASS NVN coverage modulation:', 'SKIP NVN coverage modulation:'),
+    ('portable_mixed_coverage', 'PASS portable mixed coverage:', 'SKIP portable mixed coverage:'),
     ('native_advanced_blend', 'PASS NVN native advanced blend:', 'SKIP NVN native advanced blend:'),
     ('event_waits', 'PASS NVN event waits:', None),
     ('subroutine_calls', 'PASS NVN subroutine calls:', None),
@@ -50,7 +52,7 @@ GPU_FEATURES = (
     ('cube_array_texture_gradients', 'PASS NVN cube-array texture gradients:', 'SKIP NVN cube-array texture gradients:'),
     ('cube_minified_edge_probe', 'PASS NVN cube minified edge probe:', 'SKIP NVN cube minified edge probe:'),
     ('txd_uniform_offsets', 'PASS TXD uniform offsets:', 'SKIP TXD uniform offsets:'),
-    ('txd_varying_offsets', 'PASS TXD varying offsets:', 'SKIP TXD varying offsets:'),
+    ('txd_varying_offsets', 'PASS TEX/TXD varying offsets:', 'SKIP TXD varying offsets:'),
     ('texture_min_lod', 'PASS TEX minimum LOD:', 'SKIP TEX minimum LOD:'),
     ('alpha_coverage', 'PASS undithered alpha coverage:', 'SKIP undithered alpha coverage:'),
     ('late_blend_capture', 'PASS NVN late blend capture:', 'SKIP NVN late blend capture:'),

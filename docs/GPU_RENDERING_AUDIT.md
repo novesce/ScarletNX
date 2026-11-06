@@ -261,6 +261,7 @@ arithmetic precision and do not permit missing equations or ordering errors.
 The translator writes guest SampleMask from the register after the declared color outputs, preserving that value
 when the same program is translated again. A depth result uses its separate output register. The mask is not
 replaced by an input-coverage value or by a cached register number.
+The fixed pipeline mask also applies to bit 0 of a single-sample target; a zero mask preserves its color and depth.
 
 With dithering disabled, alpha-to-coverage supports 2, 4, 8 and 16 samples through a shader prefix mask:
 `(1 << floor(clamp(alpha, 0, 1) * samples)) - 1`. NaN selects no samples. The result intersects the guest output mask;
@@ -275,8 +276,11 @@ Coverage-to-color accepts the supported signed or unsigned single-component R8/R
 capture path currently requires target 0 alone, no logic operation and the same direct-list restrictions as source
 capture above. It reads all validity samples before writing the union mask to each surviving sample, so host sample
 shading cannot narrow the mask when the fragment shader runs in separate invocations. A direct post-depth fragment
-mask alone cannot establish that union when host invocations split. Native coverage output remains available under
-its own capability checks.
+mask alone cannot establish that union when host invocations split. If every attachment and rasterization use one
+sample, a post-depth fragment mask is the whole pixel mask. This shader path also supports DrawTexture, MRT and
+indirect draws. It requires post-depth coverage, no alpha-to-coverage or shader depth/sample-mask output, and either
+explicit early tests or no discard, alpha test or shader storage writes. DrawTexture always uses the latter gate.
+Native coverage output remains available under its own capability checks.
 
 ### Descriptors and GPU ownership
 

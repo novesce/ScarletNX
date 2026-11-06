@@ -30,10 +30,7 @@ typedef struct {
     VkDescriptorHeapMemoryPlan plan;
     VkDeviceSize used[VK_FRAMES];
 } Heap;
-typedef struct {
-    u64 key[4];
-    u32 offset;
-} ResourceEntry;
+typedef VkDescriptorHeapResourceEntry ResourceEntry;
 typedef struct {
     u64 hash[2];
     u32 offset, used;
@@ -159,13 +156,18 @@ int vk_descriptor_heaps_init(const VkPhysicalDeviceDescriptorHeapPropertiesEXT* 
         !vk_descriptor_heap_memory_plan_fit(&samplers, sampler_frame, VK_FRAMES,
             props->minSamplerHeapReservedRange, sampler_address_alignment, props->samplerDescriptorAlignment,
             props->maxSamplerHeapSize, g_vk.alloc_cap)) return 0;
+    VkDeviceSize buffer_stride = g_heaps.sizes[HEAP_UBO] > g_heaps.sizes[HEAP_SSBO]
+        ? g_heaps.sizes[HEAP_UBO] : g_heaps.sizes[HEAP_SSBO];
+    if (buffer_stride > SIZE_MAX / VK_DESCRIPTOR_HEAP_BUFFER_BATCH) return 0;
+    VkDeviceSize encoding_bytes = buffer_stride * VK_DESCRIPTOR_HEAP_BUFFER_BATCH;
+    if (encoding_bytes < largest) encoding_bytes = largest;
     if (resources.frame_size < 8 + g_heaps.sizes[HEAP_UBO] ||
-        samplers.frame_size < g_heaps.sizes[HEAP_SAMPLER] || largest > SIZE_MAX - samplers.frame_size) return 0;
+        samplers.frame_size < g_heaps.sizes[HEAP_SAMPLER] || encoding_bytes > SIZE_MAX - samplers.frame_size) return 0;
     /* One CPU allocation owns temporary encoding bytes and the sampler comparison shadow. */
-    g_heaps.scratch = calloc(1, (size_t)(largest + samplers.frame_size));
+    g_heaps.scratch = calloc(1, (size_t)(encoding_bytes + samplers.frame_size));
     if (!g_heaps.scratch) return 0;
-    g_heaps.scratch_size = (size_t)(largest + samplers.frame_size);
-    g_heaps.sampler_bytes = g_heaps.scratch + largest;
+    g_heaps.scratch_size = (size_t)(encoding_bytes + samplers.frame_size);
+    g_heaps.sampler_bytes = g_heaps.scratch + encoding_bytes;
     if (!heap_create(&g_heaps.resource, &resources) || !heap_create(&g_heaps.sampler, &samplers)) {
         heap_discard(&g_heaps.resource);
         heap_discard(&g_heaps.sampler);
@@ -248,13 +250,16 @@ static ResourceEntry* resource_entry(const u64 key[4], int* hit) {
     *hit = 0;
     return replacement;
 }
-static int resource_descriptor(u32 slot, const VkWriteDescriptorSet* write, u32 element,
+__attribute__((always_inline)) static inline int resource_descriptor(u32 slot, const VkWriteDescriptorSet* write, u32 element,
                                 VkBuffer* previous_buffer, VkDeviceAddress* previous_address, u32* offset) {
     int k = kind(write->descriptorType);
     if (k < 0 || k == HEAP_SAMPLER) return 0;
     int is_buffer = k == HEAP_UBO || k == HEAP_SSBO || k == HEAP_TEXEL;
     if (is_buffer) g_heaps.stats.buffer_requests++;
-    else g_heaps.stats.image_requests++;
+    else {
+        g_heaps.stats.image_requests++;
+        g_heaps.stats.image_lookups++;
+    }
     g_heaps.stats.payload_bytes += g_heaps.sizes[k];
     u64 key[4] = {(u64)(u32)write->descriptorType + 1, 0, 0, 0};
     VkResourceDescriptorInfoEXT info = {.sType = VK_STRUCTURE_TYPE_RESOURCE_DESCRIPTOR_INFO_EXT,
@@ -290,6 +295,7 @@ static int resource_descriptor(u32 slot, const VkWriteDescriptorSet* write, u32 
         if (k == HEAP_TEXEL) { texel.addressRange = range; info.data.pTexelBuffer = &texel; }
         else info.data.pAddressRange = &range;
         g_heaps.stats.buffer_driver_calls++;
+        g_heaps.stats.buffer_native_calls++;
         if (!VK_OK(vkWriteResourceDescriptorsEXT(g_vk.dev, 1, &info,
                 &(VkHostAddressRangeEXT){g_heaps.scratch, (size_t)g_heaps.sizes[k]})) ||
             !allocate(&g_heaps.resource, slot, g_heaps.sizes[k], g_heaps.alignment[k], offset)) return 0;
@@ -331,6 +337,7 @@ static int resource_descriptor(u32 slot, const VkWriteDescriptorSet* write, u32 
 static int sampler_descriptor(u32 slot, VkSampler sampler, u32* offset) {
     if (!sampler) return 0;
     g_heaps.stats.sampler_requests++;
+    g_heaps.stats.sampler_lookups++;
     g_heaps.stats.payload_bytes += g_heaps.sizes[HEAP_SAMPLER];
 #if VK_USE_64_BIT_PTR_DEFINES
     u64 handle = (u64)(uintptr_t)sampler;
@@ -372,10 +379,192 @@ static int sampler_descriptor(u32 slot, VkSampler sampler, u32* offset) {
     g_heaps.stats.sampler_bytes += g_heaps.sizes[HEAP_SAMPLER];
     return 1;
 }
+/* Keep repeated-array scanning/filling out of the scalar buffer writer's register and inlining budget. */
+__attribute__((noinline)) static int write_image_array(u32 slot, const HeapLayout* layout, u32 table,
+                                                      const VkWriteDescriptorSet* write) {
+    VkBuffer previous_buffer = VK_NULL_HANDLE;
+    VkDeviceAddress previous_address = 0;
+    int combined = write->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    for (u32 j = 0; j < write->descriptorCount;) {
+        u32 resource, sampler, run = 1;
+        if (write->pImageInfo)
+            run = vk_descriptor_heap_image_run(write->descriptorType, write->pImageInfo + j, write->descriptorCount - j);
+        if (!resource_descriptor(slot, write, j, &previous_buffer, &previous_address, &resource)) return 0;
+        if (combined && !sampler_descriptor(slot, write->pImageInfo[j].sampler, &sampler)) return 0;
+        u32 word = layout->offset[write->dstBinding] + write->dstArrayElement + j;
+        vk_descriptor_heap_write_index_run(g_heaps.resource.mapped + table + 4ull * word, run, resource);
+        if (combined) {
+            word = layout->sampler_offset[write->dstBinding] + write->dstArrayElement + j;
+            vk_descriptor_heap_write_index_run(g_heaps.resource.mapped + table + 4ull * word, run, sampler);
+        }
+        if (run > 1) {
+            g_heaps.stats.image_requests += run - 1;
+            g_heaps.stats.image_replicas += run - 1;
+            g_heaps.stats.payload_bytes += (u64)(run - 1) * g_heaps.sizes[kind(write->descriptorType)];
+            if (combined) {
+                g_heaps.stats.sampler_requests += run - 1;
+                g_heaps.stats.sampler_replicas += run - 1;
+                g_heaps.stats.payload_bytes += (u64)(run - 1) * g_heaps.sizes[HEAP_SAMPLER];
+            }
+        }
+        j += run;
+    }
+    return 1;
+}
+/* Keep the original scalar loop in its own compiler frame. Image-array run handling must not change
+   its stack/register budget or the buffer-address reuse between writes in the same table. */
+__attribute__((noinline)) static int write_scalar_table(u32 slot, const HeapLayout* layout, u32 table, u32 count,
+                                                       const VkWriteDescriptorSet* writes) {
+    VkBuffer previous_buffer = VK_NULL_HANDLE;
+    VkDeviceAddress previous_address = 0;
+    for (u32 i = 0; i < count; i++) {
+        const VkWriteDescriptorSet* w = &writes[i];
+        for (u32 j = 0; j < w->descriptorCount; j++) {
+            u32 resource, sampler;
+            if (!resource_descriptor(slot, w, j, &previous_buffer, &previous_address, &resource)) return 0;
+            u32 word = layout->offset[w->dstBinding] + w->dstArrayElement + j;
+            snx_st_le32(g_heaps.resource.mapped + table + 4ull * word, resource);
+            if (w->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+                if (!sampler_descriptor(slot, w->pImageInfo[j].sampler, &sampler)) return 0;
+                snx_st_le32(g_heaps.resource.mapped + table + 4ull * (layout->sampler_offset[w->dstBinding] + w->dstArrayElement + j), sampler);
+            }
+        }
+    }
+    return 1;
+}
+__attribute__((noinline)) static int write_array_table(u32 slot, const HeapLayout* layout, u32 table, u32 count,
+                                                      const VkWriteDescriptorSet* writes) {
+    VkBuffer previous_buffer = VK_NULL_HANDLE;
+    VkDeviceAddress previous_address = 0;
+    for (u32 i = 0; i < count; i++) {
+        const VkWriteDescriptorSet* w = &writes[i];
+        if (w->descriptorCount > 1 &&
+            (w->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
+             w->descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE || w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)) {
+            if (!write_image_array(slot, layout, table, w)) return 0;
+            continue;
+        }
+        for (u32 j = 0; j < w->descriptorCount; j++) {
+            u32 resource, sampler;
+            if (!resource_descriptor(slot, w, j, &previous_buffer, &previous_address, &resource)) return 0;
+            u32 word = layout->offset[w->dstBinding] + w->dstArrayElement + j;
+            snx_st_le32(g_heaps.resource.mapped + table + 4ull * word, resource);
+            if (w->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+                if (!sampler_descriptor(slot, w->pImageInfo[j].sampler, &sampler)) return 0;
+                snx_st_le32(g_heaps.resource.mapped + table +
+                    4ull * (layout->sampler_offset[w->dstBinding] + w->dstArrayElement + j), sampler);
+            }
+        }
+    }
+    return 1;
+}
+/* Only unformatted scalar buffers enter this helper. Keeping its planning arrays out of the original writer
+   preserves the singleton/image paths' compiler frame. Each chunk is a transaction; earlier chunks stay live. */
+__attribute__((noinline)) static int write_buffer_batch(u32 slot, const HeapLayout* layout, u32 table, u32 count,
+                                                       const VkWriteDescriptorSet* writes, VkBuffer* previous_buffer,
+                                                       VkDeviceAddress* previous_address) {
+    VkDescriptorHeapBufferBatch batch;
+    batch.used = g_heaps.resource.used[slot];
+    batch.count = batch.misses = batch.changes = batch.exhausted = 0;
+    batch.hits = batch.evictions = batch.bytes = 0;
+    VkResourceDescriptorInfoEXT info[VK_DESCRIPTOR_HEAP_BUFFER_BATCH];
+    VkDeviceAddressRangeEXT ranges[VK_DESCRIPTOR_HEAP_BUFFER_BATCH];
+    VkHostAddressRangeEXT destinations[VK_DESCRIPTOR_HEAP_BUFFER_BATCH];
+    size_t stride = (size_t)(g_heaps.sizes[HEAP_UBO] > g_heaps.sizes[HEAP_SSBO]
+        ? g_heaps.sizes[HEAP_UBO] : g_heaps.sizes[HEAP_SSBO]);
+    for (u32 i = 0; i < count; i++) {
+        const VkWriteDescriptorSet* write = &writes[i];
+        int k = write->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ? HEAP_UBO : HEAP_SSBO;
+        g_heaps.stats.buffer_requests++;
+        g_heaps.stats.payload_bytes += g_heaps.sizes[k];
+        if (!write->pBufferInfo) return 0;
+        const VkDescriptorBufferInfo* buffer = write->pBufferInfo;
+        if (!buffer->buffer || !buffer->range || buffer->range == VK_WHOLE_SIZE) return 0;
+        u64 key[4] = {(u64)(u32)write->descriptorType + 1, handle_key(buffer->buffer), buffer->offset, buffer->range};
+        u32 before = batch.misses;
+        if (!vk_descriptor_heap_buffer_plan(&batch, g_heaps.cache.resources, HEAP_RESOURCE_CACHE,
+                &g_heaps.resource.plan, slot, key, vk_hash(key, sizeof key), (u32)g_heaps.sizes[k], g_heaps.alignment[k])) {
+            if (batch.exhausted) g_heaps.exhausted[slot] = 1;
+            return 0;
+        }
+        if (batch.misses == before) continue;
+        if (*previous_buffer != buffer->buffer) {
+            *previous_buffer = buffer->buffer;
+            *previous_address = buffer_address(buffer->buffer);
+        }
+        if (!*previous_address || buffer->offset > UINT64_MAX - *previous_address) return 0;
+        ranges[before] = (VkDeviceAddressRangeEXT){*previous_address + buffer->offset, buffer->range};
+        info[before] = (VkResourceDescriptorInfoEXT){.sType = VK_STRUCTURE_TYPE_RESOURCE_DESCRIPTOR_INFO_EXT,
+            .type = write->descriptorType, .data.pAddressRange = &ranges[before]};
+        destinations[before] = (VkHostAddressRangeEXT){g_heaps.scratch + (size_t)before * stride,
+            (size_t)g_heaps.sizes[k]};
+    }
+    int encoded = 1;
+    if (batch.misses) {
+        g_heaps.stats.buffer_driver_calls += batch.misses;
+        g_heaps.stats.buffer_native_calls++;
+        encoded = VK_OK(vkWriteResourceDescriptorsEXT(g_vk.dev, batch.misses, info, destinations));
+    }
+    VkDeviceSize before = g_heaps.resource.used[slot];
+    if (!vk_descriptor_heap_buffer_publish(&batch, g_heaps.cache.resources, &g_heaps.resource.used[slot],
+            g_heaps.resource.mapped, g_heaps.scratch, stride, encoded)) return 0;
+    g_heaps.stats.arena_bytes += batch.used - before;
+    u64 live = batch.used + g_heaps.sampler.used[slot];
+    if (live > g_heaps.stats.peak_used_bytes) g_heaps.stats.peak_used_bytes = live;
+    g_heaps.stats.resource_bytes += batch.bytes;
+    g_heaps.stats.buffer_hits += batch.hits;
+    g_heaps.stats.buffer_evictions += batch.evictions;
+    for (u32 i = 0; i < count; i++) {
+        u32 word = layout->offset[writes[i].dstBinding] + writes[i].dstArrayElement;
+        snx_st_le32(g_heaps.resource.mapped + table + 4ull * word, batch.offsets[i]);
+    }
+    return 1;
+}
+static int batchable_buffer(const VkWriteDescriptorSet* write) {
+    return write->descriptorCount == 1 &&
+        (write->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || write->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+}
+__attribute__((noinline)) static int write_batched_table(u32 slot, const HeapLayout* layout, u32 table, u32 count,
+                                                        const VkWriteDescriptorSet* writes) {
+    VkBuffer previous_buffer = VK_NULL_HANDLE;
+    VkDeviceAddress previous_address = 0;
+    for (u32 i = 0; i < count; i++) {
+        const VkWriteDescriptorSet* w = &writes[i];
+        if (batchable_buffer(w)) {
+            u32 run = 1;
+            while (run < VK_DESCRIPTOR_HEAP_BUFFER_BATCH && run < count - i && batchable_buffer(w + run)) run++;
+            if (run > 1) {
+                if (!write_buffer_batch(slot, layout, table, run, w, &previous_buffer, &previous_address)) return 0;
+                i += run - 1;
+                continue;
+            }
+        }
+        if (w->descriptorCount > 1 &&
+            (w->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
+             w->descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE || w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)) {
+            if (!write_image_array(slot, layout, table, w)) return 0;
+            continue;
+        }
+        for (u32 j = 0; j < w->descriptorCount; j++) {
+            u32 resource, sampler;
+            if (!resource_descriptor(slot, w, j, &previous_buffer, &previous_address, &resource)) return 0;
+            u32 word = layout->offset[w->dstBinding] + w->dstArrayElement + j;
+            snx_st_le32(g_heaps.resource.mapped + table + 4ull * word, resource);
+            if (w->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+                if (!sampler_descriptor(slot, w->pImageInfo[j].sampler, &sampler)) return 0;
+                snx_st_le32(g_heaps.resource.mapped + table +
+                    4ull * (layout->sampler_offset[w->dstBinding] + w->dstArrayElement + j), sampler);
+            }
+        }
+    }
+    return 1;
+}
 VkDescriptorSet vk_descriptor_heaps_write(VkDescriptorSetLayout layout, u32 count, const VkWriteDescriptorSet* writes) {
     HeapLayout* l = find_layout(layout);
     if (!l || !g_heaps.ready || (count && !writes)) return VK_NULL_HANDLE;
     VkDeviceSize words = 1;
+    int image_arrays = 0, buffer_batches = 0;
+    u32 buffer_run = 0;
     for (u32 i = 0; i < count; i++) {
         const VkWriteDescriptorSet* w = &writes[i];
         if (w->dstBinding >= SNX_VKB_END || w->descriptorType != l->type[w->dstBinding] ||
@@ -385,6 +574,11 @@ VkDescriptorSet vk_descriptor_heaps_write(VkDescriptorSetLayout layout, u32 coun
         if (w->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
             end = l->sampler_offset[w->dstBinding] + w->dstArrayElement + w->descriptorCount;
         if (end > words) words = end;
+        image_arrays |= w->descriptorCount > 1 &&
+            (w->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
+             w->descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE || w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        buffer_run = batchable_buffer(w) ? buffer_run + 1 : 0;
+        buffer_batches |= buffer_run >= 2;
     }
     vk_cmd();
     u32 slot = vk_frame_slot(), table;
@@ -394,21 +588,11 @@ VkDescriptorSet vk_descriptor_heaps_write(VkDescriptorSetLayout layout, u32 coun
         memset(&g_heaps.cache, 0, sizeof g_heaps.cache);
     if (g_heaps.exhausted[slot]) return VK_NULL_HANDLE;
     if (!allocate(&g_heaps.resource, slot, words * 4, 8, &table)) return VK_NULL_HANDLE;
-    VkBuffer previous_buffer = VK_NULL_HANDLE;
-    VkDeviceAddress previous_address = 0;
-    for (u32 i = 0; i < count; i++) {
-        const VkWriteDescriptorSet* w = &writes[i];
-        for (u32 j = 0; j < w->descriptorCount; j++) {
-            u32 resource, sampler;
-            if (!resource_descriptor(slot, w, j, &previous_buffer, &previous_address, &resource)) return VK_NULL_HANDLE;
-            u32 word = l->offset[w->dstBinding] + w->dstArrayElement + j;
-            snx_st_le32(g_heaps.resource.mapped + table + 4ull * word, resource);
-            if (w->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
-                if (!sampler_descriptor(slot, w->pImageInfo[j].sampler, &sampler)) return VK_NULL_HANDLE;
-                snx_st_le32(g_heaps.resource.mapped + table + 4ull * (l->sampler_offset[w->dstBinding] + w->dstArrayElement + j), sampler);
-            }
-        }
-    }
+    if (buffer_batches) {
+        if (!write_batched_table(slot, l, table, count, writes)) return VK_NULL_HANDLE;
+    } else if (image_arrays) {
+        if (!write_array_table(slot, l, table, count, writes)) return VK_NULL_HANDLE;
+    } else if (!write_scalar_table(slot, l, table, count, writes)) return VK_NULL_HANDLE;
     g_heaps.stats.tables++;
     g_heaps.stats.table_bytes += words * 4;
     g_heaps.stats.full_layout_bytes += l->full_size;

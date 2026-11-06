@@ -2954,6 +2954,12 @@ if(SNX_BUILD_NX AND NOT SNX_TOOLS_ONLY)
         "${VulkanMemoryAllocator_SOURCE_DIR}/include")
     target_link_libraries(snx-test-vk-descriptor-heaps PRIVATE Vulkan::Headers)
     add_test(NAME vk_descriptor_heaps COMMAND snx-test-vk-descriptor-heaps)
+    add_executable(snx-test-vk-descriptor-heap-batch vk_descriptor_heap_batch.c)
+    snx_test_target(snx-test-vk-descriptor-heap-batch 11)
+    target_include_directories(snx-test-vk-descriptor-heap-batch PRIVATE "${volk_SOURCE_DIR}"
+        "${VulkanMemoryAllocator_SOURCE_DIR}/include")
+    target_link_libraries(snx-test-vk-descriptor-heap-batch PRIVATE Vulkan::Headers)
+    add_test(NAME vk_descriptor_heap_batch COMMAND snx-test-vk-descriptor-heap-batch)
     add_executable(snx-test-vk-descriptor-objects vk_descriptor_objects.c
         "${PROJECT_SOURCE_DIR}/src/nx/gpu/vk/descriptor_objects.c")
     snx_test_target(snx-test-vk-descriptor-objects 11)

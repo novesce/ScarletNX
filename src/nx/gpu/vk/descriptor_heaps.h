@@ -3,7 +3,9 @@
 #ifndef SNX_VK_DESCRIPTOR_HEAPS_H
 #define SNX_VK_DESCRIPTOR_HEAPS_H
 #include "common/utilities/bits.h"
+#include "common/utilities/endian.h"
 #include <vulkan/vulkan.h>
+#include <string.h>
 
 /* Existing translated graphics shaders use push bytes0..127. One address per Vulkan set follows them. */
 #define VK_DESCRIPTOR_HEAP_PUSH_OFFSET 128u
@@ -25,6 +27,25 @@ static inline VkDeviceSize vk_descriptor_heap_descriptor_alignment(const VkPhysi
         case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER: return props->imageDescriptorAlignment;
         default: return 0;
     }
+}
+/* Within one image write, equal consumed fields select the same immutable heap indices. Padding and caller
+   addresses never participate. Separate image descriptors never read their ignored sampler field. */
+static inline uint32_t vk_descriptor_heap_image_run(VkDescriptorType type, const VkDescriptorImageInfo* images,
+                                                     uint32_t count) {
+    int combined = type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    if (!images || !count || (!combined && type != VK_DESCRIPTOR_TYPE_STORAGE_IMAGE &&
+                              type != VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE)) return 0;
+    uint32_t run = 1;
+    while (run < count && images[run].imageView == images[0].imageView &&
+           images[run].imageLayout == images[0].imageLayout &&
+           (!combined || images[run].sampler == images[0].sampler)) run++;
+    return run;
+}
+/* The destination holds count4-byte indices. Write from the CPU value only; never read mapped GPU memory to
+   replicate an earlier entry. Byte stores also support an unaligned CPU-model destination. */
+static inline void vk_descriptor_heap_write_index_run(void* destination, uint32_t count, uint32_t value) {
+    uint8_t* bytes = destination;
+    for (uint32_t i = 0; i < count; i++) snx_st_le32(bytes + (size_t)i * 4, value);
 }
 
 typedef struct {
@@ -81,6 +102,83 @@ static inline int vk_descriptor_heap_allocate(const VkDescriptorHeapMemoryPlan* 
     if (absolute > UINT32_MAX) return 0;
     *offset = (uint32_t)absolute;
     *used = at + size;
+    return 1;
+}
+
+#define VK_DESCRIPTOR_HEAP_BUFFER_BATCH 8u
+typedef struct { uint64_t key[4]; uint32_t offset; } VkDescriptorHeapResourceEntry;
+typedef struct {
+    VkDeviceSize used;
+    uint32_t count, misses, changes, exhausted, offsets[VK_DESCRIPTOR_HEAP_BUFFER_BATCH];
+    uint64_t hits, evictions, bytes;
+    struct { VkDescriptorHeapResourceEntry entry; uint32_t bytes; uint64_t hash; } miss[VK_DESCRIPTOR_HEAP_BUFFER_BATCH];
+    struct { uint32_t slot; VkDescriptorHeapResourceEntry entry; } change[VK_DESCRIPTOR_HEAP_BUFFER_BATCH];
+} VkDescriptorHeapBufferBatch;
+/* Lookups see pending replacements in input order. Immutable offsets are copied into each item, so replacing a
+   pending cache slot cannot redirect an earlier descriptor. The unique miss list also deduplicates a key after
+   another pending key evicts it. Planning changes no global cursor, cache entry or mapped heap byte. */
+static inline int vk_descriptor_heap_buffer_plan(VkDescriptorHeapBufferBatch* batch,
+                                                  const VkDescriptorHeapResourceEntry* cache, uint32_t capacity,
+                                                  const VkDescriptorHeapMemoryPlan* plan, uint32_t frame,
+                                                  const uint64_t key[4], uint64_t hash, uint32_t bytes,
+                                                  VkDeviceSize alignment) {
+    if (batch->count == VK_DESCRIPTOR_HEAP_BUFFER_BATCH || capacity < 4 || (capacity & (capacity - 1)) || !key[0])
+        return 0;
+    for (uint32_t i = 0; i < batch->misses; i++)
+        if (batch->miss[i].hash == hash && !memcmp(batch->miss[i].entry.key, key, sizeof batch->miss[i].entry.key)) {
+            batch->offsets[batch->count++] = batch->miss[i].entry.offset;
+            batch->hits++;
+            return 1;
+        }
+    uint32_t first = ((uint32_t)hash & (capacity / 4 - 1)) * 4;
+    uint32_t replacement = first + (uint32_t)(hash >> 32) % 4;
+    for (uint32_t i = 0; i < 4; i++) {
+        uint32_t slot = first + i;
+        const VkDescriptorHeapResourceEntry* entry = &cache[slot];
+        for (uint32_t j = 0; j < batch->changes; j++)
+            if (batch->change[j].slot == slot) { entry = &batch->change[j].entry; break; }
+        if (!entry->key[0]) { replacement = slot; break; }
+        if (!memcmp(entry->key, key, sizeof entry->key)) {
+            batch->offsets[batch->count++] = entry->offset;
+            batch->hits++;
+            return 1;
+        }
+    }
+    VkDeviceSize used = batch->used;
+    uint32_t offset;
+    if (!vk_descriptor_heap_allocate(plan, &used, frame, bytes, alignment, &offset)) {
+        batch->exhausted = 1;
+        return 0;
+    }
+    uint32_t change = 0;
+    while (change < batch->changes && batch->change[change].slot != replacement) change++;
+    const VkDescriptorHeapResourceEntry* previous = change < batch->changes
+        ? &batch->change[change].entry : &cache[replacement];
+    batch->evictions += previous->key[0] != 0;
+    VkDescriptorHeapResourceEntry entry = {.offset = offset};
+    memcpy(entry.key, key, sizeof entry.key);
+    batch->miss[batch->misses].entry = entry;
+    batch->miss[batch->misses].hash = hash;
+    batch->miss[batch->misses++].bytes = bytes;
+    batch->change[change].slot = replacement;
+    batch->change[change].entry = entry;
+    if (change == batch->changes) batch->changes++;
+    batch->offsets[batch->count++] = offset;
+    batch->used = used;
+    batch->bytes += bytes;
+    return 1;
+}
+/* Encoding may fail after writing part of CPU scratch. Publish nothing in that case. A successful chunk writes
+   immutable bytes from CPU scratch only, then installs its cache entries/cursor. Earlier chunks stay valid. */
+static inline int vk_descriptor_heap_buffer_publish(const VkDescriptorHeapBufferBatch* batch,
+                                                     VkDescriptorHeapResourceEntry* cache, VkDeviceSize* used,
+                                                     void* mapped, const void* scratch, size_t stride, int encoded) {
+    if (!encoded || batch->exhausted) return 0;
+    for (uint32_t i = 0; i < batch->misses; i++)
+        memcpy((uint8_t*)mapped + batch->miss[i].entry.offset,
+               (const uint8_t*)scratch + (size_t)i * stride, batch->miss[i].bytes);
+    for (uint32_t i = 0; i < batch->changes; i++) cache[batch->change[i].slot] = batch->change[i].entry;
+    *used = batch->used;
     return 1;
 }
 
@@ -155,12 +253,15 @@ void vk_descriptor_heaps_stats(void);
 typedef struct {
     uint64_t tables, table_bytes, full_layout_bytes, payload_bytes, arena_bytes, resource_bytes, sampler_bytes;
     uint64_t buffer_requests, buffer_driver_calls, buffer_hits, buffer_evictions;
-    uint64_t image_requests, image_driver_calls, image_hits, image_evictions;
-    uint64_t sampler_requests, sampler_driver_calls, sampler_hits, sampler_evictions;
+    uint64_t image_requests, image_driver_calls, image_hits, image_evictions, image_lookups, image_replicas;
+    uint64_t sampler_requests, sampler_driver_calls, sampler_hits, sampler_evictions, sampler_lookups, sampler_replicas;
     uint64_t address_queries, peak_used_bytes;
     uint64_t arena_allocated_bytes, cache_allocated_bytes, reserved_bytes, resource_range_bytes, sampler_range_bytes;
+    uint64_t buffer_native_calls; /* API invocations; buffer_driver_calls remains encoded-element count. */
 } VkDescriptorHeapStats;
-/* Counters are monotonic. Memory values describe physical VMA allocations, reserved ranges and CPU cache storage. */
+/* Counters are monotonic. Requests/payload include every logical element. On successful runs, requests equal
+   lookups+replicas; sampler hits may overlap driver calls when byte interning follows native encoding.
+   Memory values describe physical VMA allocations, reserved ranges and CPU cache storage. */
 void vk_descriptor_heaps_get_stats(VkDescriptorHeapStats* stats);
 
 /* Any legacy descriptor or push command invalidates heap state across both bind points. */

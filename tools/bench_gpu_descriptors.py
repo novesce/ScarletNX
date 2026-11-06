@@ -28,7 +28,8 @@ COUNTERS = ('buffer_requests', 'buffer_driver_calls', 'buffer_hits', 'buffer_evi
             'address_queries', 'full_layout_bytes', 'arena_bytes', 'payload_bytes',
             'frame_advances', 'arena_allocated_bytes', 'cache_allocated_bytes',
             'peak_used_bytes', 'workload_buffer_bytes', 'heap_table_bytes',
-            'heap_sampler_requests', 'heap_sampler_driver_calls', 'heap_sampler_hits',
+            'heap_image_lookups', 'heap_sampler_requests', 'heap_sampler_lookups', 'heap_sampler_replicas',
+            'heap_sampler_driver_calls', 'heap_sampler_hits',
             'heap_reserved_bytes', 'heap_resource_range_bytes', 'heap_sampler_range_bytes')
 MEMORY = ('arena_allocated_bytes', 'cache_allocated_bytes', 'peak_used_bytes',
           'workload_buffer_bytes', 'heap_reserved_bytes', 'heap_resource_range_bytes', 'heap_sampler_range_bytes')
@@ -152,6 +153,10 @@ def pattern_measurements(text, sets, count, backend, recording, images=0, indexe
         for key in COUNTERS:
             if type(row.get(key)) is not int or row[key] < 0:
                 raise ValueError(f'{key} must be a nonnegative integer')
+        if 'heap_buffer_native_calls' in row:
+            calls = row['heap_buffer_native_calls']
+            if type(calls) is not int or calls < 0 or (backend != 2 and calls):
+                raise ValueError('heap buffer API calls do not match the selected backend')
         elements = images + (512 if indexed else 0)
         if backend:
             if row['buffer_requests'] != sets * count or row['image_requests'] != sets * elements:
@@ -160,13 +165,29 @@ def pattern_measurements(text, sets, count, backend, recording, images=0, indexe
                 for field in ('driver_calls', 'hits'):
                     if row[f'{group}_{field}'] > row[f'{group}_requests']:
                         raise ValueError('descriptor calls/hits exceed requests')
+            if row['buffer_driver_calls'] + row['buffer_hits'] != row['buffer_requests']:
+                raise ValueError('buffer calls and hits do not account for every request')
+            image_lookups = row['image_driver_calls'] + row['image_hits']
+            if image_lookups + row['image_replicas'] != row['image_requests']:
+                raise ValueError('image lookups and replicas do not account for every request')
             if not row['arena_allocated_bytes'] or not row['cache_allocated_bytes']:
                 raise ValueError('descriptor memory allocation gauges are missing')
         if backend == 2:
+            # Older baseline binaries omit this field; retain its absence instead of inventing a zero.
+            if 'heap_buffer_native_calls' in row:
+                calls = row['heap_buffer_native_calls']
+                encodings = row['buffer_driver_calls']
+                if type(calls) is not int or calls < 0 or not calls <= encodings <= 8 * calls:
+                    raise ValueError('heap buffer API calls do not account for encoded elements in bounded batches')
             if row['heap_sampler_requests'] != sets * elements:
                 raise ValueError('sampler request counter does not cover the heap workload')
-            if max(row['heap_sampler_hits'], row['heap_sampler_driver_calls']) > row['heap_sampler_requests']:
-                raise ValueError('sampler calls/hits exceed requests')
+            if row['heap_image_lookups'] != image_lookups:
+                raise ValueError('heap image resolver calls do not match encoding calls and hits')
+            if row['heap_sampler_lookups'] + row['heap_sampler_replicas'] != row['heap_sampler_requests']:
+                raise ValueError('sampler lookups and replicas do not account for every request')
+            # A byte-interning hit follows a driver call, so those counters can overlap for one lookup.
+            if max(row['heap_sampler_hits'], row['heap_sampler_driver_calls']) > row['heap_sampler_lookups']:
+                raise ValueError('sampler calls/hits exceed resolver lookups')
             ranges = row['heap_resource_range_bytes'] + row['heap_sampler_range_bytes']
             if not row['heap_resource_range_bytes'] or not row['heap_sampler_range_bytes'] or \
                     row['arena_allocated_bytes'] < ranges or row['heap_reserved_bytes'] >= ranges:

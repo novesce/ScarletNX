@@ -1651,6 +1651,7 @@ uint32_t spv_emit_sample_image_min_lod(SpvEmitter* e, uint32_t result_type, uint
                                        uint32_t offset, int dynamic_offset, uint32_t min_lod) {
     assert(!min_lod || mode != 1);
     if (min_lod) spv_emit_capability(e, 42); /* MinLod */
+    if (offset && dynamic_offset) spv_emit_capability(e, 25); /* Offset requires ImageGatherExtended. */
     uint32_t image = spv_emit_load(e, sampled_type, sampler);
     uint32_t id = spv_emit_id(e);
     uint32_t operands = mode == 1 ? 2 : mode == 2 ? 1 : 0;
