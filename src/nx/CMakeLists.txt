@@ -456,7 +456,10 @@ if(BUILD_TESTING AND SNX_TEST_VULKAN)
     add_test(NAME astc_vulkan COMMAND snx-test-astc-vulkan)
     add_test(NAME astc_vulkan_pieces COMMAND snx-test-astc-vulkan --vk_max_allocation_mb=4)
     add_test(NAME astc_vulkan_upload_wait COMMAND snx-test-astc-vulkan --upload-wait)
-    set_tests_properties(astc_vulkan_upload_wait PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(NAME astc_vulkan_upload_completed COMMAND snx-test-astc-vulkan --upload-completed)
+    add_test(NAME astc_vulkan_upload_partial_prefix COMMAND snx-test-astc-vulkan --upload-partial-prefix)
+    set_tests_properties(astc_vulkan_upload_wait astc_vulkan_upload_completed astc_vulkan_upload_partial_prefix
+                         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
     # pieces, and then the line the program prints only once every comparison passed: a pass expression alone
     # passes the test whatever the exit code
     set_tests_properties(astc_vulkan_pieces PROPERTIES PASS_REGULAR_EXPRESSION

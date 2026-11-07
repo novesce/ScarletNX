@@ -1616,10 +1616,12 @@ u64 vk_cs_skipped(char* why, size_t size);
 
 /* render.c */
 /* ends the dynamic rendering pass, if one is open. The caller's file and line count the passes it ended, which the
-   stats every 600 presents name (vk_pass_ends_log): what splits a frame into many passes */
+   profile and periodic stats name (vk_pass_ends_log): what splits a frame into many passes */
 void vk_render_end_at(const char* file, int line);
 #define vk_render_end() vk_render_end_at(__FILE__, __LINE__)
 void vk_pass_ends_log(void);
+/* Under vk_lock: log capture attempts and their primitive expansion, then reset only these counters. */
+void vk_capture_expansion_log(void);
 /* the on-screen controls and the game's menu over a swapchain image in TRANSFER_DST_OPTIMAL, which it stays in;
    safe is the picture's part clear of the system's bars (gpu/vk/ui.c) */
 void vk_ui_draw(VkCommandBuffer cb, VkImage sc, const int safe[4]);
@@ -1686,6 +1688,7 @@ extern u64 g_vk_drawn, g_vk_skipped; /* draws recorded, and draws skipped (unsup
    this many primitives a draw is skipped instead. Statistics: draws captured, their primitives, the draws skipped */
 #define VK_CAPTURE_PRIMITIVES_MAX 256u
 extern u64 g_vk_capture_draws, g_vk_capture_primitives, g_vk_capture_capped;
+extern u64 g_vk_draw_pushes; /* push commands that supply the constants of guest draws */
 /* draws that kept the last draw's shaders and pipeline key, and those of them draw_state_check made again to compare */
 extern u64 g_vk_draw_kept, g_vk_draw_checked;
 /* draws, clears and the like that kept the last one's render targets, found again through the surface table before */

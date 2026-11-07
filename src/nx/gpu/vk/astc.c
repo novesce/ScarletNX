@@ -51,7 +51,9 @@ static u64 g_rgba8_bytes;
    and no fault in the kernel's log. Past this many blocks an upload waits for the GPU to do them. A wait costs little,
    as the game is held by what the GPU has to do anyway. Splitting them over submissions with no wait did not help */
 #define BC7_QUEUED_BLOCKS (1u << 18)
-static u64 g_bc7_queued;
+static struct {
+    u64 blocks, current, submit;
+} g_bc7_queued;
 
 /* astc.comp's push constants: the strip's width and its slices' height in texels and in blocks, and whether to use
    the specification's sRGB decode mode, whose void extents' R, G and B bytes differ from the UNORM mode's. An SRGB
@@ -327,13 +329,29 @@ int vk_astc_upload(VkCommandBuffer cb, Surf* t, u32 x, u32 y0, u32 w, u32 h, u32
             rec_CmdCopyBufferToImage(cb, from, t->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
             vk_ck(cb, VK_CK_STRIP_DONE, w, height, nz, level);
             if (bc7) {
-                g_bc7_queued += (u64)cx * ((height + 3) / 4) * nz;
-                if (g_bc7_queued >= BC7_QUEUED_BLOCKS) {
-                    g_bc7_queued = 0;
-                    vk_submit_upload_wait();
-                    /* This upload continues after the submission too. Rows callbacks may only stage bytes;
-                       do not leave them, or the next strip's barriers, with the ended command buffer. */
-                    cb = vk_cmd();
+                u64 submit = vk_submit_number(), blocks = (u64)cx * ((height + 3) / 4) * nz;
+                if (g_bc7_queued.submit != submit) {
+                    g_bc7_queued.submit = submit;
+                    g_bc7_queued.current = 0;
+                }
+                g_bc7_queued.blocks += blocks;
+                g_bc7_queued.current += blocks;
+                if (g_bc7_queued.blocks >= BC7_QUEUED_BLOCKS) {
+                    if (g_bc7_queued.blocks > g_bc7_queued.current) {
+                        u64 submitted, done;
+                        vk_submit_progress(&submitted, &done);
+                        /* Older counts are a prefix of this graphics timeline. Drop them only when all submissions
+                           before the current one are complete. A partial prefix stays counted conservatively.
+                           Query only at the limit when old counts exist, not for each strip or a wholly new batch. */
+                        if (submit && done >= submit - 1) g_bc7_queued.blocks = g_bc7_queued.current;
+                    }
+                    if (g_bc7_queued.blocks >= BC7_QUEUED_BLOCKS) {
+                        vk_submit_upload_wait();
+                        g_bc7_queued.blocks = g_bc7_queued.current = g_bc7_queued.submit = 0;
+                        /* This upload continues after the submission too. Rows callbacks may only stage bytes;
+                           do not leave them, or the next strip's barriers, with the ended command buffer. */
+                        cb = vk_cmd();
+                    }
                 }
             }
         }

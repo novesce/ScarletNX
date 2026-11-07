@@ -534,4 +534,6 @@ static void gp_report(void) {
     memset(g_key, 0, sizeof g_key);
     g_pass_ns = g_span_ns = g_frames = g_lost = 0;
     gp_idle_report();
+    vk_capture_expansion_log();
+    vk_pass_ends_log();
 }

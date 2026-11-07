@@ -24,6 +24,12 @@ GPU_MARKER = 'PASS NVN array copies: image texels, mirrored layers, view offsets
 GPU_FEATURES = (
     ('array_copies', 'PASS NVN array copies:', None),
     ('indirect_compute', 'PASS indirect compute dispatch:', None),
+    ('graphics_push_constants', 'PASS graphics push constants:', None),
+    ('vertex_binding_cache', 'PASS vertex binding cache:', None),
+    ('descriptor_barrier_fallback', 'PASS descriptor barrier fallback:', None),
+    ('storage_image_barriers', 'PASS repeated storage-image dependencies:', 'SKIP repeated storage-image dependencies:'),
+    ('inert_advanced', 'PASS inert advanced blend:', 'SKIP inert advanced blend:'),
+    ('srgb_crop', 'PASS sRGB crop backing:', None),
     ('shader_windows', 'PASS shader read windows:', None),
     ('shader_windows_owned', 'PASS shader read windows GPU-owned BRX:', 'SKIP shader read windows GPU-owned BRX:'),
     ('texture_half', 'PASS half texture rounding:', 'SKIP half texture rounding:'),

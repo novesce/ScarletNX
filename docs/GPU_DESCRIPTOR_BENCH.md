@@ -47,8 +47,10 @@ Khronos validation 1.4.367 has a descriptor-buffer-to-heap transition defect: it
 slots after validating heap state and reports `08117`. Keep those messages in validation results. The
 [heap invalidation rules](https://docs.vulkan.org/spec/latest/chapters/descriptorheaps.html#descriptorheaps-bind)
 and the [validator's fall-through](https://github.com/KhronosGroup/Vulkan-ValidationLayers/blob/2b27c8bbb93842870f33f83e6892990dfd3bcb4a/layers/core_checks/cc_drawdispatch.cpp#L1672-L1735)
-describe the mismatch. The standalone transition fixture checks output separately; a pixel pass does not make its
-validation log error-free. The renderer adds no workaround state calls or validation suppression.
+describe the mismatch. When a command buffer switches from previously bound descriptor-buffer offsets to heaps,
+the renderer first disturbs the legacy graphics slots with an incompatible empty-set binding. The immutable empty
+set belongs to the device; ordinary heap draws add no transition command. Keep validation enabled for the transition
+fixture and require both exact output and a clean validation log. The renderer suppresses no validation messages.
 
 ## Cache capacity experiments
 
@@ -77,3 +79,56 @@ python3 tests/bench_gpu_descriptors_test.py
 python3 tests/analyze_descriptor_cache_test.py
 python3 tests/analyze_gpu_budget_test.py
 ```
+
+## Repeated draw state
+
+Guest draws compare graphics push constants as bytes. An identical range needs no command; a changed range keeps
+its original offset and size. The cache covers bytes 0 through 127, before heap descriptor table addresses. New
+command buffers, helper graphics work and heap mode or epoch changes invalidate it. Float bits, including NaNs and
+signed zeros, remain part of the comparison. Vertex bindings also retain their complete native buffer window:
+handle, offset, size and applicable dynamic stride. A pipeline change forces a new vertex bind.
+
+`SNX_TEST_NVN_CASE=push_constants` checks repeated constants, changed alpha references, masked clears and command
+buffer changes. `SNX_TEST_NVN_CASE=vertex_binding_cache` checks changed vertex windows and state resets. Also run the
+latter with `--vertex_input_dynamic_state=off` to check strides supplied by the binding command.
+
+For timing, build immutable baseline and candidate binaries with identical fixtures. The large fixture warms each
+phase, then measures 65,536 draws, GPU completion included. Each phase checks exact pixels after its timed interval.
+Run without validation, then run the correctness cases separately with `--vk_validation=1`:
+
+```sh
+SNX_TEST_NVN_CASE=push_constants_bench python3 tools/bench_gpu_hotpaths.py \
+    --baseline /local/baseline --candidate cached=/local/candidate --rounds 7 \
+    --arg=-H --arg=--vk_memory=1 --arg=--vk_descriptors=2 --arg=--vk_record=1 \
+    --out /local/draw-state-results
+```
+
+The replay fixture has nine CPU workloads: 1, 32 or 256 records per submit, in batches of 1, 8 or 32 submits. It
+checks draw counts and the exact completion frontier. Out-of-order queue tests and shuffled completion tests also
+check that command memory remains live until all earlier submissions finish.
+
+```sh
+python3 tools/bench_gpu_hotpaths.py --baseline /local/replay-baseline \
+    --candidate frontier=/local/replay-candidate --arg=--bench-replay \
+    --dimension=records --dimension=batch --rounds 7 --out /local/replay-results
+```
+
+These measurements describe fixed preparation workloads. Keep their results separate from game frame times.
+
+Storage-image setup defers image transitions until all graphics stages resolve their descriptors. One combined
+transition per unique surface supplies the complete graphics access scope before the draw. The
+`SNX_TEST_NVN_CASE=storage_image_barriers` fixture counts actual image dependencies outside its timed batch and checks
+every stored and untouched byte. `storage_image_barriers_bench` runs a larger batch.
+
+An advanced color equation needs no fallback work when its color mask is zero or raster discard is active. The
+ordinary draw still executes its applicable shader stores, depth/stencil operations, queries and transform feedback.
+`SNX_TEST_NVN_CASE=inert_advanced` compares those effects and preserved color against ordinary draws.
+
+sRGB targets retain sRGB backing images. Where supported, extended image usage permits storage access through a
+compatible linear view. Their snapshots retain the requested image format and view interpretation, with separate
+copies for other format reinterpretations. `SNX_TEST_NVN_CASE=srgb_crop` checks native backing formats, full and
+cropped snapshots, actual copy commands, cache reuse, refreshed generations, sampled bytes and sRGB conversion.
+
+`vk_gpu_profile=1` also reports pass-end sites and capture expansion every ten seconds. Capture totals distinguish
+guest attempts from internal primitive slices and give the largest expansion for advanced blend, coverage-to-color
+and mixed-sample fallbacks. These counters expose work hidden by the ordinary guest-draw total.

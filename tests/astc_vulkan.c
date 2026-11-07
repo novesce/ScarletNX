@@ -573,6 +573,101 @@ static int upload_wait_case(void) {
     return 0;
 }
 
+/* Restrict the completion query to a true, older prefix. This models progress that the host has not yet
+   observed, without a blocked queue or a timing-dependent race. The real waits and queue calls stay intact. */
+static struct {
+    PFN_vkGetSemaphoreCounterValue counter;
+    u64 prefix;
+} g_upload_progress;
+static VKAPI_ATTR VkResult VKAPI_CALL upload_prefix_counter(VkDevice device, VkSemaphore semaphore, u64* value) {
+    VkResult result = g_upload_progress.counter(device, semaphore, value);
+    if (result == VK_SUCCESS && semaphore == vk_gfx_timeline() && *value > g_upload_progress.prefix)
+        *value = g_upload_progress.prefix;
+    return result;
+}
+/* Eight uploads reach 256Ki blocks in total, but each upload completes before the next one starts. The encoder
+   must not wait for those completed blocks again. With a partial observed prefix, it must keep the old counts.
+   Each round alternates between two independently encoded colors and checks all blocks outside the timed part. */
+static int upload_completed_case(int benchmark, int partial) {
+    const u32 w = 1024, h = 512, nx = w / 4, ny = h / 4, rounds = benchmark ? 64 : 8;
+    VkImageFormatProperties props;
+    if (!g_vk.feat.textureCompressionBC ||
+        vkGetPhysicalDeviceImageFormatProperties(g_vk.phys, VK_FORMAT_BC7_UNORM_BLOCK, VK_IMAGE_TYPE_2D,
+            VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+            0, &props) != VK_SUCCESS || props.maxExtent.width < w || props.maxExtent.height < h) {
+        puts("SKIP BC7 completed uploads: the device has no suitable BC7 image");
+        return 77;
+    }
+    Surf t = {.w = w, .h = h, .layers = 1, .levels = 1, .depth3d = 1,
+              .f = {.vk = VK_FORMAT_BC7_UNORM_BLOCK, .bw = 4, .bh = 4}};
+    VkImageCreateInfo image = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D, .format = t.f.vk, .extent = {w, h, 1}, .mipLevels = 1,
+        .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
+    if (!vk_image_create(&image, &t.img, &t.mem)) fatal("BC7 completed uploads: cannot create the image\n");
+    const u64 bytes = (u64)nx * ny * 16;
+    u8* blocks = malloc((size_t)bytes);
+    if (!blocks) fatal("BC7 completed uploads: no source memory\n");
+    u8 expected[2][16];
+    for (u32 color = 0; color < 2; color++) {
+        u8 texels[64], decoded[64];
+        memset(texels, color ? 255 : 0, sizeof texels);
+        bc7_encode_cpu(texels, 4, 4, 1, expected[color]);
+        bcn_decode_image(expected[color], 4, 4, BCN_BC7, decoded);
+        if (memcmp(texels, decoded, sizeof texels)) fatal("BC7 completed uploads: inexact color reference\n");
+    }
+    const u8 header[8] = {0xfc, 0xfd, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+    g_upload_progress.counter = vkGetSemaphoreCounterValue;
+    g_upload_progress.prefix = 0;
+    u64 ns = 0, record_ns = 0, submissions = 0;
+    for (u32 r = 0; r < rounds; r++) {
+        for (u32 i = 0; i < nx * ny; i++) {
+            memcpy(blocks + (size_t)i * 16, header, sizeof header);
+            memset(blocks + (size_t)i * 16 + 8, r & 1 ? 255 : 0, 8);
+        }
+        barrier(t.img, r ? VK_PIPELINE_STAGE_2_COPY_BIT : VK_PIPELINE_STAGE_2_NONE,
+            r ? VK_ACCESS_2_TRANSFER_READ_BIT : 0,
+            r ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        UploadWaitSource source = {.level = {blocks, nx, ny, NULL, 0, 0}};
+        u64 before = vk_last_submit(), start = plat_ns();
+        if (partial) vkGetSemaphoreCounterValue = upload_prefix_counter;
+        int uploaded = vk_astc_upload(vk_cmd(), &t, 0, 0, w, h, 1, 0, 0, upload_wait_rows, &source);
+        vkGetSemaphoreCounterValue = g_upload_progress.counter;
+        if (!uploaded) fatal("BC7 completed uploads: upload failed\n");
+        record_ns += plat_ns() - start;
+        submissions += vk_last_submit() - before;
+        vk_finish();
+        ns += plat_ns() - start;
+        barrier(t.img, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        VkBuffer back;
+        u8* actual = vk_readback_buffer(bytes, &back);
+        if (!actual) fatal("BC7 completed uploads: no readback memory\n");
+        VkBufferImageCopy copy = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+            .imageExtent = {w, h, 1}};
+        rec_CmdCopyImageToBuffer(vk_cmd(), t.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, back, 1, &copy);
+        vk_finish();
+        vk_readback_ready();
+        for (u32 i = 0; i < nx * ny; i++)
+            if (memcmp(actual + (size_t)i * 16, expected[r & 1], 16))
+                fatal("BC7 completed uploads: round %u block %u differs\n", r, i);
+        if (partial && r == 3) g_upload_progress.prefix = vk_last_submit();
+    }
+    free(blocks);
+    vk_image_destroy(t.img, t.mem);
+    if (errors) fatal("BC7 completed uploads: %u validation errors\n", errors);
+    if (!benchmark && submissions != (u64)partial)
+        fatal("BC7 completed uploads: expected %u internal submissions, got %llu\n",
+            partial, (unsigned long long)submissions);
+    printf("GPU_HOTPATH_BENCH workload=bc7_%s_upload operations=%u ns=%llu exact=1 blocks=%u bytes=%llu "
+           "internal_submissions=%llu record_ns=%llu\n", partial ? "partial_prefix" : "completed", rounds,
+        (unsigned long long)ns, nx * ny, (unsigned long long)bytes, (unsigned long long)submissions,
+        (unsigned long long)record_ns);
+    return 0;
+}
+
 /* A region of a level uploaded again over its whole upload, as texture.c loads the blocks of the pages that changed:
    rnx by rny new blocks at block (rx, ry) of a w x h level, its sides on 4x4 blocks of a BC7 image or at the level's
    edges. The image is then the CPU decoder's (and the encoder's, for BC7) of all the level's blocks as they are now,
@@ -1034,7 +1129,7 @@ static void bc_native_case(void) {
 }
 
 int main(int argc, char** argv) {
-    int large = 0, upload_wait = 0;
+    int large = 0, upload_wait = 0, upload_completed = 0;
     /* --vk_max_allocation_mb=N as the runtime takes it (ctest's astc_vulkan_pieces: 4), and --large */
     for (int i = 1; i < argc; i++)
         if (!strncmp(argv[i], "--vk_max_allocation_mb=", 23)) g_settings.vulkan_allocation_cap = atoi(argv[i] + 23);
@@ -1043,8 +1138,15 @@ int main(int argc, char** argv) {
             large = 2;
         else if (!strcmp(argv[i], "--upload-wait"))
             upload_wait = 1;
+        else if (!strcmp(argv[i], "--upload-completed"))
+            upload_completed = 1;
+        else if (!strcmp(argv[i], "--upload-partial-prefix"))
+            upload_completed = 2;
+        else if (!strcmp(argv[i], "--bench-upload-completed"))
+            upload_completed = 3;
     init();
     if (upload_wait) return upload_wait_case();
+    if (upload_completed) return upload_completed_case(upload_completed == 3, upload_completed == 2);
     if (large == 2) {
         bench(4096, 4096, 3);
         return 0;

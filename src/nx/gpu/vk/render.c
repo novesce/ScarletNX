@@ -995,13 +995,37 @@ typedef struct {
     u32 tic[8], tsc[8];
     Surf* t;
 } TexRes;
+typedef struct {
+    u64 draws, slices, max_slices;
+} CaptureExpansion;
 /* A capture slice shares the original shader state but writes host-only scratch attachments. */
 static struct {
     VkCapture* images;
     Surf* snapshot;
     u32 primitive;
     VkDescriptorBufferInfo shadow;
+    CaptureExpansion expansion[3]; /* advanced blend, coverage-to-color, mixed samples; since their own last report */
 } g_capture_draw;
+static void capture_expansion_note(u32 reason, u64 slices) {
+    CaptureExpansion* stats = &g_capture_draw.expansion[reason];
+    stats->draws++;
+    stats->slices += slices;
+    if (slices > stats->max_slices) stats->max_slices = slices;
+}
+void vk_capture_expansion_log(void) {
+    static const char* const names[3] = {"advanced blend", "coverage-to-color", "mixed samples"};
+    u64 draws = 0;
+    for (u32 reason = 0; reason < 3; reason++) {
+        const CaptureExpansion* stats = &g_capture_draw.expansion[reason];
+        draws += stats->draws;
+        if (stats->draws)
+            LOG("vulkan: capture %s since previous capture report: %llu guest draws attempted, %llu source slices, "
+                "%llu largest slices per draw\n", names[reason], (unsigned long long)stats->draws,
+                (unsigned long long)stats->slices, (unsigned long long)stats->max_slices);
+        g_capture_draw.expansion[reason] = (CaptureExpansion){0};
+    }
+    if (!draws) LOG("vulkan: capture since previous capture report: no guest draws attempted\n");
+}
 static Surf* capture_sample(Surf* texture) {
     if (!g_capture_draw.images || texture != g_capture_draw.images->target) return texture;
     if (!g_capture_draw.snapshot) g_capture_draw.snapshot = vk_rt_snapshot(texture);
@@ -2243,11 +2267,7 @@ static VkDescriptorSet stage_set_(const DsState* ds, int stage, VkSh* s, Surf** 
         images->surf[images->n] = surf;
         images->size[images->n] = (u32)size;
         images->n++;
-        static const VkPipelineStageFlags2 image_stages[5] = {
-            VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT, VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT,
-            VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT, VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT,
-            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT};
-        vk_surf_use(vk_cmd(), surf, VK_IMAGE_LAYOUT_GENERAL, image_stages[stage], VK_STORAGE_IMAGE_ACCESS);
+        /* All stages' storage images transition together after setup finishes. No guest draw has used them yet. */
         u32 binding = SNX_VKB_IMG + (u32)i;
         d.ii[binding] = (VkDescriptorImageInfo){VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL};
         d.w[d.n++] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
@@ -2288,6 +2308,13 @@ static struct {
     int vi_set;
     VertexLayout vi;
     VkDeviceSize vi_stride[33];
+    u32 push_valid, push_words[32];
+    u32 vertex_count;
+    int vertex_stride;
+    struct {
+        VkBuffer buffer;
+        VkDeviceSize offset, size, stride;
+    } vertex[33];
 } g_dyn;
 #define DYN(field, value, call)                                                                                        \
     do {                                                                                                               \
@@ -2304,8 +2331,49 @@ static struct {
         }                                                                                                              \
     } while (0)
 void vk_render_forget_state(void) { g_dyn.cb = 0; }
-u64 g_vk_drawn, g_vk_skipped;
+u64 g_vk_drawn, g_vk_skipped, g_vk_draw_pushes;
 u64 g_vk_capture_draws, g_vk_capture_primitives, g_vk_capture_capped;
+
+/* All guest graphics layouts have the same 128-byte push range. The compute-only helper pushes do not change its
+   graphics-stage values. Other graphics helpers call vk_render_forget_state, so a fresh command buffer, helper draw,
+   or heap mode/epoch change also clears this cache. Heap descriptor table addresses start at byte 128, outside it.
+   Keep the bits of float values: NaNs and signed zeros must not compare as arithmetic values here. */
+static inline void draw_push(VkCommandBuffer cb, u32 offset, u32 size, const void* data) {
+    u32 first = offset / 4, words = size / 4;
+    u32 valid = (0xffffffffu >> (32 - words)) << first;
+    if ((g_dyn.push_valid & valid) == valid && !memcmp(g_dyn.push_words + first, data, size)) return;
+    rec_CmdPushConstants(cb, g_vk_playout, VK_PUSH_STAGES, offset, size, data);
+    g_vk_draw_pushes++;
+    memcpy(g_dyn.push_words + first, data, size);
+    g_dyn.push_valid |= valid;
+}
+
+/* Vertex bindings persist within a command buffer. The complete buffer window matters: a smaller size must still
+   enforce guest bounds even when its handle and offset stay the same. A pipeline change forces a bind because a
+   pipeline with static stride can invalidate a prior dynamic stride. Other graphics callers forget g_dyn. */
+static inline void vertex_buffers_set(VkCommandBuffer cb, u32 count, const VkBuffer* buffers, const VkDeviceSize* offsets,
+                                const VkDeviceSize* sizes, const VkDeviceSize* strides, int force) {
+    if (!count) {
+        g_dyn.vertex_count = 0;
+        return;
+    }
+    u32 same = 0;
+    if (!force && g_dyn.vertex_count == count && g_dyn.vertex_stride == !!strides)
+        for (; same < count; same++)
+            if (g_dyn.vertex[same].buffer != buffers[same] || g_dyn.vertex[same].offset != offsets[same] ||
+                g_dyn.vertex[same].size != sizes[same] || (strides && g_dyn.vertex[same].stride != strides[same]))
+                break;
+    if (same == count) return;
+    rec_CmdBindVertexBuffers2(cb, 0, count, buffers, offsets, sizes, strides);
+    g_dyn.vertex_count = count;
+    g_dyn.vertex_stride = !!strides;
+    for (u32 i = 0; i < count; i++) {
+        g_dyn.vertex[i].buffer = buffers[i];
+        g_dyn.vertex[i].offset = offsets[i];
+        g_dyn.vertex[i].size = sizes[i];
+        if (strides) g_dyn.vertex[i].stride = strides[i];
+    }
+}
 
 /* The viewport's size with the transform off: the surface clip's, at most the device's viewport dimensions at the
    resolution scale (a game's driver leaves the clip at 16384 x 16384, past every target). The last stage divides
@@ -3379,7 +3447,8 @@ retry:
     DsBlend reduced_blend = ds->blend;
     int fixed_reduction = dc->advanced_blend[0] && nvn_blend_advanced(&reduced_blend, 0, dc->advanced_blend[0]);
     int any_advanced =
-        dc->advanced_blend[0] && !capture && ds->blend.en[0] && !ds->blend.logic_op && n && rt[0] && !rt[0]->f.is_int;
+        dc->advanced_blend[0] && !capture && ds->blend.en[0] && (ds->blend.mask[0] & 15) && !ds->dyn.discard &&
+        !ds->blend.logic_op && n && rt[0] && !rt[0]->f.is_int;
     int only_first = 1;
     for (u32 i = 1; i < n; i++)
         if (rt[i] && ds->blend.mask[i]) only_first = 0;
@@ -4080,7 +4149,8 @@ retry:
         memset(g_dyn.sets, 0, sizeof g_dyn.sets);
         g_dyn.set_binds = vk_rec_set_binds();
     }
-    if (fresh || g_dyn.pipe != pipe) {
+    int pipe_changed = fresh || g_dyn.pipe != pipe;
+    if (pipe_changed) {
         g_dyn.pipe = pipe;
         rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
     }
@@ -4106,9 +4176,8 @@ retry:
         }
     if (g_vk.vertex_input_dynamic) vertex_input_set(cb, pl, fresh);
     /* the strides: the layout's with dynamic vertex input, else dynamic state of their own where the device has it */
-    if (pl->vi.nbind)
-        rec_CmdBindVertexBuffers2(cb, 0, pl->vi.nbind, vbuf, voff, vsize,
-                                  !g_vk.vertex_input_dynamic && g_vk.has_dynamic_stride ? pl->stride : NULL);
+    vertex_buffers_set(cb, pl->vi.nbind, vbuf, voff, vsize,
+                        !g_vk.vertex_input_dynamic && g_vk.has_dynamic_stride ? pl->stride : NULL, pipe_changed);
 
     u32 viewports = last->si.writes_viewport ? GUEST_VIEWPORTS : 1;
     /* Empty viewports still run pre-raster stages and transform feedback. The zero scissor below suppresses pixels. */
@@ -4284,8 +4353,7 @@ retry:
         memcpy(pc + 14, dc->tess_levels + 4, 2 * sizeof pc[0]);
     }
     if (capture) memcpy(&pc[28], &g_capture_draw.primitive, sizeof g_capture_draw.primitive);
-    rec_CmdPushConstants(cb, g_vk_playout, VK_PUSH_STAGES, 0,
-                         g_vk.has_descriptor_heaps && capture ? sizeof pc : 20 * sizeof pc[0], pc);
+    draw_push(cb, 0, g_vk.has_descriptor_heaps && capture ? sizeof pc : 20 * sizeof pc[0], pc);
     if (texture) {
         Surf* source = fres[0].t;
         if (!source || !rt[0]) {
@@ -4299,11 +4367,11 @@ retry:
             texture->sx0 / source->w, texture->sy0 / source->h,
             (float)((texture->sx0 + texture->du * texture->w) / source->w),
             (float)((texture->sy0 + texture->dv * texture->h) / source->h)};
-        rec_CmdPushConstants(cb, g_vk_playout, VK_PUSH_STAGES, 80, sizeof rectangle, rectangle);
+        draw_push(cb, 80, sizeof rectangle, rectangle);
     }
 
     if (capture && !g_vk.has_descriptor_heaps)
-        rec_CmdPushConstants(cb, layout, VK_PUSH_STAGES, 112, sizeof g_capture_draw.primitive, &g_capture_draw.primitive);
+        draw_push(cb, 112, sizeof g_capture_draw.primitive, &g_capture_draw.primitive);
 
     /* counted by the channel's samples-passed counter when it runs: the targets' samples, which the guest's are */
     vk_query_draw(cb, ds->owner);
@@ -4363,9 +4431,17 @@ retry:
    coverage masks preserve overlap order. The normal native/interlock paths do not pay this fallback's cost. */
 static int capture_draw(const DsState* ds, const DrawCall* dc, DrawOwner* owner, Surf* target, u64 blend,
                          int coverage, const VkCoverage* mixed, VkCapture* prepared) {
-    if (!mixed && dc->raster_samples > (u32)vk_surf_samples(target)) return 0;
+    u32 reason = mixed ? 2 : coverage ? 1 : 0;
+    u64 slices = 0;
+    if (!mixed && dc->raster_samples > (u32)vk_surf_samples(target)) {
+        capture_expansion_note(reason, slices);
+        return 0;
+    }
     VkCapture* images = mixed ? prepared : vk_capture_get(target);
-    if (!images) return 0;
+    if (!images) {
+        capture_expansion_note(reason, slices);
+        return 0;
+    }
     DrawCall slice = *dc;
     slice.multisample_flags &= ~DS_MS_COVERAGE_TO_COLOR;
     if (mixed) {
@@ -4394,6 +4470,7 @@ static int capture_draw(const DsState* ds, const DrawCall* dc, DrawOwner* owner,
             u64 drawn = g_vk_drawn;
             render_draw(ds, &slice, owner, NULL);
             if (g_vk_drawn != drawn + 1) { complete = 0; break; }
+            slices++;
             u32 flags = images->flags | (ds->blend.mask[0] & 15);
             if (ds->tgt.srgb_write && target->f.vk != vk_srgb_as(target->f.vk, 0)) flags |= SH_BLEND_SRGB;
             int resolved = mixed ? vk_capture_mixed_resolve(images, mixed, ds, g_draw.fs->si.sph[18])
@@ -4404,6 +4481,7 @@ static int capture_draw(const DsState* ds, const DrawCall* dc, DrawOwner* owner,
     g_capture_draw.images = NULL;
     g_capture_draw.snapshot = NULL;
     g_draw.sh.vs = NULL;
+    capture_expansion_note(reason, slices);
     if (complete) {
         g_vk_drawn = before + 1;
         g_vk_capture_draws++;

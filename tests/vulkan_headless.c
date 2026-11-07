@@ -381,7 +381,18 @@ static void stats_frames(u32 n, VkBuffer from, VkBuffer to, u64 size) {
     VkBufferCopy copy = {0, 0, size};
     for (u32 i = 0; i < n; i++) {
         VkCommandBuffer cb = vk_cmd();
-        if (size) rec_CmdCopyBuffer(cb, from, to, 1, &copy);
+        if (size) {
+            /* Reusing the destination in the next submission still needs a transfer-write dependency. */
+            VkBufferMemoryBarrier2 barrier = {.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+                .srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT, .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                .dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT, .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .buffer = to, .offset = 0, .size = size};
+            VkDependencyInfo dependency = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                .bufferMemoryBarrierCount = 1, .pBufferMemoryBarriers = &barrier};
+            rec_CmdPipelineBarrier2(cb, &dependency);
+            rec_CmdCopyBuffer(cb, from, to, 1, &copy);
+        }
         vk_frame_next();
     }
     for (u32 i = 0; i < VK_FRAMES; i++) {
@@ -4956,6 +4967,9 @@ static int check_uma_page_changes(void) {
 #include "vulkan_nvn_copy_conversions.inc"
 #include "vulkan_nvn_xfb.inc"
 #include "vulkan_nvn_state.inc"
+#include "vulkan_push_constants.inc"
+#include "vulkan_vertex_bind_cache.inc"
+#include "vulkan_descriptor_barriers.inc"
 #include "vulkan_nvn_events.inc"
 #include "vulkan_nvn_subroutines.inc"
 #include "vulkan_nvn_tess.inc"
@@ -4972,12 +4986,15 @@ static int check_uma_page_changes(void) {
 #include "vulkan_nvn_blend_resolve.inc"
 #include "vulkan_nvn_blend_capture.inc"
 #include "vulkan_late_depth_shadow.inc"
+#include "vulkan_inert_advanced.inc"
+#include "vulkan_srgb_crop.inc"
 #include "vulkan_capture_bench.inc"
 #include "vulkan_sparse_bench.inc"
 #include "vulkan_storage_lookup_bench.inc"
 #include "vulkan_storage_buffer_keep.inc"
 #include "vulkan_fragment_barrier.inc"
 #include "vulkan_capture_cap.inc"
+#include "vulkan_storage_image_barriers.inc"
 
 /* key's row among the settings the runtime applies itself (options.c's), or NULL */
 static const IniOpt* setting_row(const char* key) {
@@ -5210,6 +5227,24 @@ static int run_headless(int argc, char** argv) {
         int result;
         if (!strcmp(name, "events"))
             result = check_nvn_event_order();
+        else if (!strcmp(name, "push_constants"))
+            result = check_push_constants(32);
+        else if (!strcmp(name, "push_constants_bench"))
+            result = check_push_constants(65536);
+        else if (!strcmp(name, "vertex_binding_cache"))
+            result = check_vertex_binding_changes();
+        else if (!strcmp(name, "descriptor_barrier_fallback"))
+            result = check_descriptor_barrier_fallback();
+        else if (!strcmp(name, "storage_image_barriers"))
+            result = check_storage_image_barriers(32);
+        else if (!strcmp(name, "storage_image_barriers_bench"))
+            result = check_storage_image_barriers(4096);
+        else if (!strcmp(name, "inert_advanced"))
+            result = check_inert_advanced(64, 1);
+        else if (!strcmp(name, "inert_advanced_bench"))
+            result = check_inert_advanced(128, 0);
+        else if (!strcmp(name, "srgb_crop"))
+            result = check_srgb_crop();
         else if (!strcmp(name, "subroutines"))
             result = check_nvn_subroutine_calls();
         else if (!strcmp(name, "copies"))
@@ -5434,6 +5469,12 @@ static int run_headless(int argc, char** argv) {
     CHECK(!check_nvn_stencil_masks());
     CHECK(!check_nvn_xfb());
     CHECK(!check_nvn_fixed_state());
+    CHECK(!check_push_constants(32));
+    CHECK(!check_vertex_binding_changes());
+    CHECK(!check_descriptor_barrier_fallback());
+    CHECK(!check_storage_image_barriers(32));
+    CHECK(!check_inert_advanced(64, 1));
+    CHECK(!check_srgb_crop());
     CHECK(!check_nvn_default_tessellation());
     CHECK(!check_nvn_advanced_blend());
     CHECK(!check_nvn_coverage());

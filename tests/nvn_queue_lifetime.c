@@ -450,28 +450,132 @@ static void retained_texture_snapshot(void) {
     nvn_replay_queue_free(a);
     nvn_replay_queue_free(b);
 }
+/* Two blocked queues keep two distinct frontier positions. Later submissions and non-submit jobs must not let
+   command spill memory go before either queue consumes its records. */
+static void completion_frontier(void) {
+    assert(!fixture.count && nvn_replay_walked() == nvn_replay_submitted());
+    u64 before = nvn_replay_walked(), ready = 0;
+    u32 a = nvn_replay_queue(), b = nvn_replay_queue(), c = nvn_replay_queue(), shown = 0;
+    u32 draws = fixture.draws;
+    for (u32 i = 0; i < 2; i++) {
+        u64 record = 0x1000 + i * 64ull, event = 0xc00 + i * 4ull;
+        gw32(event, 0);
+        *(NvnRecHdr*)(void*)GP(record) = (NvnRecHdr){OP_WAIT_EVENT, 24};
+        *(NvnPWaitEvent*)(void*)GP(record + 8) = (NvnPWaitEvent){event, NVN_EVENT_WAIT_MODE_EQUAL, 1};
+        *(NvnRecHdr*)(void*)GP(record + 24) = (NvnRecHdr){OP_DRAW | NVN_REC_LAST, 8};
+        gw64(0x108, record);
+        nvn_replay_submit(i ? b : a, 1, 0x108, &ready, &shown);
+    }
+    *(NvnRecHdr*)(void*)GP(0x1080) = (NvnRecHdr){OP_DRAW | NVN_REC_LAST, 8};
+    gw64(0x108, 0x1080);
+    nvn_replay_submit(c, 1, 0x108, &ready, &shown);
+    assert(pump() && fixture.draws == draws + 1 && nvn_replay_walked() == before);
+    assert(!pump() && nvn_replay_walked() == before);
+
+    nvn_replay_fence(c, 0x900, 0, 0);
+    assert(pump() && nvn_replay_walked() == before);
+    nvn_replay_wait(c, NVN_OBJ(NvnSync, 0x900));
+    assert(pump() && nvn_replay_walked() == before);
+    NvnReplayPresent present = {0};
+    assert(!g_renderer_up);
+    nvn_replay_present(c, &present, &shown);
+    assert(pump() && nvn_replay_walked() == before);
+    nvn_replay_queue_free(c);
+    assert(nvn_replay_walked() == before && fixture.count == 2);
+
+    gw32(0xc00, 1);
+    assert(pump() && fixture.draws == draws + 2 && nvn_replay_walked() == before + 1);
+    assert(!pump() && nvn_replay_walked() == before + 1);
+    nvn_replay_finish(a);
+    nvn_replay_queue_free(a);
+    assert(nvn_replay_walked() == before + 1);
+    gw32(0xc04, 1);
+    assert(pump() && fixture.draws == draws + 3 && nvn_replay_walked() == before + 3);
+    assert(nvn_replay_walked() == nvn_replay_submitted());
+    nvn_replay_queue_free(b);
+
+    /* One outstanding submit takes the constant-time case. The following fence and destroy keep the frontier. */
+    c = nvn_replay_queue();
+    gw64(0x108, 0x1080);
+    nvn_replay_submit(c, 1, 0x108, &ready, &shown);
+    assert(nvn_replay_walked() == before + 3);
+    assert(pump() && fixture.draws == draws + 4 && nvn_replay_walked() == before + 4);
+    nvn_replay_finish(c);
+    nvn_replay_queue_free(c);
+    assert(!fixture.count && nvn_replay_walked() == nvn_replay_submitted());
+}
+/* Each queue waits on a separate event. Shuffled completions must retain the oldest live serial through pool reuse. */
+static void completion_frontier_stress(void) {
+    u32 queues[8], random = 0x6d2b79f5u;
+    assert(!fixture.count && nvn_replay_walked() == nvn_replay_submitted());
+    for (u32 i = 0; i < 8; i++) queues[i] = nvn_replay_queue();
+    /* 1,024 submissions visit each of the 512 pool slots twice, with no outstanding work between rounds. */
+    for (u32 round = 0; round < 128; round++) {
+        u64 first = nvn_replay_submitted(), ready = 0;
+        u32 shown = 0, draws = fixture.draws, order[8], completed = 0;
+        for (u32 i = 0; i < 8; i++) {
+            u64 record = 0x2000 + i * 64ull, event = 0xd00 + i * 4ull;
+            order[i] = i;
+            gw32(event, 0);
+            *(NvnRecHdr*)(void*)GP(record) = (NvnRecHdr){OP_WAIT_EVENT, 24};
+            *(NvnPWaitEvent*)(void*)GP(record + 8) = (NvnPWaitEvent){event, NVN_EVENT_WAIT_MODE_EQUAL, 1};
+            *(NvnRecHdr*)(void*)GP(record + 24) = (NvnRecHdr){OP_DRAW | NVN_REC_LAST, 8};
+            gw64(0x180, record);
+            nvn_replay_submit(queues[i], 1, 0x180, &ready, &shown);
+        }
+        assert(nvn_replay_submitted() == first + 8 && nvn_replay_walked() == first);
+        assert(!pump() && fixture.count == 8 && fixture.draws == draws);
+        for (u32 i = 7; i; i--) {
+            random = random * 1664525u + 1013904223u;
+            u32 at = random % (i + 1), saved = order[i];
+            order[i] = order[at];
+            order[at] = saved;
+        }
+        for (u32 i = 0; i < 8; i++) {
+            u32 queue = order[i];
+            gw32(0xd00 + queue * 4ull, 1);
+            assert(pump() && fixture.count == 7 - i && fixture.draws == draws + i + 1);
+            completed |= 1u << queue;
+            u32 prefix = 0;
+            while (prefix < 8 && (completed & (1u << prefix))) prefix++;
+            assert(nvn_replay_walked() == first + prefix);
+        }
+        assert(!fixture.count && !fixture.npending && nvn_replay_walked() == nvn_replay_submitted());
+    }
+    for (u32 i = 0; i < 8; i++) nvn_replay_queue_free(queues[i]);
+    assert(!fixture.count && nvn_replay_walked() == nvn_replay_submitted());
+}
 static void bench_replay(void) {
     static const u32 record_counts[] = {1, 32, 256};
-    const u32 operations = 50000;
-    for (u32 workload = 0; workload < 3; workload++) {
-        u32 records = record_counts[workload], queue = nvn_replay_queue(), before = fixture.draws;
-        for (u32 i = 0; i < records; i++) {
-            NvnRecHdr draw = {OP_DRAW | (i + 1 == records ? NVN_REC_LAST : 0), 8};
-            memcpy(GP(0x200 + i * 8), &draw, sizeof draw);
+    static const u32 batch_sizes[] = {1, 8, 32};
+    for (u32 workload = 0; workload < 3; workload++)
+        for (u32 pattern = 0; pattern < 3; pattern++) {
+            u32 records = record_counts[workload], batch = batch_sizes[pattern];
+            u32 operations = batch == 1 ? 50000 : 51200;
+            u32 queue = nvn_replay_queue(), before = fixture.draws;
+            u64 submitted = nvn_replay_submitted();
+            assert(nvn_replay_walked() == submitted && !(operations % batch));
+            for (u32 i = 0; i < records; i++) {
+                NvnRecHdr draw = {OP_DRAW | (i + 1 == records ? NVN_REC_LAST : 0), 8};
+                memcpy(GP(0x200 + i * 8), &draw, sizeof draw);
+            }
+            snx_st_le64(GP(0x100), 0x200);
+            clock_t start = clock();
+            for (u32 i = 0; i < operations; i += batch) {
+                /* Queue at most half of the fake stream's 64 slots before the GPU thread consumes the batch. */
+                for (u32 k = 0; k < batch; k++) submit(queue);
+                drain();
+            }
+            clock_t ticks = clock() - start;
+            int exact = fixture.draws - before == operations * records && !fixture.count && !fixture.npending &&
+                        nvn_replay_submitted() == submitted + operations &&
+                        nvn_replay_walked() == submitted + operations;
+            assert(exact);
+            printf("GPU_HOTPATH_BENCH workload=replay-%u-batch-%u operations=%u ns=%llu exact=%d records=%u batch=%u\n",
+                   records, batch, operations, (unsigned long long)((u64)ticks * 1000000000ull / CLOCKS_PER_SEC),
+                   exact, records, batch);
+            nvn_replay_queue_free(queue);
         }
-        snx_st_le64(GP(0x100), 0x200);
-        clock_t start = clock();
-        for (u32 i = 0; i < operations; i++) {
-            submit(queue);
-            drain();
-        }
-        clock_t ticks = clock() - start;
-        int exact = fixture.draws - before == operations * records && !fixture.count && !fixture.npending;
-        assert(exact);
-        printf("GPU_HOTPATH_BENCH workload=replay-%u operations=%u ns=%llu exact=%d records=%u\n", records, operations,
-               (unsigned long long)((u64)ticks * 1000000000ull / CLOCKS_PER_SEC), exact, records);
-        nvn_replay_queue_free(queue);
-    }
 }
 int main(int argc, char** argv) {
     NvnRecHdr draw = {OP_DRAW, 8}, stride = {OP_COPY_STRIDE, 24}, end = {OP_END, 8};
@@ -520,6 +624,8 @@ int main(int argc, char** argv) {
     cross_queue_fences();
     present_order();
     retained_texture_snapshot();
+    completion_frontier();
+    completion_frontier_stress();
     if (argc == 2 && !strcmp(argv[1], "--bench-replay")) bench_replay();
     puts("nvn_queue_lifetime: ok");
     return 0;

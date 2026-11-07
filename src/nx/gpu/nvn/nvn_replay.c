@@ -401,16 +401,29 @@ static int run(void* arg) {
     free(j->snapshot);
     j->snapshot = NULL;
     pm_lock(&g_nvn.replay.lock);
+    u64 completed = j->serial;
     j->serial = 0;
     POOL_PUT(j);
     /* A later queue can finish while an older one waits. Reclaim command spill memory only through the first
-       unfinished submission, never by the number of jobs that happened to complete out of order. */
-    u64 frontier = __atomic_load_n(&g_nvn.replay.submitted, __ATOMIC_RELAXED);
-    for (u32 i = 0; i < NVN_JOBS; i++) {
-        u64 serial = g_nvn.replay.jobs[i].serial;
-        if (serial && serial <= frontier) frontier = serial - 1;
+       unfinished submission, never by the number of jobs that happened to complete out of order. A job without
+       a submission serial cannot move this frontier. Nor can a later completion while its oldest submit remains. */
+    if (completed && __atomic_load_n(&g_nvn.replay.walked, __ATOMIC_RELAXED) == completed - 1) {
+        u64 frontier = __atomic_load_n(&g_nvn.replay.submitted, __ATOMIC_RELAXED);
+        /* The oldest submit was also the newest: no unfinished submit remains. Avoid the 512-slot scan in this
+           common case, with no cached command-memory identity or extra state to invalidate. */
+        if (frontier != completed) {
+            u32 at = POOL_INDEX(g_nvn.replay.jobs, j);
+            for (u32 i = 0; i < NVN_JOBS; i++) {
+                if (++at == NVN_JOBS) at = 0;
+                u64 serial = g_nvn.replay.jobs[at].serial;
+                if (serial && serial <= frontier) frontier = serial - 1;
+                /* The next serial is the earliest unfinished submit that can remain. Normal allocation puts it
+                   just after this job. Completed gaps still require the full scan for the next live serial. */
+                if (frontier == completed) break;
+            }
+        }
+        __atomic_store_n(&g_nvn.replay.walked, frontier, __ATOMIC_RELEASE);
     }
-    __atomic_store_n(&g_nvn.replay.walked, frontier, __ATOMIC_RELEASE);
     pm_unlock(&g_nvn.replay.lock);
     return 1;
 }
